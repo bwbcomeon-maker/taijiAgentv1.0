@@ -369,10 +369,10 @@ def machine_request_filename(request: Mapping[str, Any]) -> str:
     return f"taiji-machine-request-{customer}-{label}-{short}-{generated}.json"
 
 
-def _read_license_device(path: Path) -> Optional[dict[str, Any]]:
+def _parse_license_device(raw: str) -> Optional[dict[str, Any]]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(raw)
+    except json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None
@@ -392,6 +392,14 @@ def _read_license_device(path: Path) -> Optional[dict[str, Any]]:
     }
 
 
+def _read_license_device(path: Path) -> Optional[dict[str, Any]]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _parse_license_device(raw)
+
+
 def _runtime_resource_parts(path: Path, profile_root: Path) -> tuple[Path, tuple[str, ...]]:
     root = profile_root.absolute()
     target = path.absolute()
@@ -402,6 +410,284 @@ def _runtime_resource_parts(path: Path, profile_root: Path) -> tuple[Path, tuple
     if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise _LicenseUserResourceError
     return root, relative.parts
+
+
+_MAX_LICENSE_RESOURCE_BYTES = 1024 * 1024
+
+
+def _read_posix_resource_handle(
+    *,
+    path: Path,
+    profile_root: Path | None,
+    required: bool,
+) -> Optional[str]:
+    target = path.absolute()
+    if profile_root is None:
+        root = Path(target.anchor)
+        try:
+            parts = target.relative_to(root).parts
+        except ValueError:
+            raise _LicenseUserResourceError from None
+    else:
+        root, parts = _runtime_resource_parts(target, profile_root)
+    if not parts:
+        raise _LicenseUserResourceError
+
+    trusted_runtime = profile_root is not None
+    uid = os.getuid()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fds: list[int] = []
+    file_fd: int | None = None
+    try:
+        current_fd = os.open(root, directory_flags)
+        directory_fds.append(current_fd)
+        if trusted_runtime and not _trusted_production_parent(
+            os.fstat(current_fd),
+            user_uid=uid,
+        ):
+            raise _LicenseUserResourceError
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if required:
+                    raise _LicenseUserResourceError from None
+                return None
+            directory_fds.append(child_fd)
+            current_fd = child_fd
+            if trusted_runtime and not _trusted_production_parent(
+                os.fstat(current_fd),
+                user_uid=uid,
+            ):
+                raise _LicenseUserResourceError
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current_fd)
+        except FileNotFoundError:
+            if required:
+                raise _LicenseUserResourceError from None
+            return None
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise _LicenseUserResourceError
+        if trusted_runtime:
+            _validate_posix_runtime_file_stat(file_stat, uid=uid)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                file_fd,
+                min(65536, _MAX_LICENSE_RESOURCE_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_LICENSE_RESOURCE_BYTES:
+                raise _LicenseUserResourceError
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            raise _LicenseUserResourceError from None
+    except _LicenseUserResourceError:
+        raise
+    except OSError:
+        raise _LicenseUserResourceError from None
+    finally:
+        if file_fd is not None:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
+def _windows_error_is_missing(exc: Exception) -> bool:
+    return isinstance(exc, FileNotFoundError) or getattr(exc, "winerror", None) in {
+        2,
+        3,
+    }
+
+
+def _open_windows_directory_shape(path: Path) -> Any:
+    import win32con
+    import win32file
+
+    handle = win32file.CreateFile(
+        str(path),
+        0,
+        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
+        None,
+        win32con.OPEN_EXISTING,
+        win32con.FILE_FLAG_BACKUP_SEMANTICS
+        | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    try:
+        attributes = int(win32file.GetFileInformationByHandle(handle)[0])
+        if not attributes & win32con.FILE_ATTRIBUTE_DIRECTORY or (
+            attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise _LicenseUserResourceError
+    except Exception:
+        _close_windows_handle(handle)
+        raise
+    return handle
+
+
+def _read_windows_resource_handle(
+    *,
+    path: Path,
+    profile_root: Path | None,
+    required: bool,
+) -> Optional[str]:
+    import win32con
+    import win32file
+
+    target = path.absolute()
+    if profile_root is None:
+        root = Path(target.anchor)
+        try:
+            parts = target.relative_to(root).parts
+        except ValueError:
+            raise _LicenseUserResourceError from None
+    else:
+        root, parts = _runtime_resource_parts(target, profile_root)
+    if not parts:
+        raise _LicenseUserResourceError
+
+    trusted_runtime = profile_root is not None
+    directory_handles: list[Any] = []
+    file_handle: Any = None
+    try:
+        current = root
+        opener = (
+            _open_trusted_windows_directory
+            if trusted_runtime
+            else _open_windows_directory_shape
+        )
+        directory_handles.append(opener(current))
+        for part in parts[:-1]:
+            current = current / part
+            try:
+                directory_handles.append(opener(current))
+            except Exception as exc:
+                if not required and _windows_error_is_missing(exc):
+                    return None
+                raise
+        final_path = current / parts[-1]
+        try:
+            file_handle = win32file.CreateFile(
+                str(final_path),
+                win32con.GENERIC_READ,
+                win32con.FILE_SHARE_READ,
+                None,
+                win32con.OPEN_EXISTING,
+                win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        except Exception as exc:
+            if not required and _windows_error_is_missing(exc):
+                return None
+            raise
+        information = win32file.GetFileInformationByHandle(file_handle)
+        attributes = int(information[0])
+        if (
+            attributes & win32con.FILE_ATTRIBUTE_DIRECTORY
+            or attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+            or int(information[7]) != 1
+        ):
+            raise _LicenseUserResourceError
+        if trusted_runtime:
+            owner_sid, current_sid, entries = _windows_security_snapshot(final_path)
+            if not _windows_acl_is_trusted(
+                owner_sid=owner_sid,
+                entries=entries,
+                current_user_sid=current_sid,
+                require_current_user_owner=True,
+            ):
+                raise _LicenseUserResourceError
+        size = int(win32file.GetFileSize(file_handle))
+        if size < 0 or size > _MAX_LICENSE_RESOURCE_BYTES:
+            raise _LicenseUserResourceError
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining:
+            error, chunk = win32file.ReadFile(file_handle, min(65536, remaining))
+            if error or not chunk or len(chunk) > remaining:
+                raise _LicenseUserResourceError
+            chunks.append(bytes(chunk))
+            remaining -= len(chunk)
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            raise _LicenseUserResourceError from None
+    except _LicenseUserResourceError:
+        raise
+    except Exception:
+        raise _LicenseUserResourceError from None
+    finally:
+        close_failed = False
+        if file_handle is not None:
+            try:
+                _close_windows_handle(file_handle)
+            except Exception:
+                close_failed = True
+        for directory_handle in reversed(directory_handles):
+            try:
+                _close_windows_handle(directory_handle)
+            except Exception:
+                close_failed = True
+        if close_failed:
+            raise _LicenseUserResourceError from None
+
+
+def _secure_read_resource(
+    *,
+    path: Path,
+    profile_root: Path | None,
+    required: bool,
+) -> Optional[str]:
+    if os.name == "posix":
+        return _read_posix_resource_handle(
+            path=path,
+            profile_root=profile_root,
+            required=required,
+        )
+    if os.name == "nt":
+        return _read_windows_resource_handle(
+            path=path,
+            profile_root=profile_root,
+            required=required,
+        )
+    raise _LicenseUserResourceError
+
+
+def _secure_read_runtime_resource(
+    *,
+    path: Path,
+    profile_root: Path,
+    required: bool,
+) -> Optional[str]:
+    return _secure_read_resource(
+        path=path,
+        profile_root=profile_root,
+        required=required,
+    )
+
+
+def _secure_read_candidate(path: Path) -> str:
+    raw = _secure_read_resource(
+        path=path,
+        profile_root=None,
+        required=True,
+    )
+    if raw is None:
+        raise _LicenseUserResourceError
+    return raw
 
 
 def _validate_posix_runtime_file_stat(file_stat: os.stat_result, *, uid: int) -> None:
@@ -507,6 +793,47 @@ def _close_windows_handle(handle: Any) -> None:
     win32api.CloseHandle(handle)
 
 
+def _rename_windows_handle(handle: Any, final_path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceIfExists", wintypes.BOOLEAN),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
+    name_bytes = str(final_path.absolute()).encode("utf-16-le")
+    buffer_size = ctypes.sizeof(_FileRenameInfo) + max(
+        0,
+        len(name_bytes) - ctypes.sizeof(wintypes.WCHAR),
+    )
+    buffer = ctypes.create_string_buffer(buffer_size)
+    information = _FileRenameInfo.from_buffer(buffer)
+    information.ReplaceIfExists = True
+    information.RootDirectory = None
+    information.FileNameLength = len(name_bytes)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + _FileRenameInfo.FileName.offset,
+        name_bytes,
+        len(name_bytes),
+    )
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    rename = kernel32.SetFileInformationByHandle
+    rename.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    rename.restype = wintypes.BOOL
+    raw_handle = int(getattr(handle, "handle", handle))
+    if not rename(raw_handle, 3, ctypes.byref(buffer), buffer_size):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _open_trusted_windows_directory(path: Path) -> Any:
     import win32con
     import win32file
@@ -550,8 +877,8 @@ def _secure_windows_atomic_write_runtime_resource(
     root, parts = _runtime_resource_parts(path, profile_root)
     directory_handles: list[Any] = []
     tmp_path: Path | None = None
+    file_handle: Any = None
     try:
-        import win32api
         import win32con
         import win32file
 
@@ -583,34 +910,41 @@ def _secure_windows_atomic_write_runtime_resource(
         )
         file_handle = win32file.CreateFile(
             str(tmp_path),
-            win32con.GENERIC_WRITE,
-            0,
+            win32con.GENERIC_WRITE | win32con.DELETE,
+            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_DELETE,
             None,
             win32con.CREATE_NEW,
             win32con.FILE_ATTRIBUTE_NORMAL
             | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
-        try:
-            information = win32file.GetFileInformationByHandle(file_handle)
-            attributes = int(information[0])
-            if (
-                attributes & win32con.FILE_ATTRIBUTE_DIRECTORY
-                or attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
-                or int(information[7]) != 1
-            ):
+        information = win32file.GetFileInformationByHandle(file_handle)
+        attributes = int(information[0])
+        if (
+            attributes & win32con.FILE_ATTRIBUTE_DIRECTORY
+            or attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+            or int(information[7]) != 1
+        ):
+            raise _LicenseUserResourceError
+        original_identity = (int(information[4]), int(information[8]), int(information[9]))
+        payload = text.encode("utf-8")
+        offset = 0
+        while offset < len(payload):
+            error, written = win32file.WriteFile(file_handle, payload[offset:])
+            if error or written <= 0 or written > len(payload) - offset:
                 raise _LicenseUserResourceError
-            win32file.WriteFile(file_handle, text.encode("utf-8"))
-            win32file.FlushFileBuffers(file_handle)
-        finally:
-            _close_windows_handle(file_handle)
-
-        win32api.MoveFileEx(
-            str(tmp_path),
-            str(final_path),
-            win32con.MOVEFILE_REPLACE_EXISTING | win32con.MOVEFILE_WRITE_THROUGH,
-        )
+            offset += int(written)
+        win32file.FlushFileBuffers(file_handle)
+        _rename_windows_handle(file_handle, final_path)
         tmp_path = None
+        renamed_information = win32file.GetFileInformationByHandle(file_handle)
+        renamed_identity = (
+            int(renamed_information[4]),
+            int(renamed_information[8]),
+            int(renamed_information[9]),
+        )
+        if renamed_identity != original_identity:
+            raise _LicenseUserResourceError
         _validate_windows_path_security(
             final_path,
             required=True,
@@ -622,12 +956,17 @@ def _secure_windows_atomic_write_runtime_resource(
     except Exception:
         raise _LicenseUserResourceError from None
     finally:
+        close_failed = False
+        if file_handle is not None:
+            try:
+                _close_windows_handle(file_handle)
+            except Exception:
+                close_failed = True
         if tmp_path is not None:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        close_failed = False
         for directory_handle in reversed(directory_handles):
             try:
                 _close_windows_handle(directory_handle)
@@ -702,13 +1041,18 @@ def _write_license_device(
             path.chmod(0o600)
         except OSError:
             pass
-    return _read_license_device(path) or {
-        "device_secret": secret,
-        "device_id": device_id,
-        "device_id_short": _machine_code_short(device_id),
-        "device_instance_id": data["device_instance_id"],
-        "created_at": data["created_at"],
-    }
+    if secure_root is not None:
+        raw = _secure_read_runtime_resource(
+            path=path,
+            profile_root=secure_root,
+            required=True,
+        )
+        persisted = _parse_license_device(raw or "")
+    else:
+        persisted = _read_license_device(path)
+    if persisted is None:
+        raise _LicenseUserResourceError
+    return persisted
 
 
 def _load_or_create_license_device(
@@ -724,7 +1068,18 @@ def _load_or_create_license_device(
         path = runtime_license_device_path()
     else:
         path = default_license_device_path(environ)
-    existing = _read_license_device(path)
+    if canonical:
+        try:
+            raw = _secure_read_runtime_resource(
+                path=path,
+                profile_root=PRODUCTION_USER_HOME,
+                required=False,
+            )
+        except _LicenseUserResourceError:
+            return None, "device resource unavailable"
+        existing = _parse_license_device(raw) if raw is not None else None
+    else:
+        existing = _read_license_device(path)
     if existing:
         return existing, None
     try:
@@ -733,8 +1088,8 @@ def _load_or_create_license_device(
             now_ts=now_ts,
             secure_root=PRODUCTION_USER_HOME if canonical else None,
         ), None
-    except (OSError, _LicenseUserResourceError) as exc:
-        return None, str(exc)
+    except (OSError, _LicenseUserResourceError):
+        return None, "device resource unavailable"
 
 
 def _clean_machine_signal(value: Any) -> Optional[str]:
@@ -1122,6 +1477,11 @@ def get_machine_fingerprint(
     return fingerprint
 
 
+def _runtime_machine_fingerprint() -> dict[str, Any]:
+    """Collect the canonical runtime identity without exposing an environment seam."""
+    return get_machine_fingerprint(use_cache=False)
+
+
 def build_machine_request(
     *,
     customer: str = "",
@@ -1353,13 +1713,10 @@ def _license_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _read_license_state(path: Path) -> Optional[dict[str, Any]]:
-    if not path.exists():
-        return None
+def _parse_license_state(raw: str) -> dict[str, Any]:
     try:
-        raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         raise _LicenseStateError from exc
     if not isinstance(data, dict):
         raise _LicenseStateError
@@ -1369,6 +1726,16 @@ def _read_license_state(path: Path) -> Optional[dict[str, Any]]:
     if not isinstance(last_value, (int, float)) or not math.isfinite(float(last_value)):
         raise _LicenseStateError
     return data
+
+
+def _read_license_state(path: Path) -> Optional[dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise _LicenseStateError from exc
+    return _parse_license_state(raw)
 
 
 def _last_successful_validation_at(state: Optional[Mapping[str, Any]]) -> Optional[float]:
@@ -1548,11 +1915,23 @@ def _write_license_state(
     token: str,
     secure_root: Path | None = None,
 ) -> None:
-    try:
-        state = _read_license_state(path)
-        last_ts = _last_successful_validation_at(state)
-    except _LicenseStateError:
-        raise
+    if secure_root is not None:
+        try:
+            raw_state = _secure_read_runtime_resource(
+                path=path,
+                profile_root=secure_root,
+                required=False,
+            )
+            state = _parse_license_state(raw_state) if raw_state is not None else None
+            last_ts = _last_successful_validation_at(state)
+        except (_LicenseUserResourceError, _LicenseStateError):
+            raise _LicenseStateError from None
+    else:
+        try:
+            state = _read_license_state(path)
+            last_ts = _last_successful_validation_at(state)
+        except _LicenseStateError:
+            raise
 
     now_int = int(now_ts)
     if last_ts is not None:
@@ -2069,6 +2448,9 @@ def _is_canonical_runtime_request(
     )
 
 
+_LICENSE_TOKEN_UNSET = object()
+
+
 def _load_license_status_impl(
     *,
     path: Optional[os.PathLike[str] | str] = None,
@@ -2078,6 +2460,7 @@ def _load_license_status_impl(
     environ: Optional[Mapping[str, str]] = None,
     check_state: bool = True,
     machine_fingerprint: Optional[Mapping[str, Any]] = None,
+    _license_token: object = _LICENSE_TOKEN_UNSET,
 ) -> LicenseStatus:
     env = environ if environ is not None else os.environ
     required = license_required(env)
@@ -2088,7 +2471,7 @@ def _load_license_status_impl(
     license_state_path = Path(state_path).expanduser() if state_path is not None else default_license_state_path(env)
     now_ts = time.time() if now is None else float(now)
 
-    if not license_path.exists():
+    if _license_token is _LICENSE_TOKEN_UNSET and not license_path.exists():
         return _status(
             "missing",
             required=required,
@@ -2098,17 +2481,20 @@ def _load_license_status_impl(
             machine_fingerprint=local_machine_fingerprint,
         )
 
-    try:
-        token = license_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return _status(
-            "invalid",
-            required=required,
-            code="license_unreadable",
-            message=MESSAGE_INVALID,
-            machine_binding_required=machine_required,
-            machine_fingerprint=local_machine_fingerprint,
-        )
+    if _license_token is _LICENSE_TOKEN_UNSET:
+        try:
+            token = license_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return _status(
+                "invalid",
+                required=required,
+                code="license_unreadable",
+                message=MESSAGE_INVALID,
+                machine_binding_required=machine_required,
+                machine_fingerprint=local_machine_fingerprint,
+            )
+    else:
+        token = str(_license_token).strip()
     if not token:
         return _status(
             "invalid",
@@ -2373,6 +2759,7 @@ def load_license_status(
                 code="license_product_version_untrusted",
                 message=MESSAGE_VERSION_UNTRUSTED,
             )
+        runtime_machine_fingerprint = _runtime_machine_fingerprint()
         validation_env = dict(env)
         validation_env[LICENSE_REQUIRED_ENV] = "1"
         validation_env[LICENSE_MACHINE_BINDING_REQUIRED_ENV] = "1"
@@ -2390,7 +2777,7 @@ def load_license_status(
             now=now,
             environ=validation_env,
             check_state=check_state,
-            machine_fingerprint=machine_fingerprint,
+            machine_fingerprint=runtime_machine_fingerprint,
         )
     else:
         if public_key:
@@ -2421,7 +2808,7 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
             message=MESSAGE_POLICY_OVERRIDE_FORBIDDEN,
         )
     try:
-        _validate_production_user_file(candidate, required=True)
+        candidate_token = _secure_read_candidate(candidate)
     except _LicenseUserResourceError:
         return _policy_error_status(
             policy,
@@ -2468,6 +2855,7 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
             code="license_product_version_untrusted",
             message=MESSAGE_VERSION_UNTRUSTED,
         )
+    runtime_machine_fingerprint = _runtime_machine_fingerprint()
     validation_env = dict(os.environ)
     validation_env[LICENSE_REQUIRED_ENV] = "1"
     validation_env[LICENSE_MACHINE_BINDING_REQUIRED_ENV] = "1"
@@ -2484,6 +2872,8 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
         public_key=public_key,
         environ=validation_env,
         check_state=False,
+        machine_fingerprint=runtime_machine_fingerprint,
+        _license_token=candidate_token,
     )
     return _attach_policy(status, policy)
 
