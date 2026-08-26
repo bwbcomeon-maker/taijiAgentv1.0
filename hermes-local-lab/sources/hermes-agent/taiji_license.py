@@ -68,6 +68,7 @@ LICENSE_DEVICE_FILE_ENV = "TAIJI_LICENSE_DEVICE_FILE"
 LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV = "TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING"
 VERSION_ENV = "TAIJI_AGENT_VERSION"
 PRODUCTION_LICENSE_POLICY_VERSION = 1
+RUNTIME_LICENSE_POLICY_NAME = "unified-runtime"
 PRODUCTION_PUBLIC_KEY_PATH = Path("/opt/taiji-agent/resources/license/signing-public.pem")
 PRODUCTION_PUBLIC_KEY_FINGERPRINT = "2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
 PRODUCTION_VERSION_PATH = Path("/opt/taiji-agent/VERSION")
@@ -143,10 +144,10 @@ class LicensePolicy:
     reject_environment_overrides: bool = False
 
 
-def production_license_policy() -> LicensePolicy:
-    """Return the immutable policy used by production entry points."""
+def runtime_license_policy() -> LicensePolicy:
+    """Return the immutable policy used by every real runtime entry point."""
     return LicensePolicy(
-        name="production",
+        name=RUNTIME_LICENSE_POLICY_NAME,
         version=PRODUCTION_LICENSE_POLICY_VERSION,
         required=True,
         machine_binding_required=True,
@@ -295,6 +296,12 @@ def default_license_state_path(environ: Optional[Mapping[str, str]] = None) -> P
     return base / PRODUCT / DEFAULT_LICENSE_STATE_FILENAME
 
 
+def runtime_license_state_path() -> Path:
+    if taiji_runtime_profile.is_installed_production():
+        return PRODUCTION_LICENSE_STATE_PATH
+    return default_license_state_path()
+
+
 def default_license_device_path(environ: Optional[Mapping[str, str]] = None) -> Path:
     if taiji_runtime_profile.is_installed_production():
         return PRODUCTION_LICENSE_DEVICE_PATH
@@ -305,6 +312,12 @@ def default_license_device_path(environ: Optional[Mapping[str, str]] = None) -> 
     config_home = str(env.get("XDG_CONFIG_HOME", "")).strip()
     base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
     return base / PRODUCT / DEFAULT_LICENSE_DEVICE_FILENAME
+
+
+def runtime_license_device_path() -> Path:
+    if taiji_runtime_profile.is_installed_production():
+        return PRODUCTION_LICENSE_DEVICE_PATH
+    return default_license_device_path()
 
 
 def _hash_id(value: str) -> str:
@@ -1378,6 +1391,45 @@ def _load_production_version() -> str:
     return version
 
 
+def _source_repo_root() -> Path:
+    root = Path(__file__).resolve().parents[3]
+    if not (root / ".git").exists():
+        raise OSError("source repository root is unavailable")
+    return root
+
+
+def _load_source_public_key(policy: LicensePolicy) -> str:
+    expected = str(policy.public_key_fingerprint or "").lower()
+    if not hmac.compare_digest(expected, PRODUCTION_PUBLIC_KEY_FINGERPRINT):
+        raise _LicensePublicKeyError
+    try:
+        path = _source_repo_root() / INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+            raise _LicensePublicKeyError
+        public_key_pem = path.read_text(encoding="utf-8").strip()
+        actual = _public_key_fingerprint(public_key_pem)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise _LicensePublicKeyError from None
+    if not hmac.compare_digest(actual, PRODUCTION_PUBLIC_KEY_FINGERPRINT):
+        raise _LicensePublicKeyError
+    return public_key_pem
+
+
+def _load_source_version() -> str:
+    try:
+        path = _source_repo_root() / "VERSION"
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+            raise _LicenseVersionError
+        version = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        raise _LicenseVersionError from None
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is None:
+        raise _LicenseVersionError
+    return version
+
+
 def _explicit_license_policy(env: Mapping[str, str]) -> LicensePolicy:
     required = license_required(env)
     return LicensePolicy(
@@ -1386,25 +1438,6 @@ def _explicit_license_policy(env: Mapping[str, str]) -> LicensePolicy:
         required=required,
         machine_binding_required=license_machine_binding_required(env, required=required),
         allow_legacy_machine_binding=legacy_machine_binding_allowed(env),
-    )
-
-
-def _source_development_status() -> LicenseStatus:
-    policy = LicensePolicy(
-        name=taiji_runtime_profile.installation_profile(),
-        version=PRODUCTION_LICENSE_POLICY_VERSION,
-        required=False,
-        machine_binding_required=False,
-        allow_legacy_machine_binding=False,
-    )
-    return _attach_policy(
-        LicenseStatus(
-            status="not_required",
-            required=False,
-            code="license_not_required",
-            machine_binding_required=False,
-        ),
-        policy,
     )
 
 
@@ -1431,7 +1464,7 @@ def _policy_error_status(policy: LicensePolicy, *, code: str, message: str) -> L
     )
 
 
-def _is_implicit_production_request(
+def _is_canonical_runtime_request(
     *,
     path: Optional[os.PathLike[str] | str],
     state_path: Optional[os.PathLike[str] | str],
@@ -1676,7 +1709,7 @@ def load_license_status(
     machine_fingerprint: Optional[Mapping[str, Any]] = None,
 ) -> LicenseStatus:
     env = environ if environ is not None else os.environ
-    production = _is_implicit_production_request(
+    canonical = _is_canonical_runtime_request(
         path=path,
         state_path=state_path,
         public_key=public_key,
@@ -1685,11 +1718,9 @@ def load_license_status(
         check_state=check_state,
         machine_fingerprint=machine_fingerprint,
     )
-    if production and not taiji_runtime_profile.is_installed_production():
-        return _source_development_status()
-    policy = production_license_policy() if production else _explicit_license_policy(env)
+    policy = runtime_license_policy() if canonical else _explicit_license_policy(env)
 
-    if production:
+    if canonical:
         if policy.reject_environment_overrides and any(
             name in env for name in PRODUCTION_SECURITY_OVERRIDE_ENVS
         ):
@@ -1698,7 +1729,9 @@ def load_license_status(
                 code="license_policy_override_forbidden",
                 message=MESSAGE_POLICY_OVERRIDE_FORBIDDEN,
             )
-        license_path = PRODUCTION_LICENSE_PATH
+        license_path = runtime_license_path()
+        license_state_path = runtime_license_state_path()
+        license_device_path = runtime_license_device_path()
         try:
             license_exists = _validate_production_user_file(license_path, required=False)
         except _LicenseUserResourceError:
@@ -1719,7 +1752,7 @@ def load_license_status(
                 policy,
             )
         try:
-            _validate_production_user_file(PRODUCTION_LICENSE_STATE_PATH, required=False)
+            _validate_production_user_file(license_state_path, required=False)
         except _LicenseUserResourceError:
             return _policy_error_status(
                 policy,
@@ -1727,7 +1760,7 @@ def load_license_status(
                 message=MESSAGE_STATE_UNTRUSTED,
             )
         try:
-            _validate_production_user_file(PRODUCTION_LICENSE_DEVICE_PATH, required=False)
+            _validate_production_user_file(license_device_path, required=False)
         except _LicenseUserResourceError:
             return _policy_error_status(
                 policy,
@@ -1735,7 +1768,10 @@ def load_license_status(
                 message=MESSAGE_DEVICE_UNTRUSTED,
             )
         try:
-            resolved_public_key = _load_production_public_key(policy)
+            if taiji_runtime_profile.is_installed_production():
+                resolved_public_key = _load_production_public_key(policy)
+            else:
+                resolved_public_key = _load_source_public_key(policy)
         except _LicensePublicKeyError:
             return _policy_error_status(
                 policy,
@@ -1743,7 +1779,10 @@ def load_license_status(
                 message=MESSAGE_PUBLIC_KEY_UNTRUSTED,
             )
         try:
-            product_version = _load_production_version()
+            if taiji_runtime_profile.is_installed_production():
+                product_version = _load_production_version()
+            else:
+                product_version = _load_source_version()
         except _LicenseVersionError:
             return _policy_error_status(
                 policy,
@@ -1755,14 +1794,14 @@ def load_license_status(
         validation_env[LICENSE_MACHINE_BINDING_REQUIRED_ENV] = "1"
         validation_env[LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV] = "0"
         validation_env[VERSION_ENV] = product_version
-        validation_env[LICENSE_DEVICE_FILE_ENV] = str(PRODUCTION_LICENSE_DEVICE_PATH)
+        validation_env[LICENSE_DEVICE_FILE_ENV] = str(license_device_path)
         validation_env.pop(LICENSE_PUBLIC_KEY_ENV, None)
         validation_env.pop(LICENSE_PUBLIC_KEY_FILE_ENV, None)
         validation_env.pop(LICENSE_FILE_ENV, None)
         validation_env.pop(LICENSE_STATE_FILE_ENV, None)
         status = _load_license_status_impl(
             path=license_path,
-            state_path=PRODUCTION_LICENSE_STATE_PATH,
+            state_path=license_state_path,
             public_key=resolved_public_key,
             now=now,
             environ=validation_env,
@@ -1790,18 +1829,7 @@ def load_license_status(
 def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
     """Validate an import candidate without allowing it to select runtime policy."""
     candidate = Path(path).expanduser()
-    if not taiji_runtime_profile.is_installed_production():
-        validation_env = dict(os.environ)
-        validation_env[LICENSE_REQUIRED_ENV] = "1"
-        validation_env[LICENSE_MACHINE_BINDING_REQUIRED_ENV] = "1"
-        validation_env[LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV] = "0"
-        return load_license_status(
-            path=candidate,
-            check_state=False,
-            environ=validation_env,
-        )
-
-    policy = production_license_policy()
+    policy = runtime_license_policy()
     if any(name in os.environ for name in PRODUCTION_SECURITY_OVERRIDE_ENVS):
         return _policy_error_status(
             policy,
@@ -1816,8 +1844,18 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
             code="license_file_untrusted",
             message=MESSAGE_FILE_UNTRUSTED,
         )
+    license_state_path = runtime_license_state_path()
+    license_device_path = runtime_license_device_path()
     try:
-        _validate_production_user_file(PRODUCTION_LICENSE_DEVICE_PATH, required=False)
+        _validate_production_user_file(license_state_path, required=False)
+    except _LicenseUserResourceError:
+        return _policy_error_status(
+            policy,
+            code="license_state_untrusted",
+            message=MESSAGE_STATE_UNTRUSTED,
+        )
+    try:
+        _validate_production_user_file(license_device_path, required=False)
     except _LicenseUserResourceError:
         return _policy_error_status(
             policy,
@@ -1825,7 +1863,10 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
             message=MESSAGE_DEVICE_UNTRUSTED,
         )
     try:
-        public_key = _load_production_public_key(policy)
+        if taiji_runtime_profile.is_installed_production():
+            public_key = _load_production_public_key(policy)
+        else:
+            public_key = _load_source_public_key(policy)
     except _LicensePublicKeyError:
         return _policy_error_status(
             policy,
@@ -1833,7 +1874,10 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
             message=MESSAGE_PUBLIC_KEY_UNTRUSTED,
         )
     try:
-        product_version = _load_production_version()
+        if taiji_runtime_profile.is_installed_production():
+            product_version = _load_production_version()
+        else:
+            product_version = _load_source_version()
     except _LicenseVersionError:
         return _policy_error_status(
             policy,
@@ -1845,14 +1889,14 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
     validation_env[LICENSE_MACHINE_BINDING_REQUIRED_ENV] = "1"
     validation_env[LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV] = "0"
     validation_env[VERSION_ENV] = product_version
-    validation_env[LICENSE_DEVICE_FILE_ENV] = str(PRODUCTION_LICENSE_DEVICE_PATH)
+    validation_env[LICENSE_DEVICE_FILE_ENV] = str(license_device_path)
     validation_env.pop(LICENSE_PUBLIC_KEY_ENV, None)
     validation_env.pop(LICENSE_PUBLIC_KEY_FILE_ENV, None)
     validation_env.pop(LICENSE_FILE_ENV, None)
     validation_env.pop(LICENSE_STATE_FILE_ENV, None)
     status = _load_license_status_impl(
         path=candidate,
-        state_path=PRODUCTION_LICENSE_STATE_PATH,
+        state_path=license_state_path,
         public_key=public_key,
         environ=validation_env,
         check_state=False,
@@ -1881,9 +1925,9 @@ def require_license_for_validation(
     if not status.required:
         return None
     if status.status == "valid":
-        if status.policy == "production":
-            license_path = PRODUCTION_LICENSE_PATH
-            license_state_path = PRODUCTION_LICENSE_STATE_PATH
+        if status.policy == RUNTIME_LICENSE_POLICY_NAME:
+            license_path = runtime_license_path()
+            license_state_path = runtime_license_state_path()
         else:
             license_path = Path(path).expanduser() if path is not None else default_license_path(env)
             license_state_path = Path(state_path).expanduser() if state_path is not None else default_license_state_path(env)

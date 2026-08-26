@@ -56,6 +56,35 @@ def required_missing_license(monkeypatch, tmp_path):
     monkeypatch.delenv("TAIJI_LICENSE_PUBLIC_KEY_FILE", raising=False)
 
 
+@pytest.fixture()
+def source_missing_license(monkeypatch, tmp_path):
+    license_path = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    state_path = tmp_path / "state/taiji-agent/license-state.json"
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "installation_profile",
+        lambda: "source-development",
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "runtime_license_path",
+        lambda: license_path,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "runtime_license_state_path",
+        lambda: state_path,
+        raising=False,
+    )
+    for name in taiji_license.PRODUCTION_SECURITY_OVERRIDE_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.mark.asyncio
 async def test_license_status_is_public_and_health_stays_available(required_missing_license):
     adapter = _make_adapter()
@@ -72,7 +101,7 @@ async def test_license_status_is_public_and_health_stays_available(required_miss
     assert data["status"] == "missing"
     assert data["code"] == "license_missing"
     assert data["required"] is True
-    assert data["policy"] == "production"
+    assert data["policy"] == "unified-runtime"
     assert data["policy_version"] == 1
     assert data["signing_key_fingerprint_short"] == "2dcff4f2b5e6"
     assert "path" not in data
@@ -107,6 +136,28 @@ async def test_disable_override_is_blocked_before_agent_creation(monkeypatch, tm
 
     assert resp.status == 403
     assert body["error"]["code"] == "license_policy_override_forbidden"
+    create_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_source_execution_is_blocked_before_agent_creation(source_missing_license):
+    adapter = _make_adapter()
+    app = _create_license_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        with patch.object(
+            adapter,
+            "_create_agent",
+            side_effect=AssertionError("source execution reached agent creation"),
+        ) as create_agent:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}]},
+            )
+            body = await resp.json()
+
+    assert resp.status == 403
+    assert body["error"]["code"] == "license_missing"
     create_agent.assert_not_called()
 
 
