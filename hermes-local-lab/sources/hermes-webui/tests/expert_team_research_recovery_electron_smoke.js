@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require('./unified_license_test_fixture');
 
 function loadPlaywright() {
   const moduleId = process.env.PLAYWRIGHT_NODE_PATH || 'playwright';
@@ -35,32 +40,34 @@ async function main() {
   const repoRoot = path.resolve(webuiDir, '..', '..', '..');
   const hostRoot = process.env.TAIJI_ELECTRON_HOST_ROOT || repoRoot;
   const appDir = path.join(repoRoot, 'apps', 'taiji-desktop');
+  const agentDir = path.join(repoRoot, 'hermes-local-lab', 'sources', 'hermes-agent');
   const electronBin = path.join(hostRoot, 'apps', 'taiji-desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
-  const pythonBin = process.env.HERMES_WEBUI_PYTHON || path.join(repoRoot, 'hermes-local-lab', 'sources', 'hermes-agent', 'venv', 'bin', 'python');
+  const pythonBin = process.env.HERMES_WEBUI_PYTHON || path.join(agentDir, 'venv', 'bin', 'python');
   const outDir = path.resolve(process.argv[process.argv.indexOf('--out-dir') + 1] || path.join(repoRoot, 'output', 'expert-team-research-recovery'));
   fs.mkdirSync(outDir, { recursive: true });
   const runtime = fs.mkdtempSync(path.join(outDir, 'runtime-'));
   const workspace = path.join(runtime, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-
-  const app = await _electron.launch({
-    executablePath: electronBin,
-    args: [appDir],
-    env: {
-      ...process.env,
-      TAIJI_SOURCE_MODE: 'development', TAIJI_SOURCE_ROOT: repoRoot,
-      TAIJI_AGENT_ROOT: path.join(repoRoot, 'hermes-local-lab'),
-      HERMES_WEBUI_PYTHON: pythonBin, TAIJI_AGENT_PYTHON: pythonBin, TAIJI_WEBUI_PYTHON: pythonBin,
-      TAIJI_AGENT_SYNC_PACKAGED_CONFIG: '0', TAIJI_AGENT_USE_USER_DIRS: '1',
-      TAIJI_LICENSE_REQUIRED: '0', TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: '0',
-      TAIJI_WORKSPACE: workspace, TAIJI_DESKTOP_USER_DATA_DIR: path.join(runtime, 'electron-user-data'),
-      XDG_CONFIG_HOME: path.join(runtime, 'config'), XDG_DATA_HOME: path.join(runtime, 'data'), XDG_STATE_HOME: path.join(runtime, 'state'),
-      AGENT_API_PORT: '22942', API_SERVER_PORT: '22942', WEBUI_PORT: '22987', TAIJI_WEBUI_PORT: '22987',
-    },
-    timeout: 90000,
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: 'development', TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: path.join(repoRoot, 'hermes-local-lab'),
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG: '0', TAIJI_AGENT_USE_USER_DIRS: '1',
+    TAIJI_RUNTIME_HOME: runtime,
+    TAIJI_WORKSPACE: workspace, TAIJI_DESKTOP_USER_DATA_DIR: path.join(runtime, 'electron-user-data'),
+    XDG_CONFIG_HOME: path.join(runtime, 'config'), XDG_DATA_HOME: path.join(runtime, 'data'), XDG_STATE_HOME: path.join(runtime, 'state'),
+    AGENT_API_PORT: '22942', API_SERVER_PORT: '22942', WEBUI_PORT: '22987', TAIJI_WEBUI_PORT: '22987',
   });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
 
+  let app = null;
   try {
+    app = await _electron.launch({
+      executablePath: electronBin,
+      args: [appDir],
+      env: runtimeEnv,
+      timeout: 90000,
+    });
     const page = await app.firstWindow({ timeout: 90000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 90000 });
     await page.waitForFunction(() => window.ExpertTeamV3 && typeof switchPanel === 'function' && typeof S !== 'undefined' && S._bootReady, null, { timeout: 90000 });
@@ -122,9 +129,10 @@ async function main() {
       responsiveLayouts.push(layout);
       await page.screenshot({ path: path.join(outDir, `research-provider-recovery-${viewport.width}.png`), fullPage: false });
     }
-    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ collapsedWhileBusy, resumeCalls: await page.evaluate(() => window.__researchResumeCalls), failureText, responsiveLayouts }, null, 2));
+    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ licenseFixture, collapsedWhileBusy, resumeCalls: await page.evaluate(() => window.__researchResumeCalls), failureText, responsiveLayouts }, null, 2));
   } finally {
-    await app.close();
+    if (app) await app.close().catch(() => {});
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
   }
 }
 

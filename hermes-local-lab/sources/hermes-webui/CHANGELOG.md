@@ -22,6 +22,7 @@
 
 ### Changed
 
+- Taiji source, test, candidate, and installed runtimes now use the same mandatory offline authorization policy. Development-mode exemption states and environment switches can no longer bypass signature, V3 machine binding, expiry/version, or clock-rollback checks; Settings continues to expose machine-code export, authorization import, and recovery status when execution is blocked.
 - Standalone expert-team availability now comes only from a complete server capability and launch profile. All seven supported tasks are selectable, while configuration conflicts fail closed as a task-configuration error instead of appearing as an unreleased document type.
 - Standalone expert-team stages now use server-owned allowed actions, idempotency keys, version checks, and authoritative attempt reservations so duplicate clicks, delayed responses, restarts, and recovery cannot create a second successful stage attempt.
 - Redesigned approval prompts for office users with plain-language Chinese summaries, explicit permission and impact fields, collapsed technical details, three primary decisions, and confirmed advanced authorization options. High-risk scanner findings no longer offer permanent authorization, and Enter no longer approves a visible card globally.

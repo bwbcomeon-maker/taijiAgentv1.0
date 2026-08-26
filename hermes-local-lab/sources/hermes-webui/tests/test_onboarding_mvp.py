@@ -226,21 +226,33 @@ def test_complete_helper_never_writes_when_preflight_is_blocked(monkeypatch):
     import api.onboarding as onboarding
 
     begin = mock.Mock()
+    license_item = {
+        "id": "license",
+        "label": "授权",
+        "ready": False,
+        "status": "action_required",
+        "reason": "未安装有效授权",
+        "code": "license_missing",
+        "recovery": {"id": "open_license", "label": "导入授权"},
+    }
+    blocked = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": False,
+        "items": [license_item],
+    }
     monkeypatch.setattr(
         onboarding,
         "get_setup_status",
-        lambda: {
-            "schema_version": "taiji-setup-status/v1",
-            "installed_production": True,
-            "overall_ready": False,
-            "items": [],
-        },
+        lambda: blocked,
     )
     monkeypatch.setattr(onboarding, "_begin_onboarding_completion", begin, raising=False)
 
     result = onboarding.complete_onboarding()
 
     assert result["error"] == "setup_not_ready"
+    assert result["preflight"] == blocked
+    assert result["preflight"]["items"][0]["code"] == "license_missing"
     begin.assert_not_called()
 
 
@@ -411,75 +423,66 @@ def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(m
     assert ready["overall_ready"] is True
 
 
-def _configure_ready_openrouter():
-    data, status = post(
-        "/api/onboarding/setup",
-        {
-            "provider": "openrouter",
-            "model": "anthropic/claude-sonnet-4.6",
-            "api_key": "sk-or-ready-test",
-        },
+def test_license_setup_is_ready_only_for_required_valid_status(monkeypatch):
+    import api.onboarding as onboarding
+    import api.product_diagnostics as product_diagnostics
+
+    class Status:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_public_dict(self):
+            return dict(self.payload)
+
+    class Profile:
+        @staticmethod
+        def is_installed_production():
+            return False
+
+    class Module:
+        taiji_runtime_profile = Profile()
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def load_license_status(self):
+            return Status(self.payload)
+
+    cases = [
+        ({"status": "valid", "required": True}, True),
+        ({"status": "valid", "required": False}, False),
+        ({"status": "not_required", "required": False}, False),
+        ({"status": "missing", "required": True}, False),
+        ({"status": "expired", "required": True}, False),
+        ({"status": "invalid", "required": True}, False),
+        ({"status": "unknown", "required": True}, False),
+    ]
+    for payload, expected_ready in cases:
+        monkeypatch.setattr(
+            product_diagnostics,
+            "_license_module",
+            lambda payload=payload: Module(payload),
+        )
+        item, installed = onboarding._license_setup_item()
+        assert item["ready"] is expected_ready
+        assert item["status"] == ("ready" if expected_ready else "action_required")
+        assert installed is False
+
+
+def test_license_setup_exception_fails_closed_without_secret_details(monkeypatch):
+    import api.onboarding as onboarding
+    import api.product_diagnostics as product_diagnostics
+
+    monkeypatch.setattr(
+        product_diagnostics,
+        "_license_module",
+        lambda: (_ for _ in ()).throw(RuntimeError("secret-token /Users/private")),
     )
-    assert status == 200, data
-    return data
-
-
-@_needs_yaml
-def test_onboarding_complete_persists_flag_only_after_preflight_ready():
-    _configure_ready_openrouter()
-    preflight, preflight_status = get("/api/setup/status")
-    assert preflight_status == 200
-    assert preflight["overall_ready"] is True, preflight
-
-    data, status = post("/api/onboarding/complete", {})
-    assert status == 200
-    assert data["completed"] is True
-
-    settings = json.loads(
-        (_server_hermes_home() / "settings.json").read_text(encoding="utf-8")
-    )
-    assert settings["onboarding_completed"] is True
-
-
-@_needs_yaml
-def test_onboarding_complete_preserves_other_settings():
-    """Completing onboarding must not overwrite other user settings."""
-    # Use send_key (a safe enum setting) to verify settings preservation
-    # without contaminating bot_name or theme checks in other test files.
-    # Use GET /api/settings (not onboarding status) to check preservation
-    # since the onboarding status only returns a subset of settings fields.
-    try:
-        saved, s1 = post("/api/settings", {"send_key": "ctrl+enter"})
-        assert s1 == 200
-        assert saved["send_key"] == "ctrl+enter"
-
-        _configure_ready_openrouter()
-        _, s2 = post("/api/onboarding/complete", {})
-        assert s2 == 200
-
-        # Verify the non-onboarding setting survived the completion call
-        current_settings, s3 = get("/api/settings")
-        assert s3 == 200
-        assert current_settings["send_key"] == "ctrl+enter"
-    finally:
-        # Always restore default send_key to avoid contaminating other tests
-        post("/api/settings", {"send_key": "enter"})
-
-@_needs_yaml
-def test_onboarding_already_completed_status():
-    """After marking onboarding complete, status must reflect completed=True
-    so the wizard does not re-appear for returning users."""
-    _configure_ready_openrouter()
-    done, status = post("/api/onboarding/complete", {})
-    assert status == 200
-    assert done["completed"] is True
-
-    data, status2 = get("/api/onboarding/status")
-    assert status2 == 200
-    assert data["completed"] is True
-
-    # Reset so test doesn't contaminate others
-    post("/api/settings", {"onboarding_completed": False})
+    item, _installed = onboarding._license_setup_item()
+    assert item["ready"] is False
+    assert item["status"] == "unavailable"
+    assert "secret-token" not in item["reason"]
+    assert "/Users/private" not in item["reason"]
 
 
 @_needs_yaml

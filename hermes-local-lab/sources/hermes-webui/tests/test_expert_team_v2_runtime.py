@@ -151,6 +151,7 @@ def _install_write_barrier(monkeypatch, runtime):
 
 def _configure_route(monkeypatch, routes, workspace, session):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
     monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: workspace)
     monkeypatch.setattr(routes, "get_session", lambda _sid, **_kwargs: session)
     monkeypatch.setattr(

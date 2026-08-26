@@ -1233,32 +1233,48 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             start_webui,
         )
 
-    def test_runtime_start_scripts_defer_license_policy_to_build_profile(self):
+    def test_runtime_start_chain_does_not_inject_license_path_overrides(self):
         runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
+        health_check = read_text("hermes-local-lab/scripts/health-check.sh")
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
         start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
         main_js = read_text("apps/taiji-desktop/src/main.js")
+        windows_runtime = read_text("apps/taiji-desktop/src/windows-runtime.js")
 
-        for text in (runtime_env, start_agent, start_webui, main_js):
-            self.assertIn("TAIJI_LICENSE_FILE", text)
-            self.assertIn("TAIJI_LICENSE_STATE_FILE", text)
+        for text in (
+            runtime_env,
+            health_check,
+            start_agent,
+            start_webui,
+            main_js,
+            windows_runtime,
+        ):
             self.assertNotIn("TAIJI_LICENSE_REQUIRED", text)
             self.assertNotIn("TAIJI_LICENSE_MACHINE_BINDING_REQUIRED", text)
             self.assertNotIn("HERMES_LICENSE", text)
             self.assertNotIn("HERMES_LICENSE_FILE", text)
 
-        self.assertIn(
-            'TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"',
-            runtime_env,
-        )
-        self.assertIn(
-            'TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"',
-            runtime_env,
-        )
+        for diagnostics_script in (runtime_env, health_check):
+            self.assertIn(
+                'TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"',
+                diagnostics_script,
+            )
+            self.assertIn(
+                'TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"',
+                diagnostics_script,
+            )
+            self.assertIn(
+                "builtin export -n TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE",
+                diagnostics_script,
+            )
+        for start_script in (start_agent, start_webui):
+            self.assertNotIn("export TAIJI_LICENSE_FILE", start_script)
+            self.assertNotIn("export TAIJI_LICENSE_STATE_FILE", start_script)
         self.assertIn('accountHome = String(os.userInfo().homedir || "").trim()', main_js)
         self.assertIn("env.TAIJI_ACCOUNT_HOME = accountHome", main_js)
-        self.assertIn('path.join(accountHome, ".config", "taiji-agent", "licenses", "active-license.jwt")', main_js)
-        self.assertIn('path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json")', main_js)
+        for desktop_runtime in (main_js, windows_runtime):
+            self.assertIn("deleteLicensePathOverrides(env)", desktop_runtime)
+            self.assertIn("key.toUpperCase()", desktop_runtime)
         self.assertNotIn("os.homedir()", main_js)
 
     def test_installed_payload_profile_is_generated_before_sourceless_compile(self):

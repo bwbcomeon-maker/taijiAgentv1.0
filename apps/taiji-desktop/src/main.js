@@ -27,6 +27,16 @@ const DEFAULT_AGENT_PORT = 18642;
 const DEFAULT_WEBUI_PORT = 18787;
 const DESKTOP_CHROME_BACKGROUND = "#eaf7ff";
 const SMOKE_TEST = process.env.TAIJI_DESKTOP_SMOKE_TEST === "1";
+const LICENSE_PATH_OVERRIDE_NAMES = new Set([
+  "TAIJI_LICENSE_FILE",
+  "TAIJI_LICENSE_STATE_FILE",
+]);
+
+function deleteLicensePathOverrides(env) {
+  for (const key of Object.keys(env)) {
+    if (LICENSE_PATH_OVERRIDE_NAMES.has(key.toUpperCase())) delete env[key];
+  }
+}
 
 let launchProfile = null;
 let launchProfileError = null;
@@ -481,6 +491,7 @@ function runScript(scriptName, env, logFile) {
 function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  deleteLicensePathOverrides(env);
   const accountHome = systemAccountHome();
   const desktopAccessToken = crypto.randomBytes(32).toString("hex");
   env.TAIJI_AGENT_ROOT = labDir;
@@ -523,13 +534,11 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const stateDir = process.env.TAIJI_STATE_DIR || userStateDir();
   const tmpDir = process.env.TAIJI_AGENT_TMP_DIR || path.join(stateDir, "tmp");
   env.TAIJI_ACCOUNT_HOME = accountHome;
-  env.TAIJI_LICENSE_FILE = path.join(accountHome, ".config", "taiji-agent", "licenses", "active-license.jwt");
   env.TAIJI_STATE_DIR = stateDir;
   env.TAIJI_AGENT_TMP_DIR = tmpDir;
   env.TMPDIR = tmpDir;
   env.TMP = tmpDir;
   env.TEMP = tmpDir;
-  env.TAIJI_LICENSE_STATE_FILE = path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json");
   if (process.platform === "win32") {
     const layout = resolveWindowsRuntimeLayout({
       installRoot: path.resolve(labDir, ".."),

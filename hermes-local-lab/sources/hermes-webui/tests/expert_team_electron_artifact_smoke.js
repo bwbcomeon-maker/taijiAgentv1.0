@@ -4,6 +4,11 @@
  */
 const fs = require("fs");
 const path = require("path");
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require("./unified_license_test_fixture");
 
 function parseArgs(argv) {
   const args = { outDir: "" };
@@ -36,7 +41,9 @@ const { _electron } = loadPlaywright();
 const repoRoot = path.resolve(__dirname, "..", "..", "..", "..");
 const appDir = path.join(repoRoot, "apps", "taiji-desktop");
 const labDir = path.join(repoRoot, "hermes-local-lab");
+const agentDir = path.join(labDir, "sources", "hermes-agent");
 const electronBin = path.join(appDir, "node_modules", "electron", "dist", "Electron.app", "Contents", "MacOS", "Electron");
+const pythonBin = process.env.TAIJI_TEST_PYTHON || path.join(agentDir, "venv", "bin", "python");
 const outDir = path.resolve(cli.outDir || path.join(repoRoot, "output", "playwright"));
 
 function assertState(condition, message, detail) {
@@ -483,34 +490,40 @@ async function verifyRolloutGate(page) {
 
 async function main() {
   assertState(fs.existsSync(electronBin), `Electron binary not found: ${electronBin}`);
+  assertState(fs.existsSync(pythonBin), `Python binary not found: ${pythonBin}`);
   fs.mkdirSync(outDir, { recursive: true });
   const runtimeBase = path.join(repoRoot, "output", "playwright");
   fs.mkdirSync(runtimeBase, { recursive: true });
   const tmpRoot = fs.mkdtempSync(path.join(runtimeBase, "electron-expert-team-runtime-"));
   const workspace = path.join(tmpRoot, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
-
-  const app = await _electron.launch({
-    executablePath: electronBin,
-    args: [appDir],
-    env: {
-      ...process.env,
-      TAIJI_AGENT_ROOT: labDir,
-      TAIJI_AGENT_USE_USER_DIRS: "1",
-      TAIJI_DESKTOP_USER_DATA_DIR: path.join(tmpRoot, "electron-user-data"),
-      XDG_CONFIG_HOME: path.join(tmpRoot, "config"),
-      XDG_DATA_HOME: path.join(tmpRoot, "data"),
-      XDG_STATE_HOME: path.join(tmpRoot, "state"),
-      AGENT_API_PORT: "19942",
-      API_SERVER_PORT: "19942",
-      WEBUI_PORT: "19987",
-      TAIJI_WEBUI_PORT: "19987",
-      TAIJI_LICENSE_REQUIRED: "0",
-      TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: "0",
-    },
-    timeout: 90000,
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: "development",
+    TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: labDir,
+    TAIJI_AGENT_USE_USER_DIRS: "1",
+    TAIJI_DESKTOP_USER_DATA_DIR: path.join(tmpRoot, "electron-user-data"),
+    TAIJI_RUNTIME_HOME: path.join(tmpRoot, "runtime"),
+    TAIJI_WORKSPACE: workspace,
+    XDG_CONFIG_HOME: path.join(tmpRoot, "config"),
+    XDG_DATA_HOME: path.join(tmpRoot, "data"),
+    XDG_STATE_HOME: path.join(tmpRoot, "state"),
+    AGENT_API_PORT: "19942",
+    API_SERVER_PORT: "19942",
+    WEBUI_PORT: "19987",
+    TAIJI_WEBUI_PORT: "19987",
   });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
+
+  let app = null;
   try {
+    app = await _electron.launch({
+      executablePath: electronBin,
+      args: [appDir],
+      env: runtimeEnv,
+      timeout: 90000,
+    });
     const page = await app.firstWindow({ timeout: 90000 });
     await page.waitForLoadState("domcontentloaded", { timeout: 90000 });
     await page.waitForFunction(
@@ -1173,6 +1186,7 @@ async function main() {
     }
 
     console.log("EXPERT TEAM ELECTRON SMOKE OK", JSON.stringify({
+      license_fixture: licenseFixture,
       screenshots: [
         path.join(outDir, "expert-team-plan-a-confirmation-open.png"),
         path.join(outDir, "expert-team-plan-a-collaboration-tab-content-team.png"),
@@ -1196,6 +1210,7 @@ async function main() {
     }, null, 2));
   } finally {
     if (app) await app.close().catch(() => {});
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
   }
 }
 

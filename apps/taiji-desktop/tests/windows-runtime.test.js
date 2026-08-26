@@ -70,13 +70,19 @@ test("Packaged nav policy exposes exactly the four approved entries", () => {
   assert.deepEqual(visible, ["chat", "tasks", "writing", "settings"]);
 });
 
-test("Windows environment is private and uses per-user state", () => {
+test("Windows environment is private and omits license path overrides", () => {
   const layout = resolveWindowsRuntimeLayout({
     installRoot: "C:\\Program Files\\Taiji Agent",
-    localAppData: "C:\\Users\\Customer\\AppData\\Local",
+    localAppData: "D:\\Poisoned\\AppData\\Local",
   });
   const env = buildWindowsRuntimeEnvironment({
-    baseEnv: { SystemRoot: "C:\\Windows", PRESERVE_ME: "yes" },
+    baseEnv: {
+      SystemRoot: "C:\\Windows",
+      PRESERVE_ME: "yes",
+      TAIJI_ACCOUNT_HOME: "C:\\Users\\Customer",
+      taiji_license_file: "C:\\poisoned\\license.jwt",
+      TaIjI_LiCeNsE_sTaTe_FiLe: "C:\\poisoned\\state.json",
+    },
     layout,
     agentPort: 18642,
     webuiPort: 18787,
@@ -84,7 +90,7 @@ test("Windows environment is private and uses per-user state", () => {
     apiServerKey: "api-key",
   });
   assert.equal(env.TAIJI_WINDOWS_CANDIDATE, "1");
-  assert.equal(env.TAIJI_RUNTIME_HOME, "C:\\Users\\Customer\\AppData\\Local\\Taiji Agent\\runtime-home");
+  assert.equal(env.TAIJI_RUNTIME_HOME, "D:\\Poisoned\\AppData\\Local\\Taiji Agent\\runtime-home");
   assert.equal(env.TAIJI_STATE_DIR, layout.stateDir);
   assert.equal(env.TAIJI_AGENT_USE_USER_DIRS, "1");
   assert.equal(env.TAIJI_AGENT_LOG_DIR, layout.logDir);
@@ -96,12 +102,39 @@ test("Windows environment is private and uses per-user state", () => {
   assert.equal(env.WEBUI_HOST, "127.0.0.1");
   assert.equal(env.WEBUI_PORT, "18787");
   assert.equal(env.TAIJI_DESKTOP_ONLY, "1");
-  assert.equal(env.TAIJI_ACCOUNT_HOME, layout.userRoot);
+  assert.equal(env.TAIJI_ACCOUNT_HOME, "C:\\Users\\Customer");
   assert.equal(env.HERMES_WEBUI_AUTO_INSTALL, "0");
   assert.equal(env.TAIJI_WEBUI_GATEWAY_BASE_URL, "http://127.0.0.1:18642");
   assert.equal(env.TERMINAL_CWD, layout.workspace);
-  assert.equal(env.TAIJI_LICENSE_FILE, path.win32.join(layout.licenseDir, "active-license.jwt"));
+  assert.deepEqual(
+    Object.keys(env).filter((key) => ["TAIJI_LICENSE_FILE", "TAIJI_LICENSE_STATE_FILE"].includes(key.toUpperCase())),
+    [],
+  );
   assert.equal(env.TMPDIR, layout.tmpDir);
   assert.equal(env.PRESERVE_ME, "yes");
   assert.equal(env.PATH, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\python;C:\\Windows\\System32");
+});
+
+test("Windows environment requires an absolute system account home", () => {
+  const layout = resolveWindowsRuntimeLayout({
+    installRoot: "C:\\Program Files\\Taiji Agent",
+    localAppData: "D:\\Poisoned\\AppData\\Local",
+  });
+  const build = (baseEnv) => buildWindowsRuntimeEnvironment({
+    baseEnv,
+    layout,
+    agentPort: 18642,
+    webuiPort: 18787,
+    desktopAccessToken: "desktop-token",
+    apiServerKey: "api-key",
+  });
+
+  assert.throws(
+    () => build({ SystemRoot: "C:\\Windows" }),
+    /baseEnv\.TAIJI_ACCOUNT_HOME must be an absolute Windows path/,
+  );
+  assert.throws(
+    () => build({ SystemRoot: "C:\\Windows", TAIJI_ACCOUNT_HOME: "relative\\home" }),
+    /baseEnv\.TAIJI_ACCOUNT_HOME must be an absolute Windows path/,
+  );
 });

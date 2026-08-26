@@ -445,8 +445,9 @@ TAIJI_ACCOUNT_HOME="$_TAIJI_CANONICAL_ACCOUNT_HOME"
 TAIJI_LICENSE_FILE="$TAIJI_ACCOUNT_HOME/.config/taiji-agent/licenses/active-license.jwt"
 TAIJI_LICENSE_STATE_FILE="$TAIJI_ACCOUNT_HOME/.local/state/taiji-agent/license-state.json"
 _taiji_readonly_command_status=0
-builtin export \
-  TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE ||
+builtin export TAIJI_ACCOUNT_HOME ||
+  _taiji_readonly_command_status=$?
+builtin export -n TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE ||
   _taiji_readonly_command_status=$?
 builtin readonly \
   TAIJI_ACCOUNT_HOME TAIJI_LICENSE_FILE TAIJI_LICENSE_STATE_FILE ||
@@ -454,8 +455,9 @@ builtin readonly \
 
 # A same-shell function may hide either "readonly" or "builtin". Do not trust
 # the command status alone: assignment-only subshells are language-level probes
-# of the postcondition promised by this script. Successful return means all
-# three canonical paths are exported and cannot be reassigned.
+# of the postcondition promised by this script. Successful return means the
+# account home is exported, while the two local diagnostic paths are readonly
+# and absent from child-process environments.
 _taiji_readonly_boundary_violation=0
 if (TAIJI_ACCOUNT_HOME=__taiji_readonly_probe__) 2>/dev/null; then
   _taiji_readonly_boundary_violation=1
@@ -468,10 +470,10 @@ if (TAIJI_LICENSE_STATE_FILE=__taiji_readonly_probe__) 2>/dev/null; then
 fi
 if ! /usr/bin/env /bin/sh -c '
   case "${TAIJI_ACCOUNT_HOME-}" in "$1") ;; *) exit 1 ;; esac
-  case "${TAIJI_LICENSE_FILE-}" in "$2") ;; *) exit 1 ;; esac
-  case "${TAIJI_LICENSE_STATE_FILE-}" in "$3") ;; *) exit 1 ;; esac
+  case "${TAIJI_LICENSE_FILE+x}" in "") ;; *) exit 1 ;; esac
+  case "${TAIJI_LICENSE_STATE_FILE+x}" in "") ;; *) exit 1 ;; esac
 ' taiji-readonly-export-probe \
-  "$TAIJI_ACCOUNT_HOME" "$TAIJI_LICENSE_FILE" "$TAIJI_LICENSE_STATE_FILE"; then
+  "$TAIJI_ACCOUNT_HOME"; then
   _taiji_readonly_boundary_violation=1
 fi
 case "$_taiji_readonly_boundary_violation" in

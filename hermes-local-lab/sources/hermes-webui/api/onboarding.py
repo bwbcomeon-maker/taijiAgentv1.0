@@ -81,11 +81,9 @@ def _license_setup_item() -> tuple[dict, bool]:
         public = license_module.load_license_status().to_public_dict()
         status = str(public.get("status") or "").strip().lower()
         required = bool(public.get("required"))
-        ready = (not required) or status in {"valid", "not_required"}
-        if ready and required:
+        ready = required and status == "valid"
+        if ready:
             reason = "产品授权有效，可以离线使用。"
-        elif ready:
-            reason = "源码开发模式不要求产品授权。"
         else:
             reason = str(public.get("message") or "未检测到可用授权，请先导入离线授权文件。")
         item = _setup_item(

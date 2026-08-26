@@ -19,6 +19,11 @@ const {
   inspectTaijiNavigation,
   installDailyEquivalentRuntimeConfig,
 } = require("./electron_acceptance_provenance");
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require("./unified_license_test_fixture");
 
 function parseArgs(argv) {
   const result = { outDir: "" };
@@ -90,7 +95,7 @@ function readPid(file) {
   }
 }
 
-function prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome, workspace, imageSource }) {
+function prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome, workspace, imageSource, runtimeEnv }) {
   const python = String.raw`
 import json
 import sys
@@ -279,11 +284,10 @@ print(json.dumps({
 }))
 `;
   const env = {
-    ...process.env,
+    ...runtimeEnv,
     TAIJI_RUNTIME_HOME: runtimeHome,
     TAIJI_WEBUI_STATE_DIR: path.join(runtimeHome, "web"),
     TAIJI_WEBUI_DEFAULT_WORKSPACE: workspace,
-    TAIJI_LICENSE_REQUIRED: "0",
     PYTHONPATH: [webuiDir, agentDir].join(path.delimiter),
   };
   const result = spawnSync(pythonBin, ["-c", python, runtimeHome, workspace, imageSource], {
@@ -294,26 +298,11 @@ print(json.dumps({
   return JSON.parse(result.stdout);
 }
 
-async function launchDesktop({ _electron, electronBin, appDir, labDir, pythonBin, dirs }) {
+async function launchDesktop({ _electron, electronBin, appDir, runtimeEnv }) {
   return _electron.launch({
     executablePath: electronBin,
     args: [appDir],
-    env: {
-      ...process.env,
-      TAIJI_AGENT_ROOT: labDir,
-      TAIJI_AGENT_USE_USER_DIRS: "1",
-      TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
-      XDG_CONFIG_HOME: dirs.config,
-      XDG_DATA_HOME: dirs.data,
-      XDG_STATE_HOME: dirs.state,
-      TAIJI_RUNTIME_HOME: dirs.runtimeHome,
-      TAIJI_WORKSPACE: dirs.workspace,
-      TAIJI_AGENT_PYTHON: pythonBin,
-      TAIJI_WEBUI_PYTHON: pythonBin,
-      TAIJI_LICENSE_REQUIRED: "0",
-      TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: "0",
-      TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
-    },
+    env: runtimeEnv,
     timeout: 120000,
   });
 }
@@ -393,7 +382,30 @@ async function main() {
   const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
   const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir });
   const imageSource = path.join(webuiDir, "static", "assets", "taiji", "background", "background-grid.png");
-  const fixture = prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome: dirs.runtimeHome, workspace: dirs.workspace, imageSource });
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: "development",
+    TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: labDir,
+    TAIJI_AGENT_USE_USER_DIRS: "1",
+    TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
+    XDG_CONFIG_HOME: dirs.config,
+    XDG_DATA_HOME: dirs.data,
+    XDG_STATE_HOME: dirs.state,
+    TAIJI_RUNTIME_HOME: dirs.runtimeHome,
+    TAIJI_WORKSPACE: dirs.workspace,
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
+  });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
+  const fixture = prepareFixture({
+    pythonBin: runtimeEnv.TAIJI_AGENT_PYTHON,
+    webuiDir,
+    agentDir,
+    runtimeHome: dirs.runtimeHome,
+    workspace: dirs.workspace,
+    imageSource,
+    runtimeEnv,
+  });
   const baselineElectronPids = pgrepElectron();
   const pidFiles = {
     agent: path.join(dirs.state, "taiji-agent", "logs", "agent.pid"),
@@ -404,7 +416,7 @@ async function main() {
   let navigationParity = null;
   let app = null;
   try {
-    app = await launchDesktop({ _electron, electronBin, appDir, labDir, pythonBin, dirs });
+    app = await launchDesktop({ _electron, electronBin, appDir, runtimeEnv });
     let page = await readyPage(app, "uiartifactdefault");
     launches.push({ electron: app.process().pid, agent: readPid(pidFiles.agent), web: readPid(pidFiles.web) });
 
@@ -757,7 +769,7 @@ async function main() {
       .filter(pid => baselineElectronPids.includes(pid));
     assertState(baselineSignaledByCleanup.length === 0, "cleanup targeted a pre-existing Electron process", { baselineSignaledByCleanup });
 
-    app = await launchDesktop({ _electron, electronBin, appDir, labDir, pythonBin, dirs });
+    app = await launchDesktop({ _electron, electronBin, appDir, runtimeEnv });
     page = await readyPage(app, "uiartifactsuccess");
     launches.push({ electron: app.process().pid, agent: readPid(pidFiles.agent), web: readPid(pidFiles.web) });
     await page.waitForFunction(() => {
@@ -811,6 +823,7 @@ async function main() {
         "09-narrow.png": "640px narrow Electron window",
       },
       provider: "safe local fixture; external image provider not invoked",
+      license_fixture: licenseFixture,
       provider_realtime_verified: false,
       persistence: "production Session + Artifact Registry + HTTP media authorization",
       artifact_id: fixture.artifact_id,
@@ -882,6 +895,7 @@ async function main() {
     if (app) await app.close().catch(() => {});
     const ownedPids = launches.flatMap(item => Object.values(item)).filter(Boolean);
     await terminateOwnedPids(ownedPids).catch(() => {});
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
     fs.rmSync(harnessRoot, { recursive: true, force: true });
   }
 }

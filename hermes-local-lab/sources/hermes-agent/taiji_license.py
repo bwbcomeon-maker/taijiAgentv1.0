@@ -152,6 +152,8 @@ MESSAGE_FILE_UNTRUSTED = "授权文件安全属性不符合要求，请重新导
 MESSAGE_STATE_UNTRUSTED = "授权状态文件安全属性不符合要求，请联系管理员处理。"
 MESSAGE_DEVICE_UNTRUSTED = "设备身份文件安全属性不符合要求，请联系管理员处理。"
 MESSAGE_VERSION_UNTRUSTED = "产品版本信息不可信，请联系管理员修复安装。"
+MESSAGE_INSTALL_FAILED = "授权文件无法安全保存，请重试；持续失败时联系管理员。"
+MESSAGE_FILE_TOO_LARGE = "授权文件过大，请重新选择。"
 
 _MACHINE_FINGERPRINT_CACHE: Optional[dict[str, Any]] = None
 
@@ -2830,23 +2832,18 @@ def load_license_status(
     return _attach_policy(status, policy)
 
 
-def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
-    """Validate an import candidate without allowing it to select runtime policy."""
-    candidate = Path(path).expanduser()
+def _validate_license_token_for_import(
+    candidate_token: str,
+    *,
+    candidate_path: Path,
+) -> LicenseStatus:
+    """Validate in-memory import content against the immutable runtime policy."""
     policy = runtime_license_policy()
     if any(name in os.environ for name in PRODUCTION_SECURITY_OVERRIDE_ENVS):
         return _policy_error_status(
             policy,
             code="license_policy_override_forbidden",
             message=MESSAGE_POLICY_OVERRIDE_FORBIDDEN,
-        )
-    try:
-        candidate_token = _secure_read_candidate(candidate)
-    except _LicenseUserResourceError:
-        return _policy_error_status(
-            policy,
-            code="license_file_untrusted",
-            message=MESSAGE_FILE_UNTRUSTED,
         )
     license_state_path = runtime_license_state_path()
     license_device_path = runtime_license_device_path()
@@ -2900,7 +2897,7 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
     validation_env.pop(LICENSE_FILE_ENV, None)
     validation_env.pop(LICENSE_STATE_FILE_ENV, None)
     status = _load_license_status_impl(
-        path=candidate,
+        path=candidate_path,
         state_path=license_state_path,
         public_key=public_key,
         environ=validation_env,
@@ -2909,6 +2906,84 @@ def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
         _license_token=candidate_token,
     )
     return _attach_policy(status, policy)
+
+
+def validate_license_candidate(path: os.PathLike[str] | str) -> LicenseStatus:
+    """Validate an import candidate without allowing it to select runtime policy."""
+    candidate = Path(path).expanduser()
+    policy = runtime_license_policy()
+    if any(name in os.environ for name in PRODUCTION_SECURITY_OVERRIDE_ENVS):
+        return _policy_error_status(
+            policy,
+            code="license_policy_override_forbidden",
+            message=MESSAGE_POLICY_OVERRIDE_FORBIDDEN,
+        )
+    try:
+        candidate_token = _secure_read_candidate(candidate)
+    except _LicenseUserResourceError:
+        return _policy_error_status(
+            policy,
+            code="license_file_untrusted",
+            message=MESSAGE_FILE_UNTRUSTED,
+        )
+    return _validate_license_token_for_import(
+        candidate_token,
+        candidate_path=candidate,
+    )
+
+
+def install_license_token(token: str) -> LicenseStatus:
+    """Validate and atomically install one token into the canonical account profile."""
+    policy = runtime_license_policy()
+    if not isinstance(token, str):
+        return _policy_error_status(
+            policy,
+            code="license_invalid",
+            message=MESSAGE_INVALID,
+        )
+    normalized = token.strip()
+    if not normalized:
+        return _policy_error_status(
+            policy,
+            code="license_invalid",
+            message=MESSAGE_INVALID,
+        )
+    if len(normalized.encode("utf-8")) > _MAX_LICENSE_RESOURCE_BYTES:
+        return _policy_error_status(
+            policy,
+            code="license_file_too_large",
+            message=MESSAGE_FILE_TOO_LARGE,
+        )
+
+    target = runtime_license_path()
+    status = _validate_license_token_for_import(
+        normalized,
+        candidate_path=target,
+    )
+    if status.status != "valid":
+        return status
+
+    serialized = normalized + "\n"
+    try:
+        _secure_atomic_write_runtime_resource(
+            path=target,
+            text=serialized,
+            profile_root=PRODUCTION_USER_HOME,
+        )
+        persisted = _secure_read_runtime_resource(
+            path=target,
+            profile_root=PRODUCTION_USER_HOME,
+            required=True,
+        )
+        if persisted is None or not hmac.compare_digest(persisted, serialized):
+            raise _LicenseUserResourceError
+    except Exception:
+        return _policy_error_status(
+            policy,
+            code="license_install_failed",
+            message=MESSAGE_INSTALL_FAILED,
+        )
+    return load_license_status()
 
 
 def require_license_for_validation(

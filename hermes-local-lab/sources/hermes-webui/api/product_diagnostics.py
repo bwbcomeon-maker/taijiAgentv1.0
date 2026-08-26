@@ -128,7 +128,7 @@ def _probe_license() -> dict[str, object]:
     public = _license_module().load_license_status().to_public_dict()
     status = str(public.get("status") or "").strip().lower()
     required = bool(public.get("required"))
-    if not required or status in {"valid", "not_required"}:
+    if required and status == "valid":
         return {"status": "ready"}
     if status in {"missing", "invalid", "expired", "blocked"}:
         return {"status": "blocked"}

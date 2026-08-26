@@ -9872,28 +9872,13 @@ def _handle_license_import(handler, body):
 
     try:
         license_mod = _taiji_license_module()
-        target = license_mod.runtime_license_path()
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(token + "\n", encoding="utf-8")
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        status = license_mod.validate_license_candidate(tmp)
+        status = license_mod.install_license_token(token)
         if status.status != "valid":
-            tmp.unlink(missing_ok=True)
             return j(handler, status.to_public_dict(), status=400)
-        os.replace(tmp, target)
-        try:
-            target.chmod(0o600)
-            target.parent.chmod(0o700)
-        except OSError:
-            pass
-        return j(handler, license_mod.load_license_status().to_public_dict())
-    except Exception as exc:
-        logger.exception("failed to import license")
-        return bad(handler, f"license import failed: {_sanitize_error(exc)}", status=500)
+        return j(handler, status.to_public_dict())
+    except Exception:
+        logger.error("license import failed")
+        return bad(handler, "授权导入失败，请重试；持续失败时联系管理员。", status=500)
 
 
 def _clear_stale_stream_state(session) -> bool:

@@ -15,6 +15,7 @@ HEALTH_CHECK = ROOT / "hermes-local-lab" / "scripts" / "health-check.sh"
 START_AGENT = ROOT / "hermes-local-lab" / "scripts" / "start-agent.sh"
 START_WEBUI = ROOT / "hermes-local-lab" / "scripts" / "start-webui.sh"
 DESKTOP_MAIN = ROOT / "apps" / "taiji-desktop" / "src" / "main.js"
+WINDOWS_RUNTIME = ROOT / "apps" / "taiji-desktop" / "src" / "windows-runtime.js"
 RESOLUTION_ERROR = (
     "Taiji Agent could not resolve the current account home "
     "from the system account database."
@@ -156,17 +157,13 @@ def _write_poisoned_env_files(runtime_home: Path, runtime_env: Path, tmp_path: P
     )
 
 
-def _assert_canonical_license_environment(test: unittest.TestCase, values: dict[str, str]) -> None:
+def _assert_runtime_child_has_no_license_overrides(
+    test: unittest.TestCase, values: dict[str, object]
+) -> None:
     account_home = _system_account_home()
     test.assertEqual(values["TAIJI_ACCOUNT_HOME"], str(account_home))
-    test.assertEqual(
-        values["TAIJI_LICENSE_FILE"],
-        str(account_home / ".config" / "taiji-agent" / "licenses" / "active-license.jwt"),
-    )
-    test.assertEqual(
-        values["TAIJI_LICENSE_STATE_FILE"],
-        str(account_home / ".local" / "state" / "taiji-agent" / "license-state.json"),
-    )
+    test.assertNotIn("TAIJI_LICENSE_FILE", values)
+    test.assertNotIn("TAIJI_LICENSE_STATE_FILE", values)
 
 
 def _script_without_account_resolvers(script: Path, tmp_path: Path) -> Path:
@@ -279,7 +276,7 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 for name, value in (line.split("=", 1),)
                 if name in expected_names
             }
-            _assert_canonical_license_environment(self, values)
+            _assert_runtime_child_has_no_license_overrides(self, values)
             self.assertEqual(
                 values["TAIJI_TEST_DOTENV_QUOTED"],
                 "dot env value with spaces",
@@ -634,8 +631,8 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(canary.exists())
             self.assertIn("declare -rx TAIJI_ACCOUNT_HOME=", result.stdout)
-            self.assertIn("declare -rx TAIJI_LICENSE_FILE=", result.stdout)
-            self.assertIn("declare -rx TAIJI_LICENSE_STATE_FILE=", result.stdout)
+            self.assertIn("declare -r TAIJI_LICENSE_FILE=", result.stdout)
+            self.assertIn("declare -r TAIJI_LICENSE_STATE_FILE=", result.stdout)
             self.assertIn(str(_system_account_home()), result.stdout)
 
     def test_runtime_env_fails_closed_when_unexported_builtin_hides_readonly(self):
@@ -688,7 +685,7 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
             self.assertIn(READONLY_BOUNDARY_ERROR, result.stderr)
             self.assertFalse(canary.exists())
 
-    def test_runtime_env_fails_closed_when_readonly_paths_are_not_exported(self):
+    def test_runtime_env_fails_closed_when_account_home_is_not_exported(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             env = _poisoned_env(tmp_path)
@@ -848,8 +845,8 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/bin/bash
-                    /usr/bin/printf '{"TAIJI_ACCOUNT_HOME":"%s","TAIJI_LICENSE_FILE":"%s","TAIJI_LICENSE_STATE_FILE":"%s"}\\n' \
-                      "$TAIJI_ACCOUNT_HOME" "$TAIJI_LICENSE_FILE" "$TAIJI_LICENSE_STATE_FILE" \
+                    /usr/bin/printf '{"TAIJI_ACCOUNT_HOME":"%s","TAIJI_LICENSE_FILE_PRESENT":"%s","TAIJI_LICENSE_STATE_FILE_PRESENT":"%s"}\\n' \
+                      "$TAIJI_ACCOUNT_HOME" "${TAIJI_LICENSE_FILE+x}" "${TAIJI_LICENSE_STATE_FILE+x}" \
                       > "$TAIJI_TEST_CAPTURE_FILE"
                     if [ "${1:-}" = "-" ]; then
                       /usr/bin/printf 'missing|license_missing|-|-\\n'
@@ -891,10 +888,10 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
 
             self.assertTrue(capture_file.is_file())
             self.assertNotIn("readonly variable", result.stderr)
-            _assert_canonical_license_environment(
-                self,
-                json.loads(capture_file.read_text(encoding="utf-8")),
-            )
+            values = json.loads(capture_file.read_text(encoding="utf-8"))
+            self.assertEqual(values["TAIJI_ACCOUNT_HOME"], str(_system_account_home()))
+            self.assertEqual(values["TAIJI_LICENSE_FILE_PRESENT"], "")
+            self.assertEqual(values["TAIJI_LICENSE_STATE_FILE_PRESENT"], "")
 
     def test_health_check_rejects_any_inherited_exported_function(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1025,6 +1022,8 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             env = _poisoned_env(tmp_path)
+            env["taiji_license_file"] = str(tmp_path / "lowercase-license.jwt")
+            env["TaIjI_LiCeNsE_sTaTe_FiLe"] = str(tmp_path / "mixed-state.json")
             env["TAIJI_DESKTOP_MAIN"] = str(DESKTOP_MAIN)
             result = subprocess.run(
                 ["node", "-e", self._desktop_runtime_probe()],
@@ -1036,7 +1035,94 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            _assert_canonical_license_environment(self, json.loads(result.stdout))
+            values = json.loads(result.stdout)
+            _assert_runtime_child_has_no_license_overrides(self, values)
+            self.assertEqual(values["TAIJI_LICENSE_OVERRIDE_KEYS"], [])
+
+    def test_windows_desktop_runtime_env_keeps_system_account_home(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            env.update(
+                {
+                    "TAIJI_DESKTOP_MAIN": str(DESKTOP_MAIN),
+                    "TAIJI_TEST_WINDOWS_PLATFORM": "1",
+                    "TAIJI_TEST_SYSTEM_ACCOUNT_HOME": "C:\\Users\\Customer",
+                    "LOCALAPPDATA": "D:\\Poisoned\\AppData\\Local",
+                    "SystemRoot": "C:\\Windows",
+                    "taiji_license_file": "D:\\Poisoned\\license.jwt",
+                    "TaIjI_LiCeNsE_sTaTe_FiLe": "D:\\Poisoned\\state.json",
+                }
+            )
+            result = subprocess.run(
+                ["node", "-e", self._desktop_runtime_probe()],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            values = json.loads(result.stdout)
+            self.assertEqual(values["TAIJI_ACCOUNT_HOME"], "C:\\Users\\Customer")
+            self.assertEqual(values["TAIJI_LICENSE_OVERRIDE_KEYS"], [])
+
+    def test_windows_runtime_env_removes_poisoned_license_path_overrides(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env = _poisoned_env(tmp_path)
+            env["TAIJI_WINDOWS_RUNTIME"] = str(WINDOWS_RUNTIME)
+            result = subprocess.run(
+                [
+                    "node",
+                    "-e",
+                    textwrap.dedent(
+                        """\
+                        const runtime = require(process.env.TAIJI_WINDOWS_RUNTIME);
+                        const layout = runtime.resolveWindowsRuntimeLayout({
+                          installRoot: "C:\\\\Program Files\\\\Taiji Agent",
+                          localAppData: "C:\\\\Users\\\\Customer\\\\AppData\\\\Local"
+                        });
+                        const env = runtime.buildWindowsRuntimeEnvironment({
+                          baseEnv: {
+                            SystemRoot: "C:\\\\Windows",
+                            TAIJI_ACCOUNT_HOME: "C:\\\\Users\\\\Customer",
+                            taiji_license_file: "C:\\\\poisoned\\\\license.jwt",
+                            TaIjI_LiCeNsE_sTaTe_FiLe: "C:\\\\poisoned\\\\state.json"
+                          },
+                          layout,
+                          agentPort: 18642,
+                          webuiPort: 18787,
+                          desktopAccessToken: "desktop-token",
+                          apiServerKey: "api-key"
+                        });
+                        process.stdout.write(JSON.stringify({
+                          TAIJI_ACCOUNT_HOME: env.TAIJI_ACCOUNT_HOME,
+                          TAIJI_LICENSE_OVERRIDE_KEYS: Object.keys(env).filter((key) =>
+                            ["TAIJI_LICENSE_FILE", "TAIJI_LICENSE_STATE_FILE"].includes(
+                              key.toUpperCase()
+                            )
+                          )
+                        }));
+                        """
+                    ),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout),
+                {
+                    "TAIJI_ACCOUNT_HOME": "C:\\Users\\Customer",
+                    "TAIJI_LICENSE_OVERRIDE_KEYS": [],
+                },
+            )
 
     def test_desktop_runtime_env_fails_closed_when_user_info_has_no_home(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1070,9 +1156,21 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
             const mainPath = process.env.TAIJI_DESKTOP_MAIN;
             const source = fs.readFileSync(mainPath, "utf8");
             const realOs = require("os");
+            const testAccountHome = process.env.TAIJI_TEST_SYSTEM_ACCOUNT_HOME || "";
             const testOs = process.env.TAIJI_TEST_INVALID_USER_INFO === "1"
               ? { ...realOs, userInfo: () => ({ homedir: "" }) }
-              : realOs;
+              : testAccountHome
+                ? { ...realOs, userInfo: () => ({ homedir: testAccountHome }) }
+                : realOs;
+            const testWindows = process.env.TAIJI_TEST_WINDOWS_PLATFORM === "1";
+            const testProcessEnv = { ...process.env };
+            const testProcess = new Proxy(process, {
+              get(target, property) {
+                if (property === "platform" && testWindows) return "win32";
+                if (property === "env") return testProcessEnv;
+                return Reflect.get(target, property, target);
+              }
+            });
             const noop = () => {};
             const electron = {
               app: {
@@ -1102,6 +1200,7 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
               if (name === "electron") return electron;
               if (name === "fs") return fsStub;
               if (name === "os") return testOs;
+              if (name === "path" && testWindows) return path.win32;
               if (name === "./external-link-policy") {
                 return {
                   createExternalWindowOpenHandler: noop,
@@ -1122,7 +1221,7 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
               exports: {},
               __dirname: path.dirname(mainPath),
               __filename: mainPath,
-              process,
+              process: testProcess,
               console,
               Buffer,
               URL,
@@ -1137,15 +1236,26 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 { filename: mainPath }
               );
               const runtimeEnv = sandbox.module.exports.createRuntimeEnv(
-                "/tmp/taiji-test-lab",
+                testWindows
+                  ? "C:\\\\Program Files\\\\Taiji Agent\\\\hermes-local-lab"
+                  : "/tmp/taiji-test-lab",
                 18642,
                 18787,
                 "/tmp/taiji-test-logs"
               );
               process.stdout.write(JSON.stringify({
                 TAIJI_ACCOUNT_HOME: runtimeEnv.TAIJI_ACCOUNT_HOME,
-                TAIJI_LICENSE_FILE: runtimeEnv.TAIJI_LICENSE_FILE,
-                TAIJI_LICENSE_STATE_FILE: runtimeEnv.TAIJI_LICENSE_STATE_FILE
+                TAIJI_LICENSE_OVERRIDE_KEYS: Object.keys(runtimeEnv).filter((key) =>
+                  ["TAIJI_LICENSE_FILE", "TAIJI_LICENSE_STATE_FILE"].includes(
+                    key.toUpperCase()
+                  )
+                ),
+                ...(Object.prototype.hasOwnProperty.call(runtimeEnv, "TAIJI_LICENSE_FILE")
+                  ? { TAIJI_LICENSE_FILE: runtimeEnv.TAIJI_LICENSE_FILE }
+                  : {}),
+                ...(Object.prototype.hasOwnProperty.call(runtimeEnv, "TAIJI_LICENSE_STATE_FILE")
+                  ? { TAIJI_LICENSE_STATE_FILE: runtimeEnv.TAIJI_LICENSE_STATE_FILE }
+                  : {})
               }));
             } catch (error) {
               process.stderr.write(String(error && error.message ? error.message : error));

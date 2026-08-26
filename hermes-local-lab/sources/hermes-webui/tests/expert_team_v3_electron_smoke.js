@@ -3,6 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require('./unified_license_test_fixture');
 
 function loadPlaywright() {
   const moduleId = process.env.PLAYWRIGHT_NODE_PATH || 'playwright';
@@ -104,8 +109,9 @@ async function main() {
   const repoRoot = path.resolve(webuiDir, '..', '..', '..');
   const electronHostRoot = process.env.TAIJI_ELECTRON_HOST_ROOT || process.env.TAIJI_MAIN_REPO_ROOT || repoRoot;
   const appDir = path.join(repoRoot, 'apps', 'taiji-desktop');
+  const agentDir = path.join(repoRoot, 'hermes-local-lab', 'sources', 'hermes-agent');
   const electronBin = path.join(electronHostRoot, 'apps', 'taiji-desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
-  const pythonBin = process.env.HERMES_WEBUI_PYTHON || path.join(repoRoot, 'hermes-local-lab', 'sources', 'hermes-agent', 'venv', 'bin', 'python');
+  const pythonBin = process.env.HERMES_WEBUI_PYTHON || path.join(agentDir, 'venv', 'bin', 'python');
   const outDir = path.resolve(process.argv[process.argv.indexOf('--out-dir') + 1] || path.join(repoRoot, 'output', 'expert-team-v3'));
   assert(fs.existsSync(electronBin), 'Electron binary missing', { electronBin });
   assert(fs.existsSync(pythonBin), 'Worktree Python runtime missing', { pythonBin });
@@ -113,29 +119,29 @@ async function main() {
   const runtime = fs.mkdtempSync(path.join(outDir, 'runtime-'));
   const workspace = path.join(runtime, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-
-  const app = await _electron.launch({
-    executablePath: electronBin,
-    args: [appDir],
-    env: {
-      ...process.env,
-      TAIJI_SOURCE_MODE: 'development', TAIJI_SOURCE_ROOT: repoRoot,
-      TAIJI_AGENT_ROOT: path.join(repoRoot, 'hermes-local-lab'),
-      HERMES_WEBUI_PYTHON: pythonBin,
-      TAIJI_AGENT_PYTHON: pythonBin,
-      TAIJI_WEBUI_PYTHON: pythonBin,
-      TAIJI_AGENT_SYNC_PACKAGED_CONFIG: '0',
-      TAIJI_AGENT_USE_USER_DIRS: '1', TAIJI_LICENSE_REQUIRED: '0', TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: '0',
-      TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT: 'pilot',
-      TAIJI_WORKSPACE: workspace,
-      TAIJI_DESKTOP_USER_DATA_DIR: path.join(runtime, 'electron-user-data'),
-      XDG_CONFIG_HOME: path.join(runtime, 'config'), XDG_DATA_HOME: path.join(runtime, 'data'), XDG_STATE_HOME: path.join(runtime, 'state'),
-      AGENT_API_PORT: '21942', API_SERVER_PORT: '21942', WEBUI_PORT: '21987', TAIJI_WEBUI_PORT: '21987',
-    },
-    timeout: 90000,
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: 'development', TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: path.join(repoRoot, 'hermes-local-lab'),
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG: '0',
+    TAIJI_AGENT_USE_USER_DIRS: '1',
+    TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT: 'pilot',
+    TAIJI_RUNTIME_HOME: runtime,
+    TAIJI_WORKSPACE: workspace,
+    TAIJI_DESKTOP_USER_DATA_DIR: path.join(runtime, 'electron-user-data'),
+    XDG_CONFIG_HOME: path.join(runtime, 'config'), XDG_DATA_HOME: path.join(runtime, 'data'), XDG_STATE_HOME: path.join(runtime, 'state'),
+    AGENT_API_PORT: '21942', API_SERVER_PORT: '21942', WEBUI_PORT: '21987', TAIJI_WEBUI_PORT: '21987',
   });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
 
+  let app = null;
   try {
+    app = await _electron.launch({
+      executablePath: electronBin,
+      args: [appDir],
+      env: runtimeEnv,
+      timeout: 90000,
+    });
     const page = await app.firstWindow({ timeout: 90000 });
     page.on('pageerror', error => process.stderr.write(`[pageerror] ${error.message}\n`));
     page.on('console', message => { if (message.type() === 'error') process.stderr.write(`[console] ${message.text()}\n`); });
@@ -620,6 +626,7 @@ async function main() {
       pythonRequestedPath: path.resolve(pythonBin),
       pythonBinRealpath: fs.realpathSync(pythonBin),
       pythonBin: fs.realpathSync(pythonBin),
+      licenseFixture,
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
       realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/update', '/api/expert-teams/answer', '/api/expert-teams/brief/confirm', '/api/expert-teams/run'],
@@ -630,7 +637,8 @@ async function main() {
     const recoveryConflictCaptured = await page.evaluate(() => window.__et3RecoveryConflictCaptured || []);
     fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, workRequiredSections, narrowIntakeLayout, readyRequiredSections, readyLayout, compactRequiredLayout, researchSessionId: researchSession.session_id, researchRequiredSections, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
   } finally {
-    await app.close();
+    if (app) await app.close().catch(() => {});
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
   }
 }
 

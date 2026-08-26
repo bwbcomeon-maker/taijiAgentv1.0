@@ -11,6 +11,7 @@ from api.product_diagnostics import (
     build_support_bundle,
     _probe_docx,
     _probe_gateway,
+    _probe_license,
     _probe_node,
     _probe_skills,
     _tree_sha256,
@@ -243,6 +244,49 @@ def test_gateway_authenticated_probe_uses_configured_key(monkeypatch):
         "authorization": "Bearer sentinel-key",
         "timeout": 0.75,
     }
+
+
+def test_license_probe_is_ready_only_for_required_valid_status(monkeypatch):
+    from api import product_diagnostics
+
+    class Status:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_public_dict(self):
+            return dict(self.payload)
+
+    class Module:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def load_license_status(self):
+            return Status(self.payload)
+
+    cases = [
+        ({"status": "valid", "required": True}, "ready"),
+        ({"status": "valid", "required": False}, "degraded"),
+        ({"status": "not_required", "required": False}, "degraded"),
+        ({"status": "missing", "required": True}, "blocked"),
+        ({"status": "invalid", "required": True}, "blocked"),
+        ({"status": "expired", "required": True}, "blocked"),
+        ({"status": "blocked", "required": True}, "blocked"),
+        ({"status": "unknown", "required": True}, "degraded"),
+    ]
+    for payload, expected in cases:
+        monkeypatch.setattr(product_diagnostics, "_license_module", lambda payload=payload: Module(payload))
+        assert _probe_license() == {"status": expected}
+
+
+def test_license_probe_exception_fails_closed(monkeypatch):
+    from api import product_diagnostics
+
+    monkeypatch.setattr(
+        product_diagnostics,
+        "_license_module",
+        lambda: (_ for _ in ()).throw(RuntimeError("license unavailable")),
+    )
+    assert product_diagnostics._safe_probe(_probe_license) == {"status": "unknown"}
 
 
 def test_docx_probe_rejects_empty_or_corrupt_runtime(tmp_path, monkeypatch):

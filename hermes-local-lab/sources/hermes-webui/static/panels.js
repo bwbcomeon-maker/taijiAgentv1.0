@@ -10650,11 +10650,10 @@ let _taijiLicenseData=null;
 function _taijiLicenseStatusLabel(status){
  const s=String(status&&status.status||'').toLowerCase();
  if(s==='valid') return '授权有效';
- if(s==='not_required') return '开发环境无需授权';
  if(s==='expired') return '授权已到期';
  if(s==='missing') return '未安装授权';
  if(s==='invalid') return '授权无效';
- return '授权未知';
+ return '授权状态不可用';
 }
 
 function _taijiLicenseSourceLabel(data){
@@ -10685,7 +10684,7 @@ function _renderTaijiLicenseStatus(data){
  const panel=$('taijiLicensePanel');
  const label=_taijiLicenseStatusLabel(_taijiLicenseData);
  const status=String(_taijiLicenseData.status||'unknown').toLowerCase();
- const state=status==='valid'||status==='not_required'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
+ const state=status==='valid'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
  if(statusEl) statusEl.textContent=label;
  if(customerEl) customerEl.textContent=_taijiLicenseData.customer||'—';
  if(expiresEl) expiresEl.textContent=_formatTaijiLicenseDate(_taijiLicenseData.expires_at);
@@ -10713,13 +10712,12 @@ function _renderTaijiLicenseStatus(data){
  if(sourceEl) sourceEl.textContent=_taijiLicenseSourceLabel(_taijiLicenseData);
  if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(
   status==='valid'?'授权可用':
-  status==='not_required'?'开发源码模式无需授权，不影响本机验证。':
   '授权状态不可用'
  );
  if(panel){
   panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
   const icon=panel.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=(status==='valid'||status==='not_required')?'✓':'!';
+  if(icon) icon.textContent=status==='valid'?'✓':'!';
  }
 }
 

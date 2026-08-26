@@ -1489,6 +1489,233 @@ def test_installed_candidate_validation_uses_runtime_policy(
     assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
 
 
+def test_install_license_token_validates_memory_and_writes_canonical_mode_0600(
+    monkeypatch, tmp_path, signing_keys
+):
+    private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    removable = tmp_path / "removable/candidate.jwt"
+    removable.parent.mkdir(mode=0o700)
+    token = _write_token(removable, private_key, max_version="1.0.0")
+    removable.unlink()
+
+    status = taiji_license.install_license_token(token)
+
+    assert status.status == "valid"
+    assert license_path.read_text(encoding="utf-8") == token + "\n"
+    assert stat.S_IMODE(license_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("state_content", "expected_code"),
+    [
+        ("{not-json", "license_state_invalid"),
+        (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "last_successful_validation_at": time.time()
+                    + taiji_license.LICENSE_CLOCK_ROLLBACK_TOLERANCE_SECONDS
+                    + 3600,
+                }
+            ),
+            "license_clock_rollback",
+        ),
+    ],
+)
+def test_install_license_token_returns_canonical_state_status(
+    monkeypatch, tmp_path, signing_keys, state_content, expected_code
+):
+    private_key, public_key = signing_keys
+    license_path, state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    state_path.parent.mkdir(parents=True, mode=0o700)
+    state_path.write_text(state_content, encoding="utf-8")
+    state_path.chmod(0o600)
+    candidate = tmp_path / "candidate.jwt"
+    token = _write_token(candidate, private_key, max_version="1.0.0")
+
+    status = taiji_license.install_license_token(token)
+
+    assert license_path.read_text(encoding="utf-8") == token + "\n"
+    assert status.status == "invalid"
+    assert status.code == expected_code
+
+
+def test_install_license_token_invalid_input_never_overwrites_existing_license(
+    monkeypatch, tmp_path, signing_keys
+):
+    _private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    license_path.parent.mkdir(parents=True, mode=0o700)
+    license_path.write_text("existing-license\n", encoding="utf-8")
+    license_path.chmod(0o600)
+
+    status = taiji_license.install_license_token("not-a-signed-license")
+
+    assert status.status == "invalid"
+    assert license_path.read_text(encoding="utf-8") == "existing-license\n"
+
+
+@pytest.mark.parametrize("candidate", [None, b"token", "", "   "])
+def test_install_license_token_rejects_non_string_or_empty_input(
+    monkeypatch, tmp_path, signing_keys, candidate
+):
+    _private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+
+    status = taiji_license.install_license_token(candidate)
+
+    assert status.status == "invalid"
+    assert not license_path.exists()
+
+
+def test_install_license_token_rejects_oversize_input(
+    monkeypatch, tmp_path, signing_keys
+):
+    _private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+
+    status = taiji_license.install_license_token(
+        "x" * (taiji_license._MAX_LICENSE_RESOURCE_BYTES + 1)
+    )
+
+    assert status.status == "invalid"
+    assert not license_path.exists()
+
+
+def test_install_license_token_security_write_error_is_path_and_token_free(
+    monkeypatch, tmp_path, signing_keys
+):
+    private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    candidate = tmp_path / "candidate.jwt"
+    token = _write_token(candidate, private_key, max_version="1.0.0")
+
+    def fail_write(**_kwargs):
+        raise taiji_license._LicenseUserResourceError(
+            f"failed at {license_path} for {token}"
+        )
+
+    monkeypatch.setattr(
+        taiji_license,
+        "_secure_atomic_write_runtime_resource",
+        fail_write,
+    )
+    status = taiji_license.install_license_token(token)
+    rendered = json.dumps(status.to_public_dict(), ensure_ascii=False)
+
+    assert status.status == "invalid"
+    assert status.code == "license_install_failed"
+    assert str(license_path) not in rendered
+    assert token not in rendered
+    assert not license_path.exists()
+
+
+@pytest.mark.parametrize("readback_failure", ["mismatch", "error"])
+def test_install_license_token_readback_failure_is_path_and_token_free(
+    monkeypatch, tmp_path, signing_keys, readback_failure
+):
+    private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    candidate = tmp_path / "candidate.jwt"
+    token = _write_token(candidate, private_key, max_version="1.0.0")
+
+    def fail_read(**_kwargs):
+        if readback_failure == "mismatch":
+            return "different-license\n"
+        raise taiji_license._LicenseUserResourceError(
+            f"failed at {license_path} for {token}"
+        )
+
+    monkeypatch.setattr(taiji_license, "_secure_read_runtime_resource", fail_read)
+    status = taiji_license.install_license_token(token)
+    rendered = json.dumps(status.to_public_dict(), ensure_ascii=False)
+
+    assert status.status == "invalid"
+    assert status.code == "license_install_failed"
+    assert str(license_path) not in rendered
+    assert token not in rendered
+
+
+def test_install_license_token_rejects_policy_override_without_writing(
+    monkeypatch, tmp_path, signing_keys
+):
+    private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    candidate = tmp_path / "candidate.jwt"
+    token = _write_token(candidate, private_key, max_version="1.0.0")
+    monkeypatch.setenv("TAIJI_LICENSE_FILE", str(tmp_path / "attacker.jwt"))
+
+    status = taiji_license.install_license_token(token)
+
+    assert status.status == "invalid"
+    assert status.code == "license_policy_override_forbidden"
+    assert not license_path.exists()
+
+
+@pytest.mark.parametrize("attack", ["target_symlink", "parent_symlink"])
+def test_install_license_token_rejects_symlink_attacks(
+    monkeypatch, tmp_path, signing_keys, attack
+):
+    private_key, public_key = signing_keys
+    license_path, _state_path, _device_path = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    candidate = tmp_path / "candidate.jwt"
+    token = _write_token(candidate, private_key, max_version="1.0.0")
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    outside_license = outside / "active-license.jwt"
+    outside_license.write_text("outside-license\n", encoding="utf-8")
+    outside_license.chmod(0o600)
+    if attack == "target_symlink":
+        license_path.parent.mkdir(parents=True, mode=0o700)
+        license_path.symlink_to(outside_license)
+    else:
+        license_path.parent.parent.mkdir(parents=True, mode=0o700)
+        license_path.parent.symlink_to(outside, target_is_directory=True)
+
+    status = taiji_license.install_license_token(token)
+
+    assert status.status == "invalid"
+    assert status.code == "license_install_failed"
+    assert outside_license.read_text(encoding="utf-8") == "outside-license\n"
+
+
 @pytest.mark.parametrize(
     ("candidate_shape", "expected_status"),
     [("regular", "valid"), ("reparse", "invalid"), ("hardlink", "invalid")],

@@ -6,6 +6,16 @@ const PRIVATE_LAB_SEGMENT = "her" + "mes-local-lab";
 const PRIVATE_AGENT_SEGMENT = "her" + "mes-agent";
 const PRIVATE_WEBUI_SEGMENT = "her" + "mes-webui";
 const LEGACY_ENV_PREFIX = "HER" + "MES";
+const LICENSE_PATH_OVERRIDE_NAMES = new Set([
+  "TAIJI_LICENSE_FILE",
+  "TAIJI_LICENSE_STATE_FILE",
+]);
+
+function deleteLicensePathOverrides(env) {
+  for (const key of Object.keys(env)) {
+    if (LICENSE_PATH_OVERRIDE_NAMES.has(key.toUpperCase())) delete env[key];
+  }
+}
 
 function requireAbsoluteWindowsPath(name, value) {
   if (typeof value !== "string" || !path.win32.isAbsolute(value)) {
@@ -75,7 +85,12 @@ function buildWindowsRuntimeEnvironment({
   apiServerKey,
 }) {
   const env = { ...baseEnv };
+  deleteLicensePathOverrides(env);
   const systemRoot = requireAbsoluteWindowsPath("baseEnv.SystemRoot", baseEnv.SystemRoot);
+  const accountHome = requireAbsoluteWindowsPath(
+    "baseEnv.TAIJI_ACCOUNT_HOME",
+    baseEnv.TAIJI_ACCOUNT_HOME,
+  );
 
   Object.assign(env, {
     TAIJI_WINDOWS_CANDIDATE: "1",
@@ -119,9 +134,7 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_WEBUI_GATEWAY_API_KEY: apiServerKey,
     TAIJI_DESKTOP_ACCESS_TOKEN: desktopAccessToken,
     TAIJI_DESKTOP_ONLY: "1",
-    TAIJI_ACCOUNT_HOME: layout.userRoot,
-    TAIJI_LICENSE_FILE: path.win32.join(layout.licenseDir, "active-license.jwt"),
-    TAIJI_LICENSE_STATE_FILE: path.win32.join(layout.stateDir, "license-state.json"),
+    TAIJI_ACCOUNT_HOME: accountHome,
     TERMINAL_CWD: layout.workspace,
     PATH: [path.win32.dirname(layout.pythonExe), path.win32.join(systemRoot, "System32")].join(";"),
     TMP: layout.tmpDir,

@@ -20,6 +20,11 @@ const {
   inspectTaijiNavigation,
   installDailyEquivalentRuntimeConfig,
 } = require("./electron_acceptance_provenance");
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require("./unified_license_test_fixture");
 
 const AMBIENT_GIT_ENV = [
   "GIT_DIR",
@@ -1547,8 +1552,6 @@ function createFixtureController(initialState, { requestLog = [] } = {}) {
 
 function sanitizedLaunchEnv(base, dirs, {
   agentDir,
-  guard,
-  guardMarker,
   labDir,
   repoRoot,
   sourceSnapshot,
@@ -1563,7 +1566,7 @@ function sanitizedLaunchEnv(base, dirs, {
       delete env[key];
     }
   }
-  return {
+  return sanitizeUnifiedLicenseRuntimeEnv({
     ...env,
     HOME: dirs.home,
     XDG_CONFIG_HOME: dirs.config,
@@ -1572,30 +1575,24 @@ function sanitizedLaunchEnv(base, dirs, {
     HERMES_HOME: dirs.runtimeHome,
     HERMES_BASE_HOME: dirs.runtimeHome,
     HERMES_WEBUI_STATE_DIR: path.join(dirs.runtimeHome, "web"),
+    TAIJI_SOURCE_MODE: "development",
     TAIJI_AGENT_ROOT: labDir,
     TAIJI_AGENT_USE_USER_DIRS: "1",
     TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
     TAIJI_RUNTIME_HOME: dirs.runtimeHome,
     TAIJI_WORKSPACE: workspace,
-    TAIJI_AGENT_PYTHON: guard.pythonWrapper,
-    TAIJI_WEBUI_PYTHON: guard.pythonWrapper,
     HERMES_WEBUI_AGENT_DIR: agentDir,
     TAIJI_SOURCE_ROOT: repoRoot,
     TAIJI_SOURCE_COMMIT: sourceSnapshot.commit,
     TAIJI_SOURCE_DIRTY: sourceSnapshot.status_short ? "1" : "0",
-    TAIJI_LICENSE_REQUIRED: "0",
-    TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: "0",
     TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
     TAIJI_WEBUI_TEST_NETWORK_BLOCK: "1",
-    TAIJI_ELECTRON_GUARD_LOG: guard.guardLog,
-    TAIJI_PYTHON_GUARD_LOG: guard.guardLog,
-    TAIJI_NETWORK_GUARD_MARKER: guardMarker,
     TAIJI_TRUSTED_OIDC_ORIGINS: "",
     HTTP_PROXY: "http://127.0.0.1:9",
     HTTPS_PROXY: "http://127.0.0.1:9",
     ALL_PROXY: "http://127.0.0.1:9",
     NO_PROXY: "127.0.0.1,localhost",
-  };
+  });
 }
 
 async function waitForDesktopReady(page) {
@@ -1728,6 +1725,7 @@ async function main() {
   let agentIdentity = null;
   let webIdentity = null;
   let pageListenerOwnership = null;
+  let licenseRuntimeEnv = null;
   let ownedDescendantIdentities = [];
   const sensitiveValues = [];
   const screenshotSanity = {};
@@ -1833,12 +1831,32 @@ async function main() {
     FAILURE_REDACTION_VALUES.push(...sensitiveValues);
 
     const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
+    const runtimeEnv = sanitizedLaunchEnv(process.env, dirs, {
+      agentDir,
+      labDir,
+      repoRoot,
+      sourceSnapshot,
+      workspace: dirs.workspace,
+    });
+    licenseRuntimeEnv = runtimeEnv;
+    const licenseFixture = prepareUnifiedLicenseFixture({
+      repoRoot,
+      agentDir,
+      pythonBin,
+      runtimeEnv,
+    });
     guard = writeHarnessGuards({
       harnessRoot,
       productMain,
-      pythonBin,
+      pythonBin: runtimeEnv.TAIJI_AGENT_PYTHON,
       guardMarker,
     });
+    runtimeEnv.TAIJI_AGENT_PYTHON = guard.pythonWrapper;
+    runtimeEnv.TAIJI_WEBUI_PYTHON = guard.pythonWrapper;
+    runtimeEnv.HERMES_WEBUI_PYTHON = guard.pythonWrapper;
+    runtimeEnv.TAIJI_ELECTRON_GUARD_LOG = guard.guardLog;
+    runtimeEnv.TAIJI_PYTHON_GUARD_LOG = guard.guardLog;
+    runtimeEnv.TAIJI_NETWORK_GUARD_MARKER = guardMarker;
     baselineTable = processTable();
     guardProcessExpected = {
       baselineTable,
@@ -1869,15 +1887,7 @@ async function main() {
     app = await _electron.launch({
       executablePath: electronBin,
       args: [guard.electronWrapper],
-      env: sanitizedLaunchEnv(process.env, dirs, {
-        agentDir,
-        guard,
-        guardMarker,
-        labDir,
-        repoRoot,
-        sourceSnapshot,
-        workspace: dirs.workspace,
-      }),
+      env: runtimeEnv,
       timeout: 120000,
     });
     const appPid = app.process().pid;
@@ -2560,6 +2570,7 @@ async function main() {
         clarification: "request_id is intentionally not forced to 64 characters because the backend and renderer contract is UUID-compatible 8-128 characters",
       },
       provider_network: "blocked; no OAuth, public network, or real Provider verification",
+      license_fixture: licenseFixture,
       source_execution: {
         git: sourceSnapshot,
         actual_page_url: actualPageUrl,
@@ -2629,6 +2640,7 @@ async function main() {
     runError = error;
   } finally {
     try {
+      try {
       if (!agentIdentity && pidFiles) {
         const candidate = processIdentity(readPid(pidFiles.agent));
         if (
@@ -2741,6 +2753,9 @@ async function main() {
           strategy: "capture before and after close, own strict guard-loaded PIDs, then require two clean bounded snapshots",
           pid_reuse_guard: "pid + start time + command + cwd SHA-256 must match before every signal",
         };
+      }
+      } finally {
+        cleanupUnifiedLicenseFixture({ runtimeEnv: licenseRuntimeEnv });
       }
     } catch (error) {
       cleanupError = error;

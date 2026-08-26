@@ -14,6 +14,11 @@ const {
   inspectTaijiNavigation,
   installDailyEquivalentRuntimeConfig,
 } = require("./electron_acceptance_provenance");
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require("./unified_license_test_fixture");
 
 function assertState(condition, message, detail) {
   if (!condition) throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
@@ -163,7 +168,7 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (_) { return null; }
 }
 
-function collectStateDbMessages(pythonBin, dbPath, sessionId) {
+function collectStateDbMessages(pythonBin, dbPath, sessionId, runtimeEnv) {
   if (!fs.existsSync(dbPath)) return { exists: false, messages: [] };
   const script = [
     "import json, sqlite3, sys",
@@ -175,7 +180,10 @@ function collectStateDbMessages(pythonBin, dbPath, sessionId) {
     "rows = [dict(r) for r in conn.execute('SELECT ' + ','.join(wanted) + ' FROM messages WHERE session_id=? ORDER BY id', (sid,))]",
     "print(json.dumps({'columns': cols, 'messages': rows}, ensure_ascii=False))",
   ].join("; ");
-  const result = spawnSync(pythonBin, ["-c", script, dbPath, sessionId], { encoding: "utf8" });
+  const result = spawnSync(pythonBin, ["-c", script, dbPath, sessionId], {
+    env: runtimeEnv,
+    encoding: "utf8",
+  });
   if (result.status !== 0) {
     return { exists: true, error: String(result.stderr || result.stdout || "").trim(), messages: [] };
   }
@@ -188,6 +196,7 @@ async function collectDuplicateBoundaryDiagnostic({
   page,
   runtimeHome,
   pythonBin,
+  runtimeEnv,
   sessionId,
   providerFixture,
 }) {
@@ -222,6 +231,7 @@ async function collectDuplicateBoundaryDiagnostic({
     pythonBin,
     path.join(runtimeHome, "state.db"),
     sessionId,
+    runtimeEnv,
   );
   const domAssistantBubbles = await page.locator('.msg-row[data-role="assistant"] .msg-body').allInnerTexts();
   return {
@@ -331,6 +341,21 @@ async function main() {
     capability_overrides: { composer: { workspace_switcher: true } },
   });
   const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir: path.join(repoRoot, "hermes-local-lab", "sources", "hermes-webui") });
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: "development",
+    TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: labDir,
+    TAIJI_AGENT_USE_USER_DIRS: "1",
+    TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
+    XDG_CONFIG_HOME: dirs.config,
+    XDG_DATA_HOME: dirs.data,
+    XDG_STATE_HOME: dirs.state,
+    TAIJI_RUNTIME_HOME: dirs.runtimeHome,
+    TAIJI_WORKSPACE: dirs.workspace,
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
+  });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
   prepareRepo(dirs.workspace);
 
   const pidFiles = [
@@ -353,22 +378,7 @@ async function main() {
     app = await _electron.launch({
       executablePath: electronBin,
       args: [appDir],
-      env: {
-        ...process.env,
-        TAIJI_AGENT_ROOT: labDir,
-        TAIJI_AGENT_USE_USER_DIRS: "1",
-        TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
-        XDG_CONFIG_HOME: dirs.config,
-        XDG_DATA_HOME: dirs.data,
-        XDG_STATE_HOME: dirs.state,
-        TAIJI_RUNTIME_HOME: dirs.runtimeHome,
-        TAIJI_WORKSPACE: dirs.workspace,
-        TAIJI_AGENT_PYTHON: pythonBin,
-        TAIJI_WEBUI_PYTHON: pythonBin,
-        TAIJI_LICENSE_REQUIRED: "0",
-        TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: "0",
-        TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
-      },
+      env: runtimeEnv,
       timeout: 120000,
     });
     appPid = app.process().pid;
@@ -464,7 +474,8 @@ async function main() {
     const duplicateBoundaryDiagnostic = await collectDuplicateBoundaryDiagnostic({
       page,
       runtimeHome: dirs.runtimeHome,
-      pythonBin,
+      pythonBin: runtimeEnv.TAIJI_AGENT_PYTHON,
+      runtimeEnv,
       sessionId: worktreeSid,
       providerFixture,
     });
@@ -656,6 +667,7 @@ async function main() {
       status: "passed",
       worktree_canary_sha256: canaryHash,
       session_id: worktreeSid,
+      license_fixture: licenseFixture,
       screenshots: [
         "01-created-badge.png",
         "02-chat-terminal-files.png",
@@ -711,6 +723,7 @@ async function main() {
     servicePids = [...new Set([...servicePids, ...pidFiles.map(readPid).filter(Boolean)])];
     await terminate([appPid, ...servicePids]);
     if (providerFixture) await providerFixture.close();
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
     fs.rmSync(root, { recursive: true, force: true });
   }
 }

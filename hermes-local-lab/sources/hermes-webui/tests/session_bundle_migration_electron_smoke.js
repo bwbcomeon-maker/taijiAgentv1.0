@@ -12,6 +12,11 @@ const {
   inspectTaijiNavigation,
   installDailyEquivalentRuntimeConfig,
 } = require("./electron_acceptance_provenance");
+const {
+  cleanupUnifiedLicenseFixture,
+  prepareUnifiedLicenseFixture,
+  sanitizeUnifiedLicenseRuntimeEnv,
+} = require("./unified_license_test_fixture");
 
 function assertState(condition, message, detail) {
   if (!condition) throw new Error(`${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
@@ -54,7 +59,7 @@ async function terminate(pids) {
   for (const pid of pids) if (alive(pid)) { try { process.kill(pid, "SIGKILL"); } catch (_) {} }
 }
 
-function prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome, workspace }) {
+function prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome, workspace, runtimeEnv }) {
   const script = String.raw`
 import json
 import shutil
@@ -96,11 +101,10 @@ print(json.dumps({"artifact_id": artifact["artifact_id"], "sha256": artifact["sh
 `;
   const image = path.join(webuiDir, "static", "assets", "taiji", "background", "background-grid.png");
   const env = {
-    ...process.env,
+    ...runtimeEnv,
     TAIJI_RUNTIME_HOME: runtimeHome,
     TAIJI_WEBUI_STATE_DIR: path.join(runtimeHome, "web"),
     TAIJI_WEBUI_DEFAULT_WORKSPACE: workspace,
-    TAIJI_LICENSE_REQUIRED: "0",
     PYTHONPATH: [webuiDir, agentDir].join(path.delimiter),
   };
   const result = spawnSync(pythonBin, ["-c", script, runtimeHome, workspace, image], { env, encoding: "utf8" });
@@ -138,7 +142,29 @@ async function main() {
   Object.values(dirs).forEach(directory => fs.mkdirSync(directory, { recursive: true }));
   const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
   const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir });
-  const fixture = prepareFixture({ pythonBin, webuiDir, agentDir, runtimeHome: dirs.runtimeHome, workspace: dirs.workspace });
+  const runtimeEnv = sanitizeUnifiedLicenseRuntimeEnv({
+    ...process.env,
+    TAIJI_SOURCE_MODE: "development",
+    TAIJI_SOURCE_ROOT: repoRoot,
+    TAIJI_AGENT_ROOT: labDir,
+    TAIJI_AGENT_USE_USER_DIRS: "1",
+    TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
+    XDG_CONFIG_HOME: dirs.config,
+    XDG_DATA_HOME: dirs.data,
+    XDG_STATE_HOME: dirs.state,
+    TAIJI_RUNTIME_HOME: dirs.runtimeHome,
+    TAIJI_WORKSPACE: dirs.workspace,
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
+  });
+  const licenseFixture = prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv });
+  const fixture = prepareFixture({
+    pythonBin: runtimeEnv.TAIJI_AGENT_PYTHON,
+    webuiDir,
+    agentDir,
+    runtimeHome: dirs.runtimeHome,
+    workspace: dirs.workspace,
+    runtimeEnv,
+  });
   const pidFiles = [
     path.join(dirs.state, "taiji-agent", "logs", "agent.pid"),
     path.join(dirs.state, "taiji-agent", "logs", "web.pid"),
@@ -152,22 +178,7 @@ async function main() {
     app = await _electron.launch({
       executablePath: electronBin,
       args: [appDir],
-      env: {
-        ...process.env,
-        TAIJI_AGENT_ROOT: labDir,
-        TAIJI_AGENT_USE_USER_DIRS: "1",
-        TAIJI_DESKTOP_USER_DATA_DIR: dirs.userData,
-        XDG_CONFIG_HOME: dirs.config,
-        XDG_DATA_HOME: dirs.data,
-        XDG_STATE_HOME: dirs.state,
-        TAIJI_RUNTIME_HOME: dirs.runtimeHome,
-        TAIJI_WORKSPACE: dirs.workspace,
-        TAIJI_AGENT_PYTHON: pythonBin,
-        TAIJI_WEBUI_PYTHON: pythonBin,
-        TAIJI_LICENSE_REQUIRED: "0",
-        TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: "0",
-        TAIJI_AGENT_SYNC_PACKAGED_CONFIG: "0",
-      },
+      env: runtimeEnv,
       timeout: 120000,
     });
     electronPid = app.process()?.pid || 0;
@@ -530,6 +541,7 @@ async function main() {
       rollback_complete: rollbackItem?.rollback_complete === true,
       failed_apply_has_no_success_toast: true,
       rollback_checksums_restored: true,
+      license_fixture: licenseFixture,
       fresh_failure_audit_repairable: freshFailureAudit.needs_repair === true,
       artifact_rollback_quarantine: {
         count: Number(freshFailureAudit.quarantine_count || 0),
@@ -553,6 +565,7 @@ async function main() {
     servicePids = [...new Set([...servicePids, ...pidFiles.map(readPid)].filter(Boolean))];
     if (app) { try { await app.close(); } catch (_) {} }
     await terminate([electronPid, ...servicePids]);
+    cleanupUnifiedLicenseFixture({ runtimeEnv });
     const cleanup = {
       electron_stopped: electronPid > 0 && !alive(electronPid),
       service_pids_stopped: servicePids.every(pid => !alive(pid)),
