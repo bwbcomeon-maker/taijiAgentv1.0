@@ -24,14 +24,16 @@ def session_db(tmp_path):
 
 
 @pytest.fixture
-def adapter(session_db):
+def adapter(session_db, monkeypatch):
+    monkeypatch.setattr("taiji_license.require_valid_license", lambda: None)
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
     adapter._session_db = session_db
     return adapter
 
 
 @pytest.fixture
-def auth_adapter(session_db):
+def auth_adapter(session_db, monkeypatch):
+    monkeypatch.setattr("taiji_license.require_valid_license", lambda: None)
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test"}))
     adapter._session_db = session_db
     return adapter
