@@ -6691,6 +6691,82 @@ class TestRealApprovalCancellation:
 
 class TestRunStatus:
     @pytest.mark.asyncio
+    async def test_worker_exception_status_drops_raw_exception_text(self, adapter):
+        secret = "sk-worker-exception-sentinel"
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.side_effect = RuntimeError(
+                    f"provider response contained {secret}"
+                )
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await resp.json())["run_id"]
+
+                for _ in range(20):
+                    status_resp = await cli.get(f"/v1/runs/{run_id}")
+                    status = await status_resp.json()
+                    if status["status"] == "failed":
+                        break
+                    await asyncio.sleep(0.05)
+
+                assert status["error"]["source"] == "gateway"
+                assert status["error"]["code"] == "worker_exception"
+                assert status["error"]["message"] == "Gateway run failed."
+                assert secret not in json.dumps(status)
+
+    @pytest.mark.asyncio
+    async def test_failed_run_status_keeps_only_safe_structured_provider_error(self, adapter):
+        secret = "sk-provider-body-sentinel"
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {
+                    "failed": True,
+                    "error": f"raw provider body {secret}",
+                    "error_code": "auth",
+                    "error_status": 401,
+                    "transport_kind": None,
+                    "retryable": False,
+                    "incident_id": "inc-0123456789ab",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                }
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await resp.json())["run_id"]
+
+                for _ in range(20):
+                    status_resp = await cli.get(f"/v1/runs/{run_id}")
+                    status = await status_resp.json()
+                    if status["status"] == "failed":
+                        break
+                    await asyncio.sleep(0.05)
+
+                assert status["status"] == "failed"
+                assert status["error"] == {
+                    "schema": "taiji.gateway.run-error.v1",
+                    "source": "provider",
+                    "code": "auth",
+                    "message": "Provider request failed.",
+                    "status": 401,
+                    "transport_kind": None,
+                    "retryable": False,
+                    "incident_id": "inc-0123456789ab",
+                }
+                assert secret not in json.dumps(status)
+
+    @pytest.mark.asyncio
     async def test_status_completed_run_includes_output_and_usage(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:

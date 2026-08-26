@@ -5757,25 +5757,21 @@ class APIServerAdapter(BasePlatformAdapter):
 
         def _publish_worker_outcome(result: Any, usage: Dict[str, Any]) -> None:
             if isinstance(result, dict) and result.get("failed"):
-                error_msg = result.get("error") or "agent run failed"
-                error_payload = {
-                    "message": str(error_msg),
-                    "code": str(
-                        result.get("error_code")
-                        or result.get("code")
-                        or "run_failed"
-                    ),
-                }
+                from agent.error_contract import build_gateway_run_error
+
+                error_payload = build_gateway_run_error(result)
                 q.put_nowait({
                     "event": "run.failed",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "error": error_payload,
+                    "provider": result.get("provider"),
+                    "model": result.get("model"),
                 })
                 self._set_run_status(
                     run_id,
                     "failed",
-                    error=error_msg,
+                    error=error_payload,
                     last_event="run.failed",
                 )
                 return
@@ -5789,6 +5785,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "timestamp": time.time(),
                 "output": final_response,
                 "usage": usage,
+                "provider": result.get("provider") if isinstance(result, dict) else None,
+                "model": result.get("model") if isinstance(result, dict) else None,
             })
             self._set_run_status(
                 run_id,
@@ -5799,10 +5797,18 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         def _publish_worker_exception(exc: BaseException) -> None:
+            from agent.error_contract import build_gateway_exception_error
+
+            error_payload = build_gateway_exception_error()
+            logger.error(
+                "Gateway run worker failed incident_id=%s exception_type=%s",
+                error_payload["incident_id"],
+                type(exc).__name__,
+            )
             self._set_run_status(
                 run_id,
                 "failed",
-                error=str(exc),
+                error=error_payload,
                 last_event="run.failed",
             )
             try:
@@ -5810,7 +5816,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "event": "run.failed",
                     "run_id": run_id,
                     "timestamp": time.time(),
-                    "error": str(exc),
+                    "error": error_payload,
                 })
             except Exception:
                 pass

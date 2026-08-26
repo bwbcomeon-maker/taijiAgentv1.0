@@ -32,6 +32,7 @@ from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
+from agent.error_contract import build_terminal_failure, redact_provider_error
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.message_sanitization import (
@@ -71,6 +72,58 @@ from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_sensitive_values(agent: Any) -> list[object]:
+    """Collect current in-memory credentials for exact-value log redaction."""
+
+    values: list[object] = []
+    for owner in (agent, getattr(agent, "client", None)):
+        if owner is None:
+            continue
+        for name in ("api_key", "_api_key", "token", "access_token"):
+            value = getattr(owner, name, None)
+            if value:
+                values.append(value)
+    return values
+
+
+def _terminal_provider_failure(
+    agent: Any,
+    classified: Any,
+    api_error: BaseException,
+    *,
+    final_response: object,
+    messages: list,
+    api_calls: int,
+) -> dict:
+    safe_values = _provider_sensitive_values(agent)
+    result = build_terminal_failure(
+        classified,
+        api_error,
+        sensitive_values=safe_values,
+    )
+    logger.error(
+        "Provider terminal failure incident_id=%s code=%s status=%s transport_kind=%s retryable=%s",
+        result["incident_id"],
+        result["error_code"],
+        result["error_status"],
+        result["transport_kind"],
+        result["retryable"],
+    )
+    result.update({
+        "final_response": (
+            redact_provider_error(final_response, sensitive_values=safe_values)
+            if final_response
+            else None
+        ),
+        "messages": messages,
+        "api_calls": api_calls,
+        "completed": False,
+        "provider": str(getattr(agent, "provider", None) or ""),
+        "model": str(getattr(agent, "model", None) or ""),
+    })
+    return result
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -2907,7 +2960,10 @@ def _run_conversation_impl(
                 
                 error_type = type(api_error).__name__
                 error_msg = str(api_error).lower()
-                _error_summary = agent._summarize_api_error(api_error)
+                _error_summary = redact_provider_error(
+                    agent._summarize_api_error(api_error),
+                    sensitive_values=_provider_sensitive_values(agent),
+                )
                 logger.warning(
                     "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
                     retry_count,
@@ -2927,7 +2983,13 @@ def _run_conversation_impl(
                 agent._buffer_vprint(f"   📝 Error: {_error_summary}")
                 if status_code and status_code < 500:
                     _err_body = getattr(api_error, "body", None)
-                    _err_body_str = str(_err_body)[:300] if _err_body else None
+                    _err_body_str = (
+                        redact_provider_error(
+                            _err_body,
+                            sensitive_values=_provider_sensitive_values(agent),
+                        )[:300]
+                        if _err_body else None
+                    )
                     if _err_body_str:
                         agent._buffer_vprint(f"   📋 Details: {_err_body_str}")
                 agent._buffer_vprint(f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
@@ -2960,7 +3022,7 @@ def _run_conversation_impl(
                     agent._persist_session(messages, conversation_history)
                     agent.clear_interrupt()
                     return {
-                        "final_response": f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))}).",
+                        "final_response": f"Operation interrupted: handling API error ({error_type}: {redact_provider_error(api_error, sensitive_values=_provider_sensitive_values(agent))}).",
                         "messages": messages,
                         "api_calls": api_call_count,
                         "completed": False,
@@ -3457,7 +3519,12 @@ def _run_conversation_impl(
                         continue
                     if api_kwargs is not None:
                         agent._dump_api_request_debug(
-                            api_kwargs, reason="non_retryable_client_error", error=api_error,
+                            api_kwargs,
+                            reason="non_retryable_client_error",
+                            error=redact_provider_error(
+                                api_error,
+                                sensitive_values=_provider_sensitive_values(agent),
+                            ),
                         )
                     # Terminal — flush buffered context so the user sees
                     # what was tried before the abort.
@@ -3540,7 +3607,17 @@ def _run_conversation_impl(
                             f"{agent.log_prefix}        hermes fallback add   (interactive picker — same as `hermes model`)",
                             force=True,
                         )
-                    logger.error(f"{agent.log_prefix}Non-retryable client error: {api_error}")
+                    _safe_terminal_error = redact_provider_error(
+                        api_error,
+                        sensitive_values=_provider_sensitive_values(agent),
+                    )
+                    logger.error(
+                        "%sNon-retryable provider error code=%s status=%s detail=%s",
+                        agent.log_prefix,
+                        classified.reason.value,
+                        classified.status_code,
+                        _safe_terminal_error,
+                    )
                     # Skip session persistence when the error is likely
                     # context-overflow related (status 400 + large session).
                     # Persisting the failed user message would make the
@@ -3555,7 +3632,10 @@ def _run_conversation_impl(
                     else:
                         agent._persist_session(messages, conversation_history)
                     if classified.reason == FailoverReason.content_policy_blocked:
-                        _summary = agent._summarize_api_error(api_error)
+                        _summary = redact_provider_error(
+                            agent._summarize_api_error(api_error),
+                            sensitive_values=_provider_sensitive_values(agent),
+                        )
                         _policy_response = (
                             f"⚠️  The model provider's safety filter blocked this request "
                             f"(not a Hermes/gateway failure).\n\n"
@@ -3563,22 +3643,22 @@ def _run_conversation_impl(
                             f"Try rephrasing the request, narrowing the context, or "
                             f"adding a fallback provider with `hermes fallback add`."
                         )
-                        return {
-                            "final_response": _policy_response,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "failed": True,
-                            "error": f"content_policy_blocked: {_summary}",
-                        }
-                    return {
-                        "final_response": None,
-                        "messages": messages,
-                        "api_calls": api_call_count,
-                        "completed": False,
-                        "failed": True,
-                        "error": str(api_error),
-                    }
+                        return _terminal_provider_failure(
+                            agent,
+                            classified,
+                            api_error,
+                            final_response=_policy_response,
+                            messages=messages,
+                            api_calls=api_call_count,
+                        )
+                    return _terminal_provider_failure(
+                        agent,
+                        classified,
+                        api_error,
+                        final_response=None,
+                        messages=messages,
+                        api_calls=api_call_count,
+                    )
 
                 if retry_count >= max_retries:
                     # Before falling back, try rebuilding the primary
@@ -3600,7 +3680,10 @@ def _run_conversation_impl(
                         continue
                     # Terminal — flush buffered retry/fallback trace.
                     agent._flush_status_buffer()
-                    _final_summary = agent._summarize_api_error(api_error)
+                    _final_summary = redact_provider_error(
+                        agent._summarize_api_error(api_error),
+                        sensitive_values=_provider_sensitive_values(agent),
+                    )
                     _billing_guidance = ""
                     if classified.reason == FailoverReason.billing:
                         agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")
@@ -3659,7 +3742,12 @@ def _run_conversation_impl(
                     )
                     if api_kwargs is not None:
                         agent._dump_api_request_debug(
-                            api_kwargs, reason="max_retries_exhausted", error=api_error,
+                            api_kwargs,
+                            reason="max_retries_exhausted",
+                            error=redact_provider_error(
+                                api_error,
+                                sensitive_values=_provider_sensitive_values(agent),
+                            ),
                         )
                     agent._persist_session(messages, conversation_history)
                     if classified.reason == FailoverReason.billing:
@@ -3677,14 +3765,14 @@ def _run_conversation_impl(
                             "execute_code with Python's open() for large "
                             "files, or to write in smaller sections."
                         )
-                    return {
-                        "final_response": _final_response,
-                        "messages": messages,
-                        "api_calls": api_call_count,
-                        "completed": False,
-                        "failed": True,
-                        "error": _final_summary,
-                    }
+                    return _terminal_provider_failure(
+                        agent,
+                        classified,
+                        api_error,
+                        final_response=_final_response,
+                        messages=messages,
+                        api_calls=api_call_count,
+                    )
 
                 # For rate limits, respect the Retry-After header if present
                 _retry_after = None
@@ -3708,7 +3796,10 @@ def _run_conversation_impl(
                     retry_count,
                     max_retries,
                     agent._client_log_context(),
-                    api_error,
+                    redact_provider_error(
+                        api_error,
+                        sensitive_values=_provider_sensitive_values(agent),
+                    ),
                 )
                 # Sleep in small increments so we can respond to interrupts quickly
                 # instead of blocking the entire wait_time in one sleep() call

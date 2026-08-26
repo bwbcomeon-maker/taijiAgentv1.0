@@ -76,6 +76,7 @@ class ClassifiedError:
     model: Optional[str] = None
     message: str = ""
     error_context: Dict[str, Any] = field(default_factory=dict)
+    transport_kind: Optional[str] = None
 
     # Recovery action hints — the retry loop checks these instead of
     # re-classifying the error itself.
@@ -520,12 +521,19 @@ def classify_api_error(
     model_lower = (model or "").strip().lower()
 
     def _result(reason: FailoverReason, **overrides) -> ClassifiedError:
+        from agent.error_contract import transport_kind_for_error
+
         defaults = {
             "reason": reason,
             "status_code": status_code,
             "provider": provider,
             "model": model,
             "message": _extract_message(error, body),
+            "transport_kind": (
+                transport_kind_for_error(error)
+                if reason == FailoverReason.timeout or status_code is None
+                else None
+            ),
         }
         defaults.update(overrides)
         return ClassifiedError(**defaults)
