@@ -410,9 +410,15 @@ def _write_license_device(path: Path, *, now_ts: float) -> dict[str, Any]:
 def _load_or_create_license_device(
     *,
     environ: Optional[Mapping[str, str]],
+    device_path: Optional[os.PathLike[str] | str],
     now_ts: float,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    path = default_license_device_path(environ)
+    if device_path is not None:
+        path = Path(device_path).expanduser()
+    elif environ is None:
+        path = runtime_license_device_path()
+    else:
+        path = default_license_device_path(environ)
     existing = _read_license_device(path)
     if existing:
         return existing, None
@@ -754,13 +760,19 @@ def get_machine_fingerprint(
     now: Optional[float] = None,
     use_cache: bool = True,
     environ: Optional[Mapping[str, str]] = None,
+    device_path: Optional[os.PathLike[str] | str] = None,
 ) -> dict[str, Any]:
     global _MACHINE_FINGERPRINT_CACHE
-    if use_cache and now is None and environ is None and _MACHINE_FINGERPRINT_CACHE is not None:
+    canonical = environ is None and device_path is None
+    if use_cache and now is None and canonical and _MACHINE_FINGERPRINT_CACHE is not None:
         return dict(_MACHINE_FINGERPRINT_CACHE)
     now_ts = time.time() if now is None else float(now)
     components, signals, macs, risk_flags = _collect_machine_components()
-    device, device_error = _load_or_create_license_device(environ=environ, now_ts=now_ts)
+    device, device_error = _load_or_create_license_device(
+        environ=environ,
+        device_path=device_path,
+        now_ts=now_ts,
+    )
     if device_error:
         risk_flags = [*risk_flags, "device_secret_unavailable"]
     fingerprint = _fingerprint_from_components(
@@ -796,7 +808,7 @@ def get_machine_fingerprint(
                 "machine_code_short": _machine_code_short(legacy_v2_machine_code),
             }
         )
-    if use_cache and now is None and environ is None:
+    if use_cache and now is None and canonical:
         _MACHINE_FINGERPRINT_CACHE = dict(fingerprint)
     return fingerprint
 

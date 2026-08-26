@@ -1139,6 +1139,24 @@ def test_machine_fingerprint_v3_uses_device_secret_and_ignores_physical_mac_chan
     )
 
 
+def test_machine_fingerprint_explicit_device_path_preserves_low_level_seam(
+    tmp_path,
+):
+    explicit = tmp_path / "explicit/license-device.json"
+    redirected = tmp_path / "redirected/license-device.json"
+
+    fingerprint = taiji_license.get_machine_fingerprint(
+        use_cache=False,
+        now=1_000_000,
+        environ={"TAIJI_LICENSE_DEVICE_FILE": str(redirected)},
+        device_path=explicit,
+    )
+
+    explicit_data = json.loads(explicit.read_text(encoding="utf-8"))
+    assert fingerprint["device_id"] == explicit_data["device_id"]
+    assert not redirected.exists()
+
+
 def test_expired_license_has_user_prompt(tmp_path, signing_keys):
     private_pem, public_pem = signing_keys
     path = tmp_path / "expired.jwt"
@@ -1598,6 +1616,41 @@ def test_machine_request_is_redacted_and_contains_short_fingerprint():
     assert "PRIVATE KEY" not in raw
     assert "00:11" not in raw
     assert "device_secret" not in raw
+
+
+def test_machine_request_noarg_uses_canonical_runtime_device_identity(
+    monkeypatch, tmp_path
+):
+    canonical = tmp_path / "canonical/license-device.json"
+    redirected = tmp_path / "redirected/license-device.json"
+    xdg_config_home = tmp_path / "xdg-config"
+    environment_home = tmp_path / "environment-home"
+    monkeypatch.setattr(
+        taiji_license,
+        "runtime_license_device_path",
+        lambda: canonical,
+    )
+    monkeypatch.setenv("TAIJI_LICENSE_DEVICE_FILE", str(redirected))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config_home))
+    monkeypatch.setenv("HOME", str(environment_home))
+
+    request = taiji_license.build_machine_request(now=1_000_000)
+
+    assert canonical.is_file()
+    canonical_data = json.loads(canonical.read_text(encoding="utf-8"))
+    assert request["device_id"] == canonical_data["device_id"]
+    assert not redirected.exists()
+    assert not (
+        xdg_config_home
+        / taiji_license.PRODUCT
+        / taiji_license.DEFAULT_LICENSE_DEVICE_FILENAME
+    ).exists()
+    assert not (
+        environment_home
+        / ".config"
+        / taiji_license.PRODUCT
+        / taiji_license.DEFAULT_LICENSE_DEVICE_FILENAME
+    ).exists()
 
 
 def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_path, signing_keys):
