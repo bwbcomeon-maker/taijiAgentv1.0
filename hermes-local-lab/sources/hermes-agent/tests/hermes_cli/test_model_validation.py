@@ -146,6 +146,10 @@ class TestCuratedModelsForProvider:
         models = curated_models_for_provider("zai")
         assert any("glm" in m[0] for m in models)
 
+    def test_zai_cn_defaults_to_glm_5(self):
+        models = curated_models_for_provider("zai-cn")
+        assert models[0][0] == "glm-5"
+
     def test_unknown_provider_returns_empty(self):
         assert curated_models_for_provider("totally-unknown") == []
 
@@ -201,6 +205,11 @@ class TestProviderModelIds:
 
     def test_zai_returns_glm_models(self):
         assert "glm-5" in provider_model_ids("zai")
+
+    def test_zai_cn_returns_domestic_glm_models(self):
+        ids = provider_model_ids("zai-cn")
+        assert ids[0] == "glm-5"
+        assert "glm-5" in ids
 
     def test_stepfun_prefers_live_catalog(self):
         with patch(

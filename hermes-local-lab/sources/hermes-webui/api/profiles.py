@@ -1232,6 +1232,7 @@ _PROVIDER_ENV_MAP: dict[str, str] = {
     "minimax-cn": "MINIMAX_CN_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "zai": "ZAI_API_KEY",
+    "zai-cn": "GLM_CN_API_KEY",
     "dashscope": "DASHSCOPE_API_KEY",
     "kilocode": "KILOCODE_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",

@@ -262,6 +262,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
     ),
+    "zai-cn": ProviderConfig(
+        id="zai-cn",
+        name="智谱 GLM（国内）",
+        auth_type="api_key",
+        inference_base_url="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env_vars=("GLM_CN_API_KEY",),
+    ),
     "kimi-coding": ProviderConfig(
         id="kimi-coding",
         name="Kimi / Moonshot",
@@ -1499,6 +1506,7 @@ def resolve_provider(
     # Normalize provider aliases
     _PROVIDER_ALIASES = {
         "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
+        "glm-cn": "zai-cn", "zhipu-cn": "zai-cn",
         "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
         "x-ai": "xai", "x.ai": "xai", "grok": "xai",
         "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth",

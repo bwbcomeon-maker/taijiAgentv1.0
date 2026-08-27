@@ -10389,23 +10389,37 @@ async function deleteCustomImageProviderConfig(providerId,trigger){
 
 function _syncMainModelConfigControls(){
  const providerSel=$('modelConfigProvider');
+ const modelInput=$('modelConfigModel');
  const baseRow=$('modelConfigBaseUrlRow');
+ const baseInput=$('modelConfigBaseUrl');
  const keyRow=$('modelConfigApiKeyRow');
+ const keyInput=$('modelConfigApiKey');
  const hint=$('modelConfigProviderHint');
  if(!providerSel) return;
  const providerId=providerSel.value||'';
  const provider=_modelConfigProviderById(providerId);
  const isCustom=providerId==='custom';
  const isOauth=!!(provider&&provider.is_oauth);
+ const models=(provider&&Array.isArray(provider.models))?provider.models:[];
+ const previousProvider=String(providerSel.dataset.lastProvider||'');
+ if(previousProvider&&previousProvider!==providerId){
+  const firstModel=models[0];
+  const defaultModel=typeof firstModel==='string'?firstModel:String(firstModel&&firstModel.id||'').trim();
+  if(modelInput) modelInput.value=defaultModel;
+  if(baseInput) baseInput.value='';
+  if(keyInput) keyInput.value='';
+ }
+ providerSel.dataset.lastProvider=providerId;
  if(baseRow) baseRow.style.display=isCustom?'':'none';
  if(keyRow) keyRow.style.display=isOauth?'none':'';
- const models=(provider&&Array.isArray(provider.models))?provider.models:[];
  _setDatalistOptions('modelConfigModelOptions',models);
  if(hint){
   if(isOauth){
    hint.textContent='此提供商使用 OAuth 认证。请完成管理员认证后回到这里刷新状态。';
   }else if(isCustom){
    hint.textContent='自定义端点密钥会保存到本机凭据区，管理员配置仅保存引用关系。';
+  }else if(providerId==='zai-cn'){
+   hint.textContent='使用智谱 BigModel 国内通用 API；请填写国内平台 API Key。';
   }else{
    hint.textContent='留空保留现有密钥；填写后会保存到本机凭据区。';
   }
@@ -10535,6 +10549,7 @@ function _renderModelConfigPanel(data){
    providerSel.appendChild(opt);
   });
   providerSel.value=main.provider||'custom';
+  providerSel.dataset.lastProvider=providerSel.value;
   providerSel.onchange=_syncMainModelConfigControls;
  }
  const modelInput=$('modelConfigModel');

@@ -37,6 +37,9 @@ def _create_license_app(adapter: APIServerAdapter) -> web.Application:
 
 @pytest.fixture()
 def required_missing_license(monkeypatch, tmp_path):
+    license_path = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    state_path = tmp_path / "state/taiji-agent/license-state.json"
+    device_path = tmp_path / "config/taiji-agent/license-device.json"
     monkeypatch.setattr(
         taiji_license.taiji_runtime_profile,
         "is_installed_production",
@@ -47,6 +50,9 @@ def required_missing_license(monkeypatch, tmp_path):
         "installation_profile",
         lambda: "installed-production",
     )
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", license_path)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_STATE_PATH", state_path)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_DEVICE_PATH", device_path)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.delenv("TAIJI_LICENSE_REQUIRED", raising=False)

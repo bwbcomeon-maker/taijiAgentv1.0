@@ -34,6 +34,7 @@ class TestProviderRegistry:
         ("copilot", "GitHub Copilot", "api_key"),
         ("huggingface", "Hugging Face", "api_key"),
         ("zai", "Z.AI / GLM", "api_key"),
+        ("zai-cn", "智谱 GLM（国内）", "api_key"),
         ("xai", "xAI", "api_key"),
         ("nvidia", "NVIDIA NIM", "api_key"),
         ("kimi-coding", "Kimi / Moonshot", "api_key"),
@@ -54,6 +55,12 @@ class TestProviderRegistry:
         pconfig = PROVIDER_REGISTRY["zai"]
         assert pconfig.api_key_env_vars == ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY")
         assert pconfig.base_url_env_var == "GLM_BASE_URL"
+
+    def test_zai_cn_uses_isolated_key_and_fixed_domestic_endpoint(self):
+        pconfig = PROVIDER_REGISTRY["zai-cn"]
+        assert pconfig.api_key_env_vars == ("GLM_CN_API_KEY",)
+        assert pconfig.base_url_env_var == ""
+        assert pconfig.inference_base_url == "https://open.bigmodel.cn/api/paas/v4"
 
     def test_xai_env_vars(self):
         pconfig = PROVIDER_REGISTRY["xai"]
@@ -140,6 +147,7 @@ PROVIDER_ENV_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "LM_API_KEY", "LM_BASE_URL",
     "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "GLM_BASE_URL",
+    "GLM_CN_API_KEY",
     "KIMI_API_KEY", "KIMI_BASE_URL", "STEPFUN_API_KEY", "STEPFUN_BASE_URL",
     "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
     "KILOCODE_API_KEY", "KILOCODE_BASE_URL",
@@ -163,6 +171,15 @@ class TestResolveProvider:
 
     def test_explicit_zai(self):
         assert resolve_provider("zai") == "zai"
+
+    def test_explicit_zai_cn(self):
+        assert resolve_provider("zai-cn") == "zai-cn"
+
+    def test_alias_glm_cn(self):
+        assert resolve_provider("glm-cn") == "zai-cn"
+
+    def test_alias_zhipu_cn(self):
+        assert resolve_provider("zhipu-cn") == "zai-cn"
 
     def test_explicit_kimi_coding(self):
         assert resolve_provider("kimi-coding") == "kimi-coding"

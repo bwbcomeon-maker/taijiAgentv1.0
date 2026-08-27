@@ -7015,16 +7015,46 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
             model_cfg = config_data.get("model")
             if not isinstance(model_cfg, dict):
                 model_cfg = {}
+            previous_provider = str(model_cfg.get("provider") or "").strip().lower()
+            previous_model = str(
+                model_cfg.get("default")
+                or model_cfg.get("model")
+                or model_cfg.get("name")
+                or ""
+            ).strip()
+            previous_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            provider_changed = previous_provider != provider_id
+            if provider_changed and model_id == previous_model:
+                from hermes_cli.models import detect_static_provider_for_model
+
+                detected = detect_static_provider_for_model(model_id, provider_id)
+                if detected and detected[0] == previous_provider:
+                    previous_label = _PROVIDER_DISPLAY.get(
+                        previous_provider,
+                        previous_provider,
+                    )
+                    target_label = _PROVIDER_DISPLAY.get(provider_id, provider_id)
+                    raise ValueError(
+                        f"模型 {model_id} 仍属于 {previous_label}，"
+                        f"请重新选择 {target_label} 的模型。"
+                    )
             model_cfg["provider"] = provider_id
             model_cfg["default"] = model_id
+            if provider_changed:
+                model_cfg.pop("api_mode", None)
             if provider_id == "custom":
                 model_cfg["base_url"] = base_url
                 model_cfg["key_env"] = _CUSTOM_MODEL_KEY_ENV
                 model_cfg.pop("api_key", None)
             else:
-                if base_url:
+                stale_base_url = bool(
+                    provider_changed
+                    and base_url
+                    and base_url == previous_base_url
+                )
+                if base_url and not stale_base_url:
                     model_cfg["base_url"] = base_url
-                elif provider_id != "openai":
+                elif provider_changed or provider_id != "openai":
                     model_cfg.pop("base_url", None)
                 model_cfg.pop("key_env", None)
                 model_cfg.pop("api_key_env", None)

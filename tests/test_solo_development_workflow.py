@@ -662,6 +662,56 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
                 self.assertNotIn(sensitive_value, output)
                 self.assertNotIn(safe.name, output)
 
+    def test_change_safety_grandfathers_only_unchanged_tracked_credential_values(self):
+        baseline_value = "historical_" + ("B" * 32)
+        new_value = "newly_added_" + ("N" * 32)
+        with tempfile.TemporaryDirectory(prefix="taiji-safety-baseline-credential-") as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            _init_repo(repo)
+            scanner = self._install_safety_scanner(repo)
+            target = repo / "config.py"
+            target.write_text(
+                f'API_KEY = "{baseline_value}"\nSETTING = "before"\n',
+                encoding="utf-8",
+            )
+            _assert_command_ok(self, _git(repo, "add", target.name))
+            _assert_command_ok(self, _git(repo, "commit", "-m", "track historical fixture"))
+
+            target.write_text(
+                f'API_KEY = "{baseline_value}"\nSETTING = "after"\n',
+                encoding="utf-8",
+            )
+            unchanged_baseline = self._run_safety(repo, scanner)
+            self.assertEqual(
+                unchanged_baseline.returncode,
+                0,
+                _combined_output(unchanged_baseline),
+            )
+            self.assertIn("PASS", _combined_output(unchanged_baseline))
+
+            target.write_text(
+                f'API_KEY = "{baseline_value}"\n'
+                f'CLIENT_SECRET = "{new_value}"\n'
+                'SETTING = "after"\n',
+                encoding="utf-8",
+            )
+            newly_added = self._run_safety(repo, scanner)
+            output = _combined_output(newly_added)
+            self.assertNotEqual(newly_added.returncode, 0, output)
+            self.assertIn("credential-assignment", output)
+            self.assertNotIn(baseline_value, output)
+            self.assertNotIn(new_value, output)
+
+            target.write_text(
+                f'API_KEY = "{new_value}"\nSETTING = "after"\n',
+                encoding="utf-8",
+            )
+            replaced = self._run_safety(repo, scanner)
+            output = _combined_output(replaced)
+            self.assertNotEqual(replaced.returncode, 0, output)
+            self.assertIn("credential-assignment", output)
+            self.assertNotIn(new_value, output)
+
     def test_change_safety_keeps_index_and_worktree_views_separate(self):
         secret = self._secret_token()
         cases = (

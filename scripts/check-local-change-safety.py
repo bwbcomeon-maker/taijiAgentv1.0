@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import stat
 import subprocess
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
 
@@ -128,6 +130,23 @@ def _index_entries() -> tuple[tuple[str, str, str, int], ...]:
     return tuple(sorted(entries))
 
 
+def _tree_entries(treeish: str) -> dict[str, tuple[str, str]]:
+    entries: dict[str, tuple[str, str]] = {}
+    for record in _git_bytes("ls-tree", "-r", "-z", treeish).split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, encoded_path = record.split(b"\t", 1)
+            mode, kind, oid = metadata.decode("ascii").split()
+            if kind != "blob":
+                continue
+            path = encoded_path.decode("utf-8", "surrogateescape")
+            entries[path] = (mode, oid)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise GitQueryError("Git tree manifest was malformed") from exc
+    return entries
+
+
 def _git_invisible_special_paths() -> list[str]:
     """Find non-ignored FIFOs/sockets/devices that Git omits from untracked output."""
     ignored = set(
@@ -228,6 +247,7 @@ def _capture_change_set() -> dict[str, tuple[object, ...]]:
         "worktree_paths": worktree_paths,
         "worktree_manifest": worktree_manifest,
         "index_entries": _index_entries(),
+        "head_oid": (_git_bytes("rev-parse", "--verify", "HEAD").strip().decode("ascii"),),
     }
 
 
@@ -286,31 +306,38 @@ def _credential_value_is_sensitive(value: str | bytes) -> bool:
     )
 
 
-def _python_value_is_sensitive(value: ast.expr) -> bool:
+def _python_sensitive_literals(value: ast.expr) -> list[str | bytes]:
     if isinstance(value, ast.Constant) and isinstance(value.value, (str, bytes)):
-        return _credential_value_is_sensitive(value.value)
+        return [value.value] if _credential_value_is_sensitive(value.value) else []
     if isinstance(value, ast.JoinedStr):
-        return any(
-            isinstance(part, ast.Constant)
+        return [
+            part.value
+            for part in value.values
+            if isinstance(part, ast.Constant)
             and isinstance(part.value, (str, bytes))
             and _credential_value_is_sensitive(part.value)
-            for part in value.values
-        )
-    return False
+        ]
+    return []
+
+
+def _credential_fingerprint(name: str, value: str | bytes) -> str:
+    encoded = value if isinstance(value, bytes) else value.encode("utf-8", "surrogatepass")
+    digest = hashlib.sha256(encoded).hexdigest()
+    return f"{name.casefold()}:{digest}"
 
 
 def _python_assignment_findings(
     path: str, text: str
-) -> tuple[set[tuple[int, str]], bool, bool]:
+) -> tuple[set[tuple[int, str]], Counter[str], bool]:
     if PurePosixPath(path).suffix.lower() != ".py":
-        return set(), False, False
+        return set(), Counter(), False
     try:
         tree = ast.parse(text, filename=path)
     except (SyntaxError, ValueError):
-        return set(), False, True
+        return set(), Counter(), True
 
     handled: set[tuple[int, str]] = set()
-    sensitive = False
+    sensitive: Counter[str] = Counter()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets = node.targets
@@ -328,31 +355,39 @@ def _python_assignment_findings(
                 if not CREDENTIAL_NAME_PATTERN.fullmatch(name):
                     continue
                 handled.add((node.lineno, name.casefold()))
-                if _python_value_is_sensitive(value):
-                    sensitive = True
+                for literal in _python_sensitive_literals(value):
+                    sensitive[_credential_fingerprint(name, literal)] += 1
     return handled, sensitive, False
 
 
-def _content_findings(path: str, content: bytes) -> list[str]:
+def _credential_assignment_fingerprints(path: str, text: str) -> tuple[Counter[str], bool]:
+    handled, fingerprints, parse_failed = _python_assignment_findings(path, text)
+    for match in ASSIGNMENT_PATTERN.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        name = match.group("name")
+        if (line, name.casefold()) in handled:
+            continue
+        value = match.group("value")
+        if _credential_value_is_sensitive(value):
+            fingerprints[_credential_fingerprint(name, value)] += 1
+    return fingerprints, parse_failed
+
+
+def _content_findings(path: str, content: bytes, baseline: bytes = b"") -> list[str]:
     findings: list[str] = []
     if PRIVATE_KEY_PATTERN.search(content):
         findings.append("private-key")
     text = content.decode("utf-8", "replace")
     if any(pattern.search(text) for pattern in HIGH_CONFIDENCE_VALUES):
         findings.append("high-confidence-token")
-    handled, python_sensitive, parse_failed = _python_assignment_findings(path, text)
+    credential_fingerprints, parse_failed = _credential_assignment_fingerprints(path, text)
     if parse_failed:
         findings.append("python-parse-error")
-    if python_sensitive:
+    baseline_fingerprints, _ = _credential_assignment_fingerprints(
+        path, baseline.decode("utf-8", "replace")
+    )
+    if credential_fingerprints - baseline_fingerprints:
         findings.append("credential-assignment")
-    for match in ASSIGNMENT_PATTERN.finditer(text):
-        line = text.count("\n", 0, match.start()) + 1
-        if (line, match.group("name").casefold()) in handled:
-            continue
-        value = match.group("value")
-        if _credential_value_is_sensitive(value):
-            findings.append("credential-assignment")
-            break
     return findings
 
 
@@ -367,6 +402,13 @@ def _read_index_blob(oid: str) -> tuple[int, bytes]:
     if len(content) != size:
         raise GitQueryError("Git blob changed while reading")
     return size, content
+
+
+def _baseline_content(entry: tuple[str, str] | None) -> bytes:
+    if entry is None or entry[0] not in {"100644", "100755"}:
+        return b""
+    size, content = _read_index_blob(entry[1])
+    return content if size <= MAX_FILE_BYTES else b""
 
 
 def _read_worktree_file(
@@ -424,7 +466,9 @@ def _scan_capture(capture: dict[str, tuple[object, ...]]) -> list[tuple[str, str
         for path, mode, oid, stage in index_entries
         if int(stage) == 0
     }
-    contents: list[tuple[str, bytes]] = []
+    head_oid = str(tuple(capture["head_oid"])[0])
+    head_entries = _tree_entries(head_oid)
+    contents: list[tuple[str, bytes, bytes]] = []
     total = 0
 
     for path in staged_paths:
@@ -447,7 +491,7 @@ def _scan_capture(capture: dict[str, tuple[object, ...]]) -> list[tuple[str, str
             findings.append((path, "file-size-limit"))
             continue
         total += size
-        contents.append((path, content))
+        contents.append((path, content, _baseline_content(head_entries.get(path))))
 
     worktree_manifest = dict(capture["worktree_manifest"])
     for path in worktree_paths:
@@ -475,14 +519,14 @@ def _scan_capture(capture: dict[str, tuple[object, ...]]) -> list[tuple[str, str
             continue
         assert content is not None
         total += len(content)
-        contents.append((path, content))
+        contents.append((path, content, _baseline_content(stage_zero.get(path))))
 
     if total > MAX_TOTAL_BYTES:
         findings.append(("<change-set>", "total-size-limit"))
         return findings
 
-    for path, content in contents:
-        for finding in _content_findings(path, content):
+    for path, content, baseline in contents:
+        for finding in _content_findings(path, content, baseline):
             findings.append((path, finding))
     return findings
 

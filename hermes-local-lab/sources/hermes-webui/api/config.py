@@ -791,6 +791,7 @@ _PROVIDER_DISPLAY = {
     "copilot": "GitHub Copilot",
     "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
+    "zai-cn": "智谱 GLM（国内）",
     "kimi-coding": "Kimi / Moonshot",
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
@@ -827,6 +828,8 @@ _PROVIDER_DISPLAY = {
 # alongside the WebUI).
 _PROVIDER_ALIASES = {
     "glm": "zai",
+    "glm-cn": "zai-cn",
+    "zhipu-cn": "zai-cn",
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
@@ -1176,6 +1179,14 @@ _PROVIDER_MODELS = {
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
+        {"id": "glm-5-turbo", "label": "GLM-5 Turbo"},
+        {"id": "glm-4.7", "label": "GLM-4.7"},
+        {"id": "glm-4.5", "label": "GLM-4.5"},
+        {"id": "glm-4.5-flash", "label": "GLM-4.5 Flash"},
+    ],
+    "zai-cn": [
+        {"id": "glm-5", "label": "GLM-5"},
+        {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5-turbo", "label": "GLM-5 Turbo"},
         {"id": "glm-4.7", "label": "GLM-4.7"},
         {"id": "glm-4.5", "label": "GLM-4.5"},

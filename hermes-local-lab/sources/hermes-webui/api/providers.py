@@ -640,6 +640,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "google": "GOOGLE_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "zai": "GLM_API_KEY",
+    "zai-cn": "GLM_CN_API_KEY",
     "alibaba": "DASHSCOPE_API_KEY",
     "kimi-coding": "KIMI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",

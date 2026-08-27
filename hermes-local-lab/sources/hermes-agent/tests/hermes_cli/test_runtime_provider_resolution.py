@@ -1170,6 +1170,25 @@ def test_model_config_api_mode_ignored_when_provider_differs(monkeypatch):
     assert resolved["api_mode"] == "chat_completions"
 
 
+def test_zai_cn_runtime_uses_isolated_key_and_fixed_domestic_endpoint(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai-cn")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "zai-cn", "default": "glm-5"},
+    )
+    monkeypatch.setenv("GLM_CN_API_KEY", "domestic-test-key")
+    monkeypatch.setenv("GLM_API_KEY", "international-key-must-not-win")
+    monkeypatch.setenv("GLM_BASE_URL", "https://api.z.ai/api/paas/v4")
+
+    resolved = rp.resolve_runtime_provider(requested="zai-cn")
+
+    assert resolved["provider"] == "zai-cn"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert resolved["api_key"] == "domestic-test-key"
+
+
 def test_invalid_api_mode_ignored(monkeypatch):
     """Invalid api_mode values should fall back to chat_completions."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")

@@ -108,6 +108,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         extra_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
     ),
+    "zai-cn": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("GLM_CN_API_KEY",),
+        base_url_override="https://open.bigmodel.cn/api/paas/v4",
+    ),
     "kimi-for-coding": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="KIMI_BASE_URL",
@@ -247,6 +252,8 @@ ALIASES: Dict[str, str] = {
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
+    "glm-cn": "zai-cn",
+    "zhipu-cn": "zai-cn",
 
     # xai
     "x-ai": "xai",
@@ -378,6 +385,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "bedrock": "AWS Bedrock",
     "ollama-cloud": "Ollama Cloud",
     "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
+    "zai-cn": "智谱 GLM（国内）",
 }
 
 

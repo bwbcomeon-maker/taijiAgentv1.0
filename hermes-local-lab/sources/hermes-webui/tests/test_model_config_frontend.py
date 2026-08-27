@@ -1227,6 +1227,133 @@ def test_model_config_js_calls_expected_endpoints():
     assert "/api/model/set" in PANELS_JS
 
 
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_builtin_main_provider_switch_resets_provider_owned_draft():
+    driver = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[1],'utf8');
+function extractFunc(name){
+ const re=new RegExp('function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);if(start<0)throw new Error(name+' missing');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+const elements={
+ modelConfigProvider:{value:'deepseek',dataset:{lastProvider:'deepseek'}},
+ modelConfigModel:{value:'deepseek-chat'},
+ modelConfigBaseUrl:{value:'https://api.deepseek.com/v1',dataset:{provider:'deepseek'}},
+ modelConfigApiKey:{value:'deepseek-secret-draft'},
+ modelConfigBaseUrlRow:{style:{}},
+ modelConfigApiKeyRow:{style:{},querySelector(){return null;}},
+ modelConfigProviderHint:{textContent:''},
+};
+const $=id=>elements[id]||null;
+const _modelConfigProviderById=id=>({
+ id,
+ is_oauth:false,
+ models:id==='zai'?[{id:'glm-5',label:'GLM 5'},'glm-5-air']:['deepseek-chat'],
+});
+const _setDatalistOptions=()=>{};
+eval(extractFunc('_syncMainModelConfigControls'));
+elements.modelConfigProvider.value='zai';
+_syncMainModelConfigControls();
+const switched={
+ model:elements.modelConfigModel.value,
+ baseUrl:elements.modelConfigBaseUrl.value,
+ draftValue:elements.modelConfigApiKey.value,
+};
+elements.modelConfigModel.value='glm-5-air';
+elements.modelConfigBaseUrl.value='https://open.bigmodel.cn/api/paas/v4';
+elements.modelConfigApiKey.value='new-zai-key';
+_syncMainModelConfigControls();
+const sameProvider={
+ model:elements.modelConfigModel.value,
+ baseUrl:elements.modelConfigBaseUrl.value,
+ draftValue:elements.modelConfigApiKey.value,
+};
+process.stdout.write(JSON.stringify({switched,sameProvider}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", driver, str(ROOT / "static" / "panels.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    output = json.loads(result.stdout)
+    assert output["switched"] == {
+        "model": "glm-5",
+        "baseUrl": "",
+        "draftValue": "",
+    }
+    assert output["sameProvider"] == {
+        "model": "glm-5-air",
+        "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+        "draftValue": "new-zai-key",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_domestic_glm_provider_has_clear_hint_and_fixed_endpoint_ui():
+    driver = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[1],'utf8');
+function extractFunc(name){
+ const re=new RegExp('function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);if(start<0)throw new Error(name+' missing');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+const elements={
+ modelConfigProvider:{value:'zai-cn',dataset:{lastProvider:'deepseek'}},
+ modelConfigModel:{value:'deepseek-chat'},
+ modelConfigBaseUrl:{value:'https://api.deepseek.com/v1'},
+ modelConfigApiKey:{value:'old-draft'},
+ modelConfigBaseUrlRow:{style:{}},
+ modelConfigApiKeyRow:{style:{},querySelector(){return null;}},
+ modelConfigProviderHint:{textContent:''},
+};
+const $=id=>elements[id]||null;
+const _modelConfigProviderById=id=>({
+ id,
+ display_name:'智谱 GLM（国内）',
+ is_oauth:false,
+ models:[{id:'glm-5',label:'GLM-5'}],
+});
+const _setDatalistOptions=()=>{};
+eval(extractFunc('_syncMainModelConfigControls'));
+_syncMainModelConfigControls();
+process.stdout.write(JSON.stringify({
+ model:elements.modelConfigModel.value,
+ baseUrl:elements.modelConfigBaseUrl.value,
+ baseRow:elements.modelConfigBaseUrlRow.style.display,
+ keyRow:elements.modelConfigApiKeyRow.style.display,
+ keyDraft:elements.modelConfigApiKey.value,
+ hint:elements.modelConfigProviderHint.textContent,
+}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", driver, str(ROOT / "static" / "panels.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    output = json.loads(result.stdout)
+    assert output == {
+        "model": "glm-5",
+        "baseUrl": "",
+        "baseRow": "none",
+        "keyRow": "",
+        "keyDraft": "",
+        "hint": "使用智谱 BigModel 国内通用 API；请填写国内平台 API Key。",
+    }
+
+
 def test_every_model_and_provider_mutation_handles_runtime_refresh_truth():
     """Committed config is not the same as a refreshed runtime."""
     guarded_functions = (
