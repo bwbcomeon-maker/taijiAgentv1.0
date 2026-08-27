@@ -218,6 +218,22 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         self.assertIn("apps/runtime.js", result.stderr)
         self.assertIn("formal source has runtime-affecting changes", result.stderr)
 
+    def test_runtime_policy_allows_superpowers_markdown_plans_to_be_dirty(self):
+        plan = self.repo / "docs" / "superpowers" / "plans" / "local-plan.md"
+        spec = self.repo / "docs" / "superpowers" / "specs" / "local-spec.md"
+        plan.parent.mkdir(parents=True)
+        spec.parent.mkdir(parents=True)
+        plan.write_text("local plan\n", encoding="utf-8")
+        spec.write_text("local spec\n", encoding="utf-8")
+
+        result = self.gate(self.repo, dirty_policy="runtime")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("runtime_dirty: 0", result.stdout)
+        self.assertIn("non_runtime_dirty: 1", result.stdout)
+        self.assertIn("docs/superpowers/plans/local-plan.md", result.stderr)
+        self.assertIn("docs/superpowers/specs/local-spec.md", result.stderr)
+
     def test_runtime_policy_rejects_agent_metadata_renamed_into_runtime_tree(self):
         agent_payload = self.repo / ".agents" / "payload.js"
         agent_payload.parent.mkdir(parents=True)

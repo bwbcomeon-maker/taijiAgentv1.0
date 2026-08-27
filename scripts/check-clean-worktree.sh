@@ -58,8 +58,9 @@ development:
 dirty policy:
   strict (default) rejects every tracked or untracked change. runtime permits
   changes limited to repository-local coding-agent instructions (AGENTS.md and
-  .agents/) for formal local launch only; development mode keeps its existing
-  dirty-worktree preview behavior. Release and packaging must keep strict.
+  .agents/) and Markdown plans/specs under docs/superpowers/ for formal local
+  launch only; development mode keeps its existing dirty-worktree preview
+  behavior. Release and packaging must keep strict.
 EOF
 }
 
@@ -194,7 +195,7 @@ fi
 
 is_non_runtime_path() {
   case "$1" in
-    AGENTS.md|.agents/*) return 0 ;;
+    AGENTS.md|.agents/*|docs/superpowers/plans/*.md|docs/superpowers/specs/*.md) return 0 ;;
     *) return 1 ;;
   esac
 }
