@@ -50,7 +50,9 @@ def _run_v3_hooks(body: str) -> dict:
               returnSuggestionToComposer, continueRegularChat,
               clearSuggestionComposerAfterLaunch,
               resumePanel, reviewDocumentHtml,
-              handleWorkbenchClick, deliveryActionControl, applyResponse,
+              handleWorkbenchClick, handleWorkbenchOutsideClick,
+              isWorkbenchOutsideBlankTarget, collapseWorkbench,
+              deliveryActionControl, applyResponse,
                 expertTeamDiagnosticText, copyExpertTeamDiagnostics,
                 deferStatusRenderDuringComposition, releaseDeferredStatusCard,
                 bindWorkbenchEvents, renderStatusSurface,
@@ -289,6 +291,63 @@ def test_v3_workbench_binds_composition_events_and_releases_after_final_input_ev
     assert "root.addEventListener('compositionend'" in script
     assert "setTimeout(() =>" in script
     assert "renderStatusSurface(deferred)" in script
+
+
+def test_v3_outside_blank_click_collapses_only_from_known_chat_backgrounds_and_preserves_draft():
+    result = _run_v3_hooks(
+        """
+        context.document.body={classList:{add(name){this.added=name;},remove(){}}};
+        context.document.activeElement=null;
+        let collapsed=false;
+        let restoreFocused=false;
+        const field={id:'draft-field',type:'textarea',tagName:'TEXTAREA',dataset:{},value:'未提交草稿',checked:false};
+        const restore={focus(){restoreFocused=true;}};
+        const heading={setAttribute(){},focus(){}};
+        const root={
+          classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(name){if(name==='is-collapsed')collapsed=false;}},
+          querySelectorAll(selector){
+            if(selector==='input:not([type="file"]), textarea, select')return [field];
+            if(selector==='details[data-et3-disclosure]')return [];
+            return [];
+          },
+          querySelector(selector){
+            if(selector==='[data-et3-action="restore-workbench"]')return restore;
+            if(selector==='.et3-workbench-head h2')return heading;
+            if(selector==='.et3-workbench-scroll')return {scrollTop:0};
+            return null;
+          },
+        };
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+        hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
+
+        const target=id=>({matches(selector){
+          const accepted={
+            mainChat:'#mainChat',shell:'#mainChat > .messages-shell',messages:'#messages',inner:'#msgInner',
+            homeShell:'.taiji-home-shell',workspace:'.taiji-main-workspace',hero:'.taiji-hero',sessions:'.taiji-session-groups',
+          };
+          return selector.split(',').map(item=>item.trim()).includes(accepted[id]||'');
+        }});
+        const blank=['mainChat','shell','messages','inner','homeShell','workspace','hero','sessions'].map(id=>hooks.isWorkbenchOutsideBlankTarget(target(id)));
+        const protectedTargets=[
+          {matches(){return false;},tagName:'DIV',className:'message-content'},
+          {matches(){return false;},tagName:'BUTTON'},
+          {matches(){return false;},tagName:'TEXTAREA'},
+          {matches(){return false;},className:'toast'},
+          {matches(){return false;},role:'dialog'},
+        ].map(item=>hooks.isWorkbenchOutsideBlankTarget(item));
+        const handled=hooks.handleWorkbenchOutsideClick({target:target('inner')});
+        console.log(JSON.stringify({blank,protectedTargets,handled,collapsed,restoreFocused,draftValue:field.value}));
+        """
+    )
+
+    assert result == {
+        "blank": [True, True, True, True, True, True, True, True],
+        "protectedTargets": [False, False, False, False, False],
+        "handled": True,
+        "collapsed": True,
+        "restoreFocused": True,
+        "draftValue": "未提交草稿",
+    }
 
 
 def test_v3_ime_composition_defers_poll_renders_and_restores_final_input_focus_selection_and_scroll():

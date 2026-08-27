@@ -1332,11 +1332,42 @@
     return `<section class="et3-panel"><h3>已保留的阶段结果</h3><p class="et3-help">以下结果未被采用为当前阶段的权威成果，但已安全保留供你核对。请先按建议补充或调整，再重新生成当前阶段。</p>${document}</section>${issues}`;
   }
 
+  function isWorkbenchOutsideBlankTarget(target) {
+    if (!target?.matches) return false;
+    return target.matches([
+      '#mainChat', '#mainChat > .messages-shell', '#messages', '#msgInner',
+      '.taiji-home-shell', '.taiji-main-workspace', '.taiji-hero', '.taiji-session-groups',
+    ].join(', '));
+  }
+
+  function collapseWorkbench() {
+    const root = workbenchRoot();
+    if (!root || state.collapsed) return false;
+    state.draft = captureWorkbenchDraft(root, state.card);
+    state.collapsed = true;
+    root.classList.add('is-collapsed');
+    document.body.classList.add('expert-team-v3-collapsed');
+    root.querySelector('[data-et3-action="restore-workbench"]')?.focus();
+    return true;
+  }
+
+  function handleWorkbenchOutsideClick(event) {
+    if (state.collapsed || !isWorkbenchOutsideBlankTarget(event?.target)) return false;
+    return collapseWorkbench();
+  }
+
   function bindWorkbenchEvents(root) {
     if (state.workbenchController) state.workbenchController.abort();
     state.workbenchController = new AbortController();
     const signal = state.workbenchController.signal;
     root.addEventListener('click', event => handleWorkbenchClick(event), { signal });
+    [document.getElementById('mainChat'), document.querySelector?.('.taiji-home-shell')]
+      .filter(Boolean)
+      .forEach(surface => surface.addEventListener?.(
+        'click',
+        event => handleWorkbenchOutsideClick(event),
+        { signal },
+      ));
     root.addEventListener('compositionstart', event => {
       if (!event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
       state.compositionActive = true;
@@ -1391,12 +1422,7 @@
       return true;
     }
     if (action === 'close-workbench') {
-      state.draft = captureWorkbenchDraft(workbenchRoot(), state.card);
-      state.collapsed = true;
-      workbenchRoot()?.classList.add('is-collapsed');
-      document.body.classList.add('expert-team-v3-collapsed');
-      workbenchRoot()?.querySelector('[data-et3-action="restore-workbench"]')?.focus();
-      return true;
+      return collapseWorkbench();
     }
     if (action === 'restore-workbench') {
       state.collapsed = false;

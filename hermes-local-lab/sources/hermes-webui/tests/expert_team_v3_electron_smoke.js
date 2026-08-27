@@ -176,7 +176,7 @@ async function main() {
       window?.focus();
     });
     await page.bringToFront();
-    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.setViewportSize({ width: 1600, height: 900 });
     await page.evaluate(async ({ workspace }) => {
       document.getElementById('onboardingOverlay')?.remove();
       const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
@@ -190,6 +190,59 @@ async function main() {
       await switchPanel('writing');
       await window.ExpertTeamV3.loadCatalog(true);
     }, { workspace });
+
+    await page.evaluate(({ source }) => {
+      const makeRun = eval(`(${source})`);
+      return switchPanel('chat').then(() => window.ExpertTeamV3.renderStatusSurface(
+        buildExpertTeamCardFromRun(makeRun(window.__et3SessionId)),
+      ));
+    }, { source: fixture.toString() });
+    await page.waitForSelector('#expertTeamV3Workbench [data-et3-revision]', { timeout: 20000 });
+    const outsideClickDraft = page.locator('#expertTeamV3Workbench [data-et3-revision]');
+    await outsideClickDraft.fill('外部空白点击后仍需保留的草稿');
+    await page.locator('#expertTeamV3Workbench .et3-workbench-head h2').click();
+    assert(!await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Workbench collapsed after an internal click');
+    await page.locator('#msg').click({ position: { x: 8, y: 8 } });
+    assert(!await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Workbench collapsed after clicking an outside interactive control');
+    const blankPoint = await page.evaluate(() => {
+      const root = document.getElementById('expertTeamV3Workbench');
+      const rootRect = root?.getBoundingClientRect();
+      if (!rootRect) return null;
+      const blankSelector = '#mainChat, #mainChat > .messages-shell, #messages, #msgInner, .taiji-home-shell, .taiji-main-workspace, .taiji-hero, .taiji-session-groups';
+      for (let y = 60; y < innerHeight - 120; y += 20) {
+        for (let x = 20; x < rootRect.left - 20; x += 20) {
+          const target = document.elementFromPoint(x, y);
+          if (target?.matches(blankSelector)) return { x, y, id: target.id, className: String(target.className || '') };
+        }
+      }
+      return {
+        missing: true,
+        innerWidth,
+        innerHeight,
+        rootRect: rootRect.toJSON(),
+        samples: [
+          document.elementFromPoint(40, 100),
+          document.elementFromPoint(Math.max(20, rootRect.left - 40), 200),
+          document.elementFromPoint(Math.max(20, rootRect.left / 2), innerHeight / 2),
+        ].map(node => node ? `${node.tagName}#${node.id}.${String(node.className || '')}` : 'null'),
+      };
+    });
+    assert(blankPoint && !blankPoint.missing, 'No visible blank chat background was available outside the workbench', blankPoint);
+    await page.mouse.click(blankPoint.x, blankPoint.y);
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Blank chat background did not collapse the workbench');
+    await page.screenshot({ path: path.join(outDir, '00-outside-click-collapsed.png'), fullPage: false });
+    await page.getByRole('button', { name: '展开专家团工作台' }).click();
+    assert((await outsideClickDraft.inputValue()) === '外部空白点击后仍需保留的草稿', 'Outside-click collapse lost the current draft');
+    await page.getByRole('button', { name: '收起专家团工作台' }).click();
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Close button no longer collapses the workbench');
+    await page.getByRole('button', { name: '展开专家团工作台' }).click();
+    await page.screenshot({ path: path.join(outDir, '00-outside-click-restored.png'), fullPage: false });
+    process.stdout.write('EXPERT_TEAM_OUTSIDE_CLICK_SMOKE_PASSED\n');
+    await page.evaluate(async () => {
+      window.ExpertTeamV3.clearStatusSurface();
+      await switchPanel('writing');
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     await page.waitForSelector('#expertTeamV3PortalRoot .et3-team-card', { timeout: 20000 });
     const portal = await page.locator('#expertTeamV3PortalRoot').evaluate(root => ({ text: root.innerText, cards: root.querySelectorAll('.et3-team-card').length }));
