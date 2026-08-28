@@ -30,10 +30,13 @@ def _effective_profile() -> str:
     mode = _security_mode()
     if mode == "full":
         return "full"
-    allow_values = [_env_flag(var) for var in _CONTROLLED_ALLOW_VARS.values()]
-    if all(allow_values):
+    local_capabilities = (
+        _env_flag("TAIJI_ALLOW_TERMINAL"),
+        _env_flag("TAIJI_ALLOW_EXECUTE_CODE"),
+    )
+    if all(local_capabilities):
         return "local_controlled"
-    if any(allow_values):
+    if any(_env_flag(var) for var in _CONTROLLED_ALLOW_VARS.values()):
         return "custom_restricted"
     return "strict"
 
@@ -120,14 +123,20 @@ def set_security_profile(profile: str) -> dict[str, Any]:
     selected = str(profile or "").strip()
     if selected not in _PROFILE_CHOICES:
         raise ValueError("profile must be strict or local_controlled")
-    allow_value = "1" if selected == "local_controlled" else "0"
+    local_controlled = selected == "local_controlled"
     values = {
         "TAIJI_SECURITY_PROFILE": selected,
         "TAIJI_SECURITY_MODE": "restricted",
-        "TAIJI_ALLOW_TERMINAL": allow_value,
-        "TAIJI_ALLOW_EXECUTE_CODE": allow_value,
-        "TAIJI_ALLOW_DELEGATE_TASK": allow_value,
-        "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": allow_value,
+        "TAIJI_ALLOW_TERMINAL": "1" if local_controlled else "0",
+        "TAIJI_ALLOW_EXECUTE_CODE": "1" if local_controlled else "0",
+        "TAIJI_ALLOW_DELEGATE_TASK": (
+            "1" if local_controlled and _env_flag("TAIJI_ALLOW_DELEGATE_TASK") else "0"
+        ),
+        "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": (
+            "1"
+            if local_controlled and _env_flag("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS")
+            else "0"
+        ),
     }
     _write_env(values)
     os.environ.update(values)

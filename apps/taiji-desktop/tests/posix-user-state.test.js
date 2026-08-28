@@ -80,21 +80,39 @@ test("rejects a symbolic-link product state directory", () => {
   }
 });
 
-test("rejects a group-writable ancestor instead of changing its permissions", () => {
+test("accepts an owned 0775 ancestor without changing its permissions", () => {
   const sample = fixture();
   try {
     const localDir = path.join(sample.accountHome, ".local");
     fs.mkdirSync(localDir, { mode: 0o700 });
     fs.chmodSync(localDir, 0o775);
 
+    ensurePrivateUserStateDirectory({
+      accountHome: sample.accountHome,
+      stateDir: sample.stateDir,
+    });
+    assert.equal(mode(localDir), 0o775);
+    assert.equal(mode(sample.stateDir), 0o700);
+  } finally {
+    sample.cleanup();
+  }
+});
+
+test("rejects an owned world-writable ancestor without changing its permissions", () => {
+  const sample = fixture();
+  try {
+    const localDir = path.join(sample.accountHome, ".local");
+    fs.mkdirSync(localDir, { mode: 0o700 });
+    fs.chmodSync(localDir, 0o777);
+
     assert.throws(
       () => ensurePrivateUserStateDirectory({
         accountHome: sample.accountHome,
         stateDir: sample.stateDir,
       }),
-      /ancestor.*writable/,
+      /ancestor.*world writable/,
     );
-    assert.equal(mode(localDir), 0o775);
+    assert.equal(mode(localDir), 0o777);
   } finally {
     sample.cleanup();
   }

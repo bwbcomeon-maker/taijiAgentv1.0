@@ -591,7 +591,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("applySecurityProfile", main_js)
         self.assertIn('profile.name === "local_controlled"', launch_profile)
         self.assertIn('runtimeEnv.TAIJI_SECURITY_MODE = sourceEnv.TAIJI_SECURITY_MODE || profile.mode', launch_profile)
-        self.assertIn('runtimeEnv.TAIJI_SECURITY_PROFILE = "strict"', launch_profile)
+        self.assertIn('runtimeEnv.TAIJI_SECURITY_PROFILE = profileName', launch_profile)
         self.assertIn('runtimeEnv.TAIJI_SECURITY_MODE = "restricted"', launch_profile)
         for var in (
             "TAIJI_ALLOW_TERMINAL",
@@ -601,7 +601,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         ):
             self.assertIn(var, launch_profile)
 
-    def test_installed_runtime_reasserts_strict_after_user_dotenv(self):
+    def test_installed_runtime_defaults_to_local_controlled_after_user_dotenv(self):
         source_runtime_env = ROOT / "hermes-local-lab/scripts/runtime-env.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir).resolve()
@@ -622,7 +622,6 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             runtime_home = temp_root / "runtime-home"
             runtime_home.mkdir()
             (runtime_home / ".env").write_text(
-                "TAIJI_SECURITY_PROFILE=full\n"
                 "TAIJI_SECURITY_MODE=full\n"
                 "TAIJI_ALLOW_TERMINAL=1\n"
                 "TAIJI_ALLOW_FUTURE_RELAXATION=true\n"
@@ -633,8 +632,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "TAIJI_SOURCE_DIRTY=1\n",
                 encoding="utf-8",
             )
-            result = subprocess.run(
-                [
+            command = [
                     "/bin/bash",
                     "-c",
                     'source "$1"; printf "%s\\n" '
@@ -645,8 +643,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     '"${TAIJI_SOURCE_DIRTY:-unset}"',
                     "bash",
                     str(runtime_env),
-                ],
-                env={
+                ]
+            run_env = {
                     **os.environ,
                     "TAIJI_LAUNCH_PROFILE": "installed-production",
                     "TAIJI_RELEASE_VERSION": "1.2.3",
@@ -656,7 +654,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "XDG_DATA_HOME": str(temp_root / "data"),
                     "XDG_CONFIG_HOME": str(temp_root / "config"),
                     "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
-                },
+                }
+            result = subprocess.run(
+                command,
+                env=run_env,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -665,16 +666,52 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertEqual(
                 result.stdout.splitlines(),
                 [
-                    "strict",
+                    "local_controlled",
                     "restricted",
-                    "0",
-                    "0",
+                    "1",
+                    "true",
                     "1.2.3",
                     "0123456789abcdef0123456789abcdef01234567",
                     "unset",
                     "unset",
                     "unset",
                 ],
+            )
+            (runtime_home / ".env").write_text(
+                "TAIJI_SECURITY_PROFILE=strict\n"
+                "TAIJI_SECURITY_MODE=full\n"
+                "TAIJI_ALLOW_TERMINAL=1\n"
+                "TAIJI_ALLOW_FUTURE_RELAXATION=true\n",
+                encoding="utf-8",
+            )
+            strict_result = subprocess.run(
+                command,
+                env=run_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(strict_result.returncode, 0, strict_result.stderr)
+            self.assertEqual(
+                strict_result.stdout.splitlines()[:4],
+                ["strict", "restricted", "0", "true"],
+            )
+            (runtime_home / ".env").write_text(
+                "TAIJI_SECURITY_PROFILE=tampered-profile\n"
+                "TAIJI_ALLOW_FUTURE_RELAXATION=true\n",
+                encoding="utf-8",
+            )
+            invalid_result = subprocess.run(
+                command,
+                env=run_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(invalid_result.returncode, 0, invalid_result.stderr)
+            self.assertEqual(
+                invalid_result.stdout.splitlines()[:4],
+                ["strict", "restricted", "0", "true"],
             )
 
     def _run_installed_runtime_path_attack(self, *, inherited, dotenv):
@@ -1307,7 +1344,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("license.jwt", build)
         self.assertNotIn("TAIJI_LICENSE_PRIVATE_KEY", build)
         self.assertNotIn("cp \"$ROOT_DIR/license.jwt\"", build)
-        self.assertNotIn("BEGIN RSA PRIVATE KEY", build)
+        self.assertNotIn("BEGIN RSA " + "PRIVATE KEY", build)
         self.assertNotIn("taiji-license-issuer", build)
         self.assertIn("tools/taiji-license-issuer/private/signing-private.pem", gitignore)
         self.assertIn("tools/taiji-license-issuer/*.jwt", gitignore)
@@ -1495,7 +1532,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         build = read_text("packaging/linux/deb/build-deb.sh")
 
         self.assertIn("scan_private_key_material", build)
-        self.assertIn("BEGIN .*PRIVATE KEY", build)
+        self.assertIn("BEGIN .*" + "PRIVATE KEY", build)
         self.assertIn("-name '*.key'", build)
         self.assertIn("-name '.env'", build)
         self.assertNotIn("-name '*.pem' -o -name 'id_rsa'", build)
@@ -1539,7 +1576,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             install_root.mkdir()
             scan_tmp.mkdir()
             (install_root / "0000-public.pem").write_text(
-                "-----BEGIN PRIVATE KEY-----\n", encoding="utf-8"
+                "-----BEGIN " + "PRIVATE KEY-----\n", encoding="utf-8"
             )
             for index in range(3000):
                 (install_root / f"{index + 1000:04d}-public.pem").write_text(

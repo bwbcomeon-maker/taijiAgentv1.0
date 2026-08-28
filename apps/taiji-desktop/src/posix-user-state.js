@@ -23,10 +23,9 @@ function assertOwnedDirectory(metadata, value, userUid) {
 
 function assertTrustedAncestor(metadata, value, userUid) {
   assertDirectoryShape(metadata, value);
-  const writableByOthers = metadata.mode & 0o022;
   if (metadata.uid === userUid) {
-    if (writableByOthers !== 0) {
-      throw new Error(`Taiji user state ancestor is group or world writable: ${value}`);
+    if ((metadata.mode & 0o002) !== 0) {
+      throw new Error(`Taiji user state ancestor is world writable: ${value}`);
     }
     return;
   }

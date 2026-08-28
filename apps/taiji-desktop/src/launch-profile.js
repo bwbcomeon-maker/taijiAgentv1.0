@@ -297,13 +297,32 @@ function applySecurityProfile({
   packaged = false,
 }) {
   if (launchProfile.kind === INSTALLED_PROFILE) {
-    runtimeEnv.TAIJI_SECURITY_PROFILE = "strict";
+    const requestedProfile = String(sourceEnv.TAIJI_SECURITY_PROFILE || "").trim();
+    const profileName = requestedProfile === "" || requestedProfile === "local_controlled"
+      ? "local_controlled"
+      : "strict";
+    const delegateEnabled = Object.prototype.hasOwnProperty.call(
+      sourceEnv,
+      "TAIJI_ALLOW_DELEGATE_TASK",
+    ) && /^(1|true|yes|on|y)$/i.test(String(sourceEnv.TAIJI_ALLOW_DELEGATE_TASK).trim());
+    const skillScriptsEnabled = Object.prototype.hasOwnProperty.call(
+      sourceEnv,
+      "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
+    ) && /^(1|true|yes|on|y)$/i.test(
+      String(sourceEnv.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS).trim(),
+    );
+
+    runtimeEnv.TAIJI_SECURITY_PROFILE = profileName;
     runtimeEnv.TAIJI_SECURITY_MODE = "restricted";
-    for (const name of Object.keys(runtimeEnv)) {
-      if (name.startsWith("TAIJI_ALLOW_")) runtimeEnv[name] = "0";
+    if (profileName === "strict") {
+      for (const name of SECURITY_ALLOW_FLAGS) runtimeEnv[name] = "0";
+    } else {
+      runtimeEnv.TAIJI_ALLOW_TERMINAL = "1";
+      runtimeEnv.TAIJI_ALLOW_EXECUTE_CODE = "1";
+      runtimeEnv.TAIJI_ALLOW_DELEGATE_TASK = delegateEnabled ? "1" : "0";
+      runtimeEnv.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS = skillScriptsEnabled ? "1" : "0";
     }
-    for (const name of SECURITY_ALLOW_FLAGS) runtimeEnv[name] = "0";
-    return securityProfileDefaults("strict");
+    return securityProfileDefaults(profileName);
   }
 
   const explicit = String(sourceEnv.TAIJI_SECURITY_PROFILE || "").trim();

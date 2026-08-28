@@ -9,6 +9,7 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import hashlib
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ import sys
 import threading
 import time
 import unicodedata
+from pathlib import Path
 from typing import Optional
 from hermes_cli.config import cfg_get
 
@@ -494,6 +496,7 @@ _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _capability_session_approved: dict[str, set] = {}
+_directory_session_approved: dict[str, set[str]] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
 
@@ -663,6 +666,7 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _capability_session_approved.pop(session_key, None)
+        _directory_session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
@@ -766,6 +770,145 @@ def approve_capability_session(session_key: str, capability: str) -> None:
         return
     with _lock:
         _capability_session_approved.setdefault(session_key, set()).add(capability)
+
+
+def is_directory_session_approved(
+    session_key: str,
+    target: os.PathLike[str] | str,
+) -> bool:
+    if not session_key:
+        return False
+    try:
+        candidate = Path(target).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    with _lock:
+        roots = tuple(_directory_session_approved.get(session_key, set()))
+    for raw_root in roots:
+        root = Path(raw_root)
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def approve_directory_session(session_key: str, directory: os.PathLike[str] | str) -> None:
+    if not session_key:
+        return
+    try:
+        canonical = str(Path(directory).expanduser().resolve(strict=True))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return
+    with _lock:
+        _directory_session_approved.setdefault(session_key, set()).add(canonical)
+
+
+def request_directory_approval(
+    directory: os.PathLike[str] | str,
+    *,
+    action: str,
+    target: str,
+    timeout_seconds: int | None = None,
+) -> dict:
+    """Request one directory-scoped grant without exposing target contents."""
+    try:
+        canonical = str(Path(directory).expanduser().resolve(strict=True))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "invalid_directory",
+            "message": "BLOCKED: directory authorization target cannot be verified.",
+        }
+    session_key = get_current_session_key(default="")
+    if is_directory_session_approved(session_key, target):
+        return {"approved": True, "scope": "session", "directory": canonical}
+    if not (_is_gateway_approval_context() or env_var_enabled("HERMES_EXEC_ASK")):
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "unavailable",
+            "message": "BLOCKED: directory access requires an interactive approval UI.",
+        }
+    if timeout_seconds is None:
+        timeout_seconds = _get_approval_config().get("gateway_timeout", 300)
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError):
+        timeout_seconds = 300
+
+    description = f"智能体首次访问目录：{canonical}。批准后该目录内普通文件不再重复询问。"
+    approval_key = f"directory:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+    approval_data = {
+        "approval_type": "directory_access",
+        "kind": "directory_access",
+        "directory": canonical,
+        "action": str(action),
+        "command": "",
+        "pattern_key": approval_key,
+        "pattern_keys": [approval_key],
+        "description": description,
+        "title": "目录授权",
+        "allow_permanent": True,
+    }
+    entry, notify_cb = _begin_gateway_approval(session_key, approval_data)
+    if notify_cb is None:
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "unavailable",
+            "message": "BLOCKED: no directory approval listener is registered.",
+        }
+    try:
+        notify_cb(approval_data)
+    except Exception as exc:
+        logger.warning("Gateway directory approval notify failed: %s", exc)
+        _deny_gateway_approval_entry(session_key, entry)
+        return {
+            "approved": False,
+            "approval_applicable": False,
+            "outcome": "notify_failed",
+            "message": "BLOCKED: Failed to send directory approval request to user.",
+        }
+
+    resolved = entry.event.wait(timeout=max(timeout_seconds, 0))
+    with _lock:
+        queue = _gateway_queues.get(session_key, [])
+        if entry in queue:
+            queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+    choice = entry.result
+    if not resolved or choice is None or choice == "deny":
+        return {
+            "approved": False,
+            "approval_applicable": True,
+            "outcome": "timeout" if not resolved else "denied",
+            "message": "BLOCKED: directory access was not approved.",
+        }
+    if choice in {"session", "always"}:
+        approve_directory_session(session_key, canonical)
+
+    persisted = False
+    persist_error = None
+    if choice == "always":
+        try:
+            from tools.taiji_security_mode import enable_directory_env
+
+            persisted = bool(enable_directory_env(canonical).get("persisted"))
+        except Exception as exc:
+            persist_error = str(exc)
+            logger.warning("Failed to persist directory approval: %s", exc)
+    return {
+        "approved": True,
+        "approval_applicable": True,
+        "scope": choice,
+        "directory": canonical,
+        "persisted": persisted,
+        "persist_error": persist_error,
+    }
 
 
 def _capability_description(capability: str, allow_var: str) -> str:

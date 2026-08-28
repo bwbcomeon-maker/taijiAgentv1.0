@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,10 @@ _CONTROLLED_ALLOW_VARS = {
     "unapproved_skill_scripts": "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
     "delegate_task": "TAIJI_ALLOW_DELEGATE_TASK",
 }
+AUTHORIZED_DIRECTORIES_ENV = "TAIJI_AUTHORIZED_DIRECTORIES_JSON"
+_MAX_AUTHORIZED_DIRECTORIES_BYTES = 4096
+_MAX_AUTHORIZED_DIRECTORIES = 64
+_MAX_AUTHORIZED_DIRECTORY_LENGTH = 1024
 
 
 def env_flag_enabled(name: str) -> bool:
@@ -74,7 +79,7 @@ def security_profile() -> str:
     mode = security_mode()
     if mode == "full":
         return "full"
-    if all(env_flag_enabled(var) for var in _CONTROLLED_ALLOW_VARS.values()):
+    if is_terminal_allowed() and is_execute_code_allowed():
         return "local_controlled"
     if any(env_flag_enabled(var) for var in _CONTROLLED_ALLOW_VARS.values()):
         return "custom_restricted"
@@ -90,6 +95,94 @@ def _runtime_home() -> Path:
 
 def _env_file() -> Path:
     return _runtime_home() / ".env"
+
+
+def load_authorized_directories(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> list[str]:
+    env = os.environ if environ is None else environ
+    raw = str(env.get(AUTHORIZED_DIRECTORIES_ENV, "") or "")
+    if not raw or len(raw.encode("utf-8")) > _MAX_AUTHORIZED_DIRECTORIES_BYTES:
+        return []
+    try:
+        values = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(values, list) or len(values) > _MAX_AUTHORIZED_DIRECTORIES:
+        return []
+
+    from tools.taiji_path_policy import decide_path
+
+    accepted: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value or len(value) > _MAX_AUTHORIZED_DIRECTORY_LENGTH:
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_dir():
+            continue
+        decision = decide_path(
+            resolved,
+            action="workdir",
+            authorized_roots=[],
+        )
+        if decision.outcome != "directory_approval":
+            continue
+        accepted.add(str(resolved))
+    return sorted(accepted)
+
+
+def enable_directory_env(directory: str) -> dict[str, Any]:
+    """Persist one canonical ordinary directory for desktop runtimes."""
+    if os.environ.get("TAIJI_DESKTOP_ONLY") != "1":
+        return {
+            "persisted": False,
+            "reason": "persistent directory approval is only available in the desktop runtime",
+        }
+    candidate = Path(directory).expanduser()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return {"persisted": False, "reason": "directory cannot be resolved"}
+    if not resolved.is_dir():
+        return {"persisted": False, "reason": "directory does not exist"}
+
+    from tools.taiji_path_policy import decide_path
+
+    decision = decide_path(resolved, action="workdir", authorized_roots=[])
+    if decision.outcome != "directory_approval":
+        return {"persisted": False, "reason": decision.code}
+
+    values = set(load_authorized_directories())
+    values.add(str(resolved))
+    if len(values) > _MAX_AUTHORIZED_DIRECTORIES:
+        return {"persisted": False, "reason": "authorized directory limit reached"}
+    serialized = json.dumps(
+        sorted(values),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(serialized.encode("utf-8")) > _MAX_AUTHORIZED_DIRECTORIES_BYTES:
+        return {"persisted": False, "reason": "authorized directory data is too large"}
+
+    from agent.provider_credentials import mutate_env_unique
+
+    runtime_home = _runtime_home()
+    mutate_env_unique(
+        {AUTHORIZED_DIRECTORIES_ENV: serialized},
+        config_path=runtime_home / "config.yaml",
+    )
+    os.environ[AUTHORIZED_DIRECTORIES_ENV] = serialized
+    return {
+        "persisted": True,
+        "env_file": str(_env_file()),
+        "directory": str(resolved),
+    }
 
 
 def enable_capability_env(allow_var: str) -> dict[str, Any]:

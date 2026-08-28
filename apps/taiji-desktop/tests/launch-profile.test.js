@@ -244,15 +244,11 @@ test("installed-production rejects a symlinked runtime code directory", (t) => {
   );
 });
 
-test("installed-production overrides every security relaxation with strict", (t) => {
+test("installed-production defaults to local-controlled terminal and code execution", (t) => {
   const { applySecurityProfile } = loadLaunchProfile();
   const fixture = resolveInstalled(t);
   const profile = fixture.resolve();
   const env = {
-    TAIJI_SECURITY_PROFILE: "full",
-    TAIJI_SECURITY_MODE: "full",
-    TAIJI_ALLOW_TERMINAL: "1",
-    TAIJI_ALLOW_EXECUTE_CODE: "yes",
     TAIJI_ALLOW_FUTURE_RELAXATION: "true",
   };
   const security = applySecurityProfile({
@@ -261,12 +257,84 @@ test("installed-production overrides every security relaxation with strict", (t)
     sourceEnv: env,
     packaged: false,
   });
+  assert.deepEqual(security, { name: "local_controlled", mode: "restricted", allow: true });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "local_controlled");
+  assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+  assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "true");
+});
+
+test("installed-production preserves an explicit strict profile across restart", (t) => {
+  const { applySecurityProfile } = loadLaunchProfile();
+  const profile = resolveInstalled(t).resolve();
+  const env = {
+    TAIJI_SECURITY_PROFILE: "strict",
+    TAIJI_ALLOW_TERMINAL: "1",
+    TAIJI_ALLOW_EXECUTE_CODE: "1",
+    TAIJI_ALLOW_DELEGATE_TASK: "1",
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS: "1",
+    TAIJI_ALLOW_FUTURE_RELAXATION: "true",
+  };
+
+  const security = applySecurityProfile({
+    launchProfile: profile,
+    runtimeEnv: env,
+    sourceEnv: env,
+    packaged: false,
+  });
+
   assert.deepEqual(security, { name: "strict", mode: "restricted", allow: false });
   assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
   assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
   assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
   assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
-  assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "0");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+  assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "true");
+});
+
+test("installed-production fails closed for an invalid persisted security profile", (t) => {
+  const { applySecurityProfile } = loadLaunchProfile();
+  const fixture = resolveInstalled(t);
+  const env = { TAIJI_SECURITY_PROFILE: "tampered-profile" };
+
+  const profile = fixture.resolve({ env });
+  const security = applySecurityProfile({
+    launchProfile: profile,
+    runtimeEnv: env,
+    sourceEnv: env,
+    packaged: false,
+  });
+
+  assert.deepEqual(security, { name: "strict", mode: "restricted", allow: false });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
+});
+
+test("installed local-controlled keeps delegate and skill-script choices independent", (t) => {
+  const { applySecurityProfile } = loadLaunchProfile();
+  const profile = resolveInstalled(t).resolve();
+  const env = {
+    TAIJI_SECURITY_PROFILE: "local_controlled",
+    TAIJI_ALLOW_DELEGATE_TASK: "1",
+  };
+
+  const security = applySecurityProfile({
+    launchProfile: profile,
+    runtimeEnv: env,
+    sourceEnv: env,
+    packaged: false,
+  });
+
+  assert.equal(security.name, "local_controlled");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "1");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
 });
 
 test("source formal runs the source gate while development and installed-production skip it", (t) => {

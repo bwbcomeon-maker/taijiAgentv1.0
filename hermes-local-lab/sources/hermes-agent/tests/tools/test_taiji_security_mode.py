@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 def test_generic_agent_without_taiji_runtime_keeps_upstream_capabilities(monkeypatch):
     monkeypatch.delenv("TAIJI_SECURITY_MODE", raising=False)
@@ -283,6 +285,26 @@ def test_security_status_reports_local_controlled_profile(monkeypatch):
     assert status["capabilities"]["document_read"]["enabled"] is True
 
 
+def test_local_controlled_profile_requires_only_terminal_and_execute_code(
+    monkeypatch,
+):
+    monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
+    monkeypatch.setenv("TAIJI_ALLOW_TERMINAL", "1")
+    monkeypatch.setenv("TAIJI_ALLOW_EXECUTE_CODE", "1")
+    monkeypatch.setenv("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS", "0")
+    monkeypatch.setenv("TAIJI_ALLOW_DELEGATE_TASK", "0")
+
+    from tools.taiji_security_mode import build_security_status
+
+    status = build_security_status()
+
+    assert status["profile"] == "local_controlled"
+    assert status["capabilities"]["terminal"]["allowed"] is True
+    assert status["capabilities"]["execute_code"]["allowed"] is True
+    assert status["capabilities"]["delegate_task"]["allowed"] is False
+    assert status["capabilities"]["unapproved_skill_scripts"]["allowed"] is False
+
+
 def test_security_status_contract_reports_blocked_capability_reason(monkeypatch):
     monkeypatch.setenv("TAIJI_SECURITY_MODE", "restricted")
     monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
@@ -418,3 +440,78 @@ def test_execute_code_posix_fails_closed_when_short_socket_dir_is_unavailable(mo
     assert "secure local RPC socket" in result["error"]
     assert socket.AF_INET not in opened_socket_families
     assert not any(taiji_tmp.iterdir())
+
+
+def test_authorized_directory_parser_is_bounded_and_deduplicated(
+    monkeypatch,
+    tmp_path,
+):
+    from tools.taiji_security_mode import load_authorized_directories
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setenv(
+        "TAIJI_AUTHORIZED_DIRECTORIES_JSON",
+        json.dumps([str(second), "relative/path", str(first), str(second)]),
+    )
+
+    assert load_authorized_directories() == sorted(
+        [str(first.resolve()), str(second.resolve())]
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-json",
+        json.dumps({"path": "/tmp"}),
+        json.dumps(["relative/path"]),
+        json.dumps(["x" * 5000]),
+    ],
+)
+def test_authorized_directory_parser_fails_closed(raw, monkeypatch):
+    from tools.taiji_security_mode import load_authorized_directories
+
+    monkeypatch.setenv("TAIJI_AUTHORIZED_DIRECTORIES_JSON", raw)
+
+    assert load_authorized_directories() == []
+
+
+def test_directory_persistence_uses_canonical_env_writer(
+    monkeypatch,
+    tmp_path,
+):
+    from agent import provider_credentials
+    from tools.taiji_security_mode import enable_directory_env
+
+    runtime_home = tmp_path / "runtime-home"
+    directory = tmp_path / "outside"
+    directory.mkdir()
+    calls = []
+
+    def _record(updates, *, config_path=None, **_kwargs):
+        calls.append((dict(updates), config_path))
+        return {key: True for key in updates}
+
+    monkeypatch.setenv("TAIJI_DESKTOP_ONLY", "1")
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.delenv("TAIJI_AUTHORIZED_DIRECTORIES_JSON", raising=False)
+    monkeypatch.setattr(provider_credentials, "mutate_env_unique", _record)
+
+    result = enable_directory_env(str(directory))
+
+    expected = json.dumps(
+        [str(directory.resolve())],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert result["persisted"] is True
+    assert calls == [
+        (
+            {"TAIJI_AUTHORIZED_DIRECTORIES_JSON": expected},
+            runtime_home / "config.yaml",
+        )
+    ]
+    assert os.environ["TAIJI_AUTHORIZED_DIRECTORIES_JSON"] == expected

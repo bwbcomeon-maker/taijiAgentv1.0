@@ -149,6 +149,10 @@ MESSAGE_POLICY_OVERRIDE_FORBIDDEN = "检测到不允许的授权策略覆盖，�
 MESSAGE_PUBLIC_KEY_UNTRUSTED = "产品授权验签材料不可信，请联系管理员修复安装。"
 MESSAGE_STATUS_UNAVAILABLE = "授权校验不可用，请联系管理员修复安装。"
 MESSAGE_FILE_UNTRUSTED = "授权文件安全属性不符合要求，请重新导入授权。"
+MESSAGE_FILE_LINK_UNTRUSTED = "授权文件包含符号链接或重解析点，已阻止访问。"
+MESSAGE_FILE_OWNER_UNTRUSTED = "授权文件所有者不是当前用户，已阻止访问。"
+MESSAGE_FILE_PERMISSIONS_UNTRUSTED = "授权文件或其目录权限不安全，请联系管理员处理。"
+MESSAGE_FILE_INTEGRITY_UNTRUSTED = "授权文件类型或链接计数异常，请重新导入授权。"
 MESSAGE_STATE_UNTRUSTED = "授权状态文件安全属性不符合要求，请联系管理员处理。"
 MESSAGE_DEVICE_UNTRUSTED = "设备身份文件安全属性不符合要求，请联系管理员处理。"
 MESSAGE_VERSION_UNTRUSTED = "产品版本信息不可信，请联系管理员修复安装。"
@@ -189,6 +193,7 @@ class LicenseStatus:
     status: str
     required: bool
     code: Optional[str] = None
+    security_reason: Optional[str] = None
     message: str = ""
     license_id: Optional[str] = None
     customer: Optional[str] = None
@@ -221,6 +226,7 @@ class LicenseStatus:
             "status": self.status,
             "required": self.required,
             "code": self.code,
+            "security_reason": self.security_reason,
             "message": self.message,
             "license_id": self.license_id,
             "customer": self.customer,
@@ -735,20 +741,18 @@ def _secure_posix_prepare_runtime_parent(
             directory_fds.append(child_fd)
             current_fd = child_fd
             child_stat = os.fstat(current_fd)
-            if _trusted_production_parent(child_stat, user_uid=uid):
-                continue
-
             is_product_leaf = index == len(parent_parts) - 1
             if (
                 is_product_leaf
                 and stat.S_ISDIR(child_stat.st_mode)
                 and child_stat.st_uid == uid
-                and stat.S_IMODE(child_stat.st_mode) & 0o022
+                and stat.S_IMODE(child_stat.st_mode) != 0o700
             ):
                 os.fchmod(current_fd, 0o700)
                 os.fsync(current_fd)
-                if _trusted_production_parent(os.fstat(current_fd), user_uid=uid):
-                    continue
+                child_stat = os.fstat(current_fd)
+            if _trusted_production_parent(child_stat, user_uid=uid):
+                continue
             raise _LicenseUserResourceError
         return True
     except _LicenseUserResourceError:
@@ -1848,15 +1852,18 @@ def _license_state_invalid_status(
     payload: Optional[Mapping[str, Any]],
     now_ts: float,
     code: str,
+    security_reason: Optional[str] = None,
 ) -> LicenseStatus:
-    return _status(
+    message = MESSAGE_CLOCK_ROLLBACK if code == "license_clock_rollback" else MESSAGE_STATE_UNTRUSTED
+    status = _status(
         "invalid",
         required=required,
         code=code,
-        message=MESSAGE_CLOCK_ROLLBACK,
+        message=message,
         payload=payload,
         now_ts=now_ts,
     )
+    return status if security_reason is None else replace(status, security_reason=security_reason)
 
 
 def _check_license_clock(
@@ -1875,6 +1882,7 @@ def _check_license_clock(
             payload=payload,
             now_ts=now_ts,
             code="license_state_invalid",
+            security_reason="content_integrity",
         )
     if last_ts is not None and now_ts < last_ts - LICENSE_CLOCK_ROLLBACK_TOLERANCE_SECONDS:
         return _license_state_invalid_status(
@@ -2090,7 +2098,9 @@ class _LicensePublicKeyError(Exception):
 
 
 class _LicenseUserResourceError(Exception):
-    pass
+    def __init__(self, reason: str = "resource_untrusted") -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _LicenseVersionError(Exception):
@@ -2103,18 +2113,28 @@ def _trusted_production_parent(
     user_uid: int | None,
 ) -> bool:
     """Accept only parents writable by the account itself or privileged root group."""
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-        return False
+    return _production_parent_untrusted_reason(parent_stat, user_uid=user_uid) is None
+
+
+def _production_parent_untrusted_reason(
+    parent_stat: os.stat_result,
+    *,
+    user_uid: int | None,
+) -> str | None:
+    if stat.S_ISLNK(parent_stat.st_mode):
+        return "link"
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        return "integrity"
     mode = stat.S_IMODE(parent_stat.st_mode)
     if parent_stat.st_uid == 0:
         if mode & 0o002:
-            return False
+            return "permissions"
         if mode & 0o020 and getattr(parent_stat, "st_gid", -1) != 0:
-            return False
-        return True
+            return "permissions"
+        return None
     if user_uid is not None and parent_stat.st_uid == user_uid:
-        return not bool(mode & 0o022)
-    return False
+        return "permissions" if mode & 0o002 else None
+    return "owner"
 
 
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x0400
@@ -2274,7 +2294,7 @@ def _validate_windows_path_security(
                 or getattr(parent_stat, "st_file_attributes", 0)
                 & _WINDOWS_REPARSE_POINT_ATTRIBUTE
             ):
-                raise _LicenseUserResourceError
+                raise _LicenseUserResourceError("reparse")
             parent_owner, parent_current, parent_entries = _windows_security_snapshot(
                 parent
             )
@@ -2285,7 +2305,9 @@ def _validate_windows_path_security(
                 require_current_user_owner=False,
                 dangerous_access_mask=_WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK,
             ):
-                raise _LicenseUserResourceError
+                trusted_owners = {parent_current.upper(), *_WINDOWS_TRUSTED_SYSTEM_SIDS}
+                reason = "owner" if parent_owner.upper() not in trusted_owners else "acl"
+                raise _LicenseUserResourceError(reason)
 
         if file_stat is None:
             if required:
@@ -2293,12 +2315,12 @@ def _validate_windows_path_security(
             return False
         if (
             stat.S_ISLNK(file_stat.st_mode)
-            or not stat.S_ISREG(file_stat.st_mode)
-            or file_stat.st_nlink != 1
             or getattr(file_stat, "st_file_attributes", 0)
             & _WINDOWS_REPARSE_POINT_ATTRIBUTE
         ):
-            raise _LicenseUserResourceError
+            raise _LicenseUserResourceError("reparse")
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise _LicenseUserResourceError("integrity")
         owner_sid, current_sid, entries = _windows_security_snapshot(path)
         if not _windows_acl_is_trusted(
             owner_sid=owner_sid,
@@ -2306,7 +2328,8 @@ def _validate_windows_path_security(
             current_user_sid=current_sid,
             require_current_user_owner=require_current_user_owner,
         ):
-            raise _LicenseUserResourceError
+            reason = "owner" if require_current_user_owner and owner_sid.upper() != current_sid.upper() else "acl"
+            raise _LicenseUserResourceError(reason)
     except _LicenseUserResourceError:
         raise
     except Exception:
@@ -2333,21 +2356,24 @@ def _validate_production_user_file(path: Path, *, required: bool) -> bool:
         raise _LicenseUserResourceError from None
 
     uid = os.getuid()
-    if (
-        stat.S_ISLNK(file_stat.st_mode)
-        or not stat.S_ISREG(file_stat.st_mode)
-        or file_stat.st_uid != uid
-        or stat.S_IMODE(file_stat.st_mode) != 0o600
-        or file_stat.st_nlink != 1
-    ):
-        raise _LicenseUserResourceError
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise _LicenseUserResourceError("link")
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise _LicenseUserResourceError("integrity")
+    if file_stat.st_uid != uid:
+        raise _LicenseUserResourceError("owner")
+    if stat.S_IMODE(file_stat.st_mode) != 0o600:
+        raise _LicenseUserResourceError("permissions")
     try:
         if path.resolve(strict=True) != path.absolute():
-            raise _LicenseUserResourceError
+            raise _LicenseUserResourceError("link")
         for parent in path.parents:
             parent_stat = parent.lstat()
-            if not _trusted_production_parent(parent_stat, user_uid=uid):
-                raise _LicenseUserResourceError
+            reason = _production_parent_untrusted_reason(parent_stat, user_uid=uid)
+            if reason is not None:
+                raise _LicenseUserResourceError(reason)
+            if parent == path.parent and stat.S_IMODE(parent_stat.st_mode) != 0o700:
+                raise _LicenseUserResourceError("permissions")
     except OSError:
         raise _LicenseUserResourceError from None
     return True
@@ -2531,16 +2557,68 @@ def _attach_policy(status: LicenseStatus, policy: LicensePolicy) -> LicenseStatu
     )
 
 
-def _policy_error_status(policy: LicensePolicy, *, code: str, message: str) -> LicenseStatus:
+def _policy_error_status(
+    policy: LicensePolicy,
+    *,
+    code: str,
+    message: str,
+    security_reason: Optional[str] = None,
+) -> LicenseStatus:
     return _attach_policy(
         LicenseStatus(
             status="invalid",
             required=policy.required,
             code=code,
+            security_reason=security_reason,
             message=message,
             machine_binding_required=policy.machine_binding_required,
         ),
         policy,
+    )
+
+
+def _license_resource_error_status(
+    policy: LicensePolicy,
+    *,
+    resource: str,
+    error: _LicenseUserResourceError,
+) -> LicenseStatus:
+    reason = getattr(error, "reason", "resource_untrusted")
+    if os.name == "nt":
+        stable_reason = {
+            "reparse": "windows_reparse_untrusted",
+            "owner": "windows_owner_untrusted",
+            "acl": "windows_acl_untrusted",
+            "integrity": "content_integrity",
+        }.get(reason, "windows_resource_untrusted")
+    else:
+        stable_reason = {
+            "link": "posix_symlink_untrusted",
+            "owner": "posix_owner_untrusted",
+            "permissions": "posix_permissions_untrusted",
+            "integrity": "content_integrity",
+        }.get(reason, "posix_resource_untrusted")
+    if resource == "file":
+        messages = {
+            "link": MESSAGE_FILE_LINK_UNTRUSTED,
+            "owner": MESSAGE_FILE_OWNER_UNTRUSTED,
+            "permissions": MESSAGE_FILE_PERMISSIONS_UNTRUSTED,
+            "integrity": MESSAGE_FILE_INTEGRITY_UNTRUSTED,
+        }
+        return _policy_error_status(
+            policy,
+            code="license_file_untrusted",
+            message=messages.get(reason, MESSAGE_FILE_UNTRUSTED),
+            security_reason=stable_reason,
+        )
+    return _policy_error_status(
+        policy,
+        code=f"license_{resource}_untrusted",
+        message={
+            "state": MESSAGE_STATE_UNTRUSTED,
+            "device": MESSAGE_DEVICE_UNTRUSTED,
+        }[resource],
+        security_reason=stable_reason,
     )
 
 
@@ -2821,11 +2899,11 @@ def load_license_status(
         license_device_path = runtime_license_device_path()
         try:
             license_exists = _validate_production_user_file(license_path, required=False)
-        except _LicenseUserResourceError:
-            return _policy_error_status(
+        except _LicenseUserResourceError as exc:
+            return _license_resource_error_status(
                 policy,
-                code="license_file_untrusted",
-                message=MESSAGE_FILE_UNTRUSTED,
+                resource="file",
+                error=exc,
             )
         if not license_exists:
             return _attach_policy(

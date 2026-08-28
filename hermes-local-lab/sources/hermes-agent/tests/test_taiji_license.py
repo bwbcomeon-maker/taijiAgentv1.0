@@ -741,9 +741,16 @@ def test_production_rejects_license_path_environment_redirect(
     assert status.code == "license_policy_override_forbidden"
 
 
-@pytest.mark.parametrize("shape", ["wide_mode", "symlink", "hardlink"])
+@pytest.mark.parametrize(
+    ("shape", "expected_reason"),
+    [
+        ("wide_mode", "posix_permissions_untrusted"),
+        ("symlink", "posix_symlink_untrusted"),
+        ("hardlink", "content_integrity"),
+    ],
+)
 def test_production_rejects_untrusted_license_file_shape(
-    monkeypatch, tmp_path, installed_production_profile, shape
+    monkeypatch, tmp_path, installed_production_profile, shape, expected_reason
 ):
     canonical = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
     canonical.parent.mkdir(parents=True)
@@ -766,6 +773,9 @@ def test_production_rejects_untrusted_license_file_shape(
 
     assert status.status == "invalid"
     assert status.code == "license_file_untrusted"
+    assert status.security_reason == expected_reason
+    assert status.to_public_dict()["security_reason"] == expected_reason
+    assert "系统时间" not in status.message
 
 
 def test_production_user_file_accepts_root_group_writable_root_parent(
@@ -773,6 +783,7 @@ def test_production_user_file_accepts_root_group_writable_root_parent(
 ):
     candidate = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
     candidate.parent.mkdir(parents=True)
+    candidate.parent.chmod(0o700)
     candidate.write_text("signed-token\n", encoding="utf-8")
     candidate.chmod(0o600)
     real_lstat = taiji_license.Path.lstat
@@ -798,6 +809,35 @@ def test_production_user_file_accepts_root_group_writable_root_parent(
     monkeypatch.setattr(taiji_license.Path, "lstat", kylin_root_lstat)
 
     assert taiji_license._validate_production_user_file(candidate, required=True)
+
+
+def test_production_user_file_accepts_owned_group_writable_ancestor(
+    monkeypatch, tmp_path
+):
+    candidate = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    candidate.parent.mkdir(parents=True)
+    candidate.parent.chmod(0o700)
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    candidate.chmod(0o600)
+    owned_ancestor = candidate.parents[2]
+    owned_ancestor.chmod(0o775)
+    real_lstat = taiji_license.Path.lstat
+
+    def trusted_fixture_lstat(path):
+        result = real_lstat(path)
+        if path in candidate.parents:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFDIR | (0o775 if path == owned_ancestor else 0o700),
+                st_uid=os.getuid(),
+                st_gid=os.getgid(),
+                st_nlink=result.st_nlink,
+            )
+        return result
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", trusted_fixture_lstat)
+
+    assert taiji_license._validate_production_user_file(candidate, required=True)
+    assert stat.S_IMODE(owned_ancestor.stat().st_mode) == 0o775
 
 
 def test_windows_user_file_validation_uses_acl_without_posix_uid(
@@ -1443,7 +1483,7 @@ def test_source_runtime_loaders_reject_untrusted_repo_resource_shape(
     [
         (0, 100, 0o775, None),
         (0, 0, 0o777, None),
-        (1000, 1000, 0o770, 1000),
+        (1000, 1000, 0o777, 1000),
         (1001, 1001, 0o755, 1000),
     ],
 )
@@ -1460,6 +1500,17 @@ def test_production_parent_trust_rejects_non_privileged_writers(
         parent_stat,
         user_uid=user_uid,
     )
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755, 0o775])
+def test_production_parent_trust_accepts_owned_normal_modes(mode):
+    parent_stat = types.SimpleNamespace(
+        st_mode=stat.S_IFDIR | mode,
+        st_uid=1000,
+        st_gid=1000,
+    )
+
+    assert taiji_license._trusted_production_parent(parent_stat, user_uid=1000)
 
 
 def test_production_version_input_overwrites_user_environment(
@@ -2286,7 +2337,8 @@ def test_corrupted_success_state_is_invalid(tmp_path, signing_keys):
 
     assert status.status == "invalid"
     assert status.code == "license_state_invalid"
-    assert "系统时间异常" in status.message
+    assert status.security_reason == "content_integrity"
+    assert "系统时间异常" not in status.message
 
 
 def test_import_style_validation_can_skip_local_success_state(tmp_path, signing_keys):
@@ -2756,7 +2808,7 @@ def test_secure_runtime_state_write_repairs_owned_group_writable_leaf(tmp_path):
     assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
 
 
-def test_secure_runtime_state_write_rejects_group_writable_ancestor(tmp_path):
+def test_secure_runtime_state_write_accepts_owned_group_writable_ancestor(tmp_path):
     if os.name != "posix":
         pytest.skip("POSIX runtime resource validation")
     profile = tmp_path / "profile"
@@ -2766,17 +2818,17 @@ def test_secure_runtime_state_write_rejects_group_writable_ancestor(tmp_path):
     local_dir.chmod(0o775)
     state_path = local_dir / "state/taiji-agent/license-state.json"
 
-    with pytest.raises(taiji_license._LicenseStateError):
-        taiji_license._write_license_state(
-            path=state_path,
-            now_ts=1_000_000,
-            license_id="lic-untrusted-ancestor",
-            token="signed-token",
-            secure_root=profile,
-        )
+    taiji_license._write_license_state(
+        path=state_path,
+        now_ts=1_000_000,
+        license_id="lic-trusted-ancestor",
+        token="signed-token",
+        secure_root=profile,
+    )
 
     assert stat.S_IMODE(local_dir.stat().st_mode) == 0o775
-    assert not state_path.exists()
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
 
 
 def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_path, signing_keys):

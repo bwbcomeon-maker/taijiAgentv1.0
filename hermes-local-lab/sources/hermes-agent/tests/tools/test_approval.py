@@ -1667,3 +1667,122 @@ class TestGatewayApprovalCancellation:
         assert created_entries[0].result == "deny"
         assert created_entries[0].event.is_set()
         assert not mod.has_blocking_approval(self.SESSION_KEY)
+
+
+class TestDirectoryScopeApproval:
+    SESSION_KEY = "directory-scope-approval"
+
+    def _prepare_gateway(self, monkeypatch):
+        monkeypatch.setenv("HERMES_SESSION_KEY", self.SESSION_KEY)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
+        monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+        approval_module.clear_session(self.SESSION_KEY)
+
+    def _request_async(self, monkeypatch, directory, *, choice):
+        self._prepare_gateway(monkeypatch)
+        events = []
+        result = {}
+        approval_module.register_gateway_notify(
+            self.SESSION_KEY,
+            lambda payload: events.append(payload),
+        )
+        worker = threading.Thread(
+            target=lambda: result.setdefault(
+                "value",
+                approval_module.request_directory_approval(
+                    directory,
+                    action="read",
+                    target=str(Path(directory) / "document.txt"),
+                    timeout_seconds=5,
+                ),
+            )
+        )
+        worker.start()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not events:
+            time.sleep(0.01)
+        assert events
+        assert approval_module.resolve_gateway_approval(
+            self.SESSION_KEY,
+            choice,
+        ) == 1
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        approval_module.unregister_gateway_notify(self.SESSION_KEY)
+        return events[0], result["value"]
+
+    def test_directory_request_uses_canonical_scope_without_file_contents(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        directory = tmp_path / "outside"
+        directory.mkdir()
+
+        payload, result = self._request_async(
+            monkeypatch,
+            directory,
+            choice="once",
+        )
+
+        assert payload["approval_type"] == "directory_access"
+        assert payload["directory"] == str(directory.resolve())
+        assert payload["action"] == "read"
+        assert "document.txt" not in payload["description"]
+        assert "contents" not in payload
+        assert result["approved"] is True
+        assert result["scope"] == "once"
+        assert not approval_module.is_directory_session_approved(
+            self.SESSION_KEY,
+            directory / "another.txt",
+        )
+
+    def test_session_directory_approval_covers_children(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        directory = tmp_path / "outside"
+        directory.mkdir()
+
+        _payload, result = self._request_async(
+            monkeypatch,
+            directory,
+            choice="session",
+        )
+
+        assert result["approved"] is True
+        assert result["scope"] == "session"
+        assert approval_module.is_directory_session_approved(
+            self.SESSION_KEY,
+            directory / "nested" / "file.txt",
+        )
+
+    def test_always_directory_approval_persists_only_canonical_directory(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        directory = tmp_path / "outside"
+        directory.mkdir()
+        calls = []
+
+        monkeypatch.setattr(
+            "tools.taiji_security_mode.enable_directory_env",
+            lambda value: calls.append(value) or {"persisted": True},
+        )
+
+        _payload, result = self._request_async(
+            monkeypatch,
+            directory,
+            choice="always",
+        )
+
+        assert result["approved"] is True
+        assert result["scope"] == "always"
+        assert result["persisted"] is True
+        assert calls == [str(directory.resolve())]
+        assert approval_module.is_directory_session_approved(
+            self.SESSION_KEY,
+            directory / "nested" / "file.txt",
+        )
