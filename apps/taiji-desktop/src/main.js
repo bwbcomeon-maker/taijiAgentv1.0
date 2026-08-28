@@ -21,6 +21,7 @@ const {
   resolveWindowsRuntimeLayout,
   windowsRuntimeCommands,
 } = require("./windows-runtime");
+const { ensurePrivateUserStateDirectory } = require("./posix-user-state");
 
 const APP_NAME = "太极 Agent";
 const DEFAULT_AGENT_PORT = 18642;
@@ -106,6 +107,7 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 function desktopBootLog(message) {
   try {
+    ensureInstalledUserStateDir();
     appendDesktopLog(path.join(userStateDir(), "logs", "taiji-desktop.log"), `[desktop] ${message}`);
   } catch (_) {
     // Logging must never block app startup.
@@ -200,6 +202,17 @@ function userStateDir() {
   }
   const base = process.env.XDG_STATE_HOME || path.join(systemAccountHome(), ".local", "state");
   return path.join(base, "taiji-agent");
+}
+
+function ensureInstalledUserStateDir() {
+  if (!launchProfile || launchProfile.kind !== INSTALLED_PROFILE || process.platform === "win32") {
+    return;
+  }
+  const accountHome = systemAccountHome();
+  ensurePrivateUserStateDirectory({
+    accountHome,
+    stateDir: path.join(accountHome, ".local", "state", "taiji-agent"),
+  });
 }
 
 function userDataDir() {
@@ -606,6 +619,7 @@ function stopRuntime() {
 
 async function startRuntime() {
   desktopBootLog("startRuntime");
+  ensureInstalledUserStateDir();
   const labDir = resolveLabDir();
   const declaredSourceRoot = launchProfile.kind === "source"
     ? String(process.env.TAIJI_SOURCE_ROOT || "").trim()

@@ -399,6 +399,54 @@ def test_source_runtime_valid_license_uses_same_machine_bound_policy(
     assert blocked is None
 
 
+def test_source_runtime_first_validation_repairs_owned_group_writable_state_directory(
+    monkeypatch, tmp_path, signing_keys
+):
+    if os.name != "posix":
+        pytest.skip("POSIX runtime resource validation")
+    private_key, public_key = signing_keys
+    license_path, state_path, _ = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    license_path.parent.mkdir(parents=True, mode=0o700)
+    _write_token(license_path, private_key, max_version="1.0.0")
+    license_path.chmod(0o600)
+    state_path.parent.mkdir(parents=True, mode=0o700)
+    state_path.parent.chmod(0o775)
+
+    blocked = taiji_license.require_valid_license()
+
+    assert blocked is None
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_source_runtime_repairs_owned_group_writable_existing_state_directory(
+    monkeypatch, tmp_path, signing_keys
+):
+    if os.name != "posix":
+        pytest.skip("POSIX runtime resource validation")
+    private_key, public_key = signing_keys
+    license_path, state_path, _ = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    license_path.parent.mkdir(parents=True, mode=0o700)
+    _write_token(license_path, private_key, max_version="1.0.0")
+    license_path.chmod(0o600)
+
+    assert taiji_license.require_valid_license() is None
+    state_path.parent.chmod(0o775)
+
+    status = taiji_license.load_license_status()
+
+    assert status.status == "valid", status.to_public_dict()
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+
+
 @pytest.mark.parametrize("entrypoint", ["runtime", "candidate"])
 def test_runtime_license_entrypoints_secure_first_device_creation(
     monkeypatch, tmp_path, signing_keys, entrypoint
@@ -2681,6 +2729,54 @@ def test_secure_runtime_first_device_and_state_creation_succeeds(tmp_path):
     assert state["license_id"] == "lic-secure-create"
     assert stat.S_IMODE(device_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_secure_runtime_state_write_repairs_owned_group_writable_leaf(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX runtime resource validation")
+    profile = tmp_path / "profile"
+    state_root = profile / ".local/state"
+    state_dir = state_root / "taiji-agent"
+    profile.mkdir(mode=0o700)
+    (profile / ".local").mkdir(mode=0o700)
+    state_root.mkdir(mode=0o700)
+    state_dir.mkdir(mode=0o700)
+    state_dir.chmod(0o775)
+    state_path = state_dir / "license-state.json"
+
+    taiji_license._write_license_state(
+        path=state_path,
+        now_ts=1_000_000,
+        license_id="lic-owned-leaf-repair",
+        token="signed-token",
+        secure_root=profile,
+    )
+
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_secure_runtime_state_write_rejects_group_writable_ancestor(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX runtime resource validation")
+    profile = tmp_path / "profile"
+    local_dir = profile / ".local"
+    profile.mkdir(mode=0o700)
+    local_dir.mkdir(mode=0o700)
+    local_dir.chmod(0o775)
+    state_path = local_dir / "state/taiji-agent/license-state.json"
+
+    with pytest.raises(taiji_license._LicenseStateError):
+        taiji_license._write_license_state(
+            path=state_path,
+            now_ts=1_000_000,
+            license_id="lic-untrusted-ancestor",
+            token="signed-token",
+            secure_root=profile,
+        )
+
+    assert stat.S_IMODE(local_dir.stat().st_mode) == 0o775
+    assert not state_path.exists()
 
 
 def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_path, signing_keys):

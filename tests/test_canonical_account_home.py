@@ -1213,6 +1213,9 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
               if (name === "./windows-runtime") {
                 return require(path.join(path.dirname(mainPath), "windows-runtime.js"));
               }
+              if (name === "./posix-user-state") {
+                return require(path.join(path.dirname(mainPath), "posix-user-state.js"));
+              }
               return require(name);
             };
             const sandbox = {

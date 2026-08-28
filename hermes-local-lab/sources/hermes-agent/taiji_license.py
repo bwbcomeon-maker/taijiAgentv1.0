@@ -703,6 +703,66 @@ def _validate_posix_runtime_file_stat(file_stat: os.stat_result, *, uid: int) ->
         raise _LicenseUserResourceError
 
 
+def _secure_posix_prepare_runtime_parent(
+    *,
+    path: Path,
+    profile_root: Path,
+    create_missing: bool,
+) -> bool:
+    """Create trusted parents and repair only the owned product leaf directory."""
+    root, parts = _runtime_resource_parts(path, profile_root)
+    uid = os.getuid()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fds: list[int] = []
+    try:
+        current_fd = os.open(root, directory_flags)
+        directory_fds.append(current_fd)
+        if not _trusted_production_parent(os.fstat(current_fd), user_uid=uid):
+            raise _LicenseUserResourceError
+
+        parent_parts = parts[:-1]
+        for index, part in enumerate(parent_parts):
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create_missing:
+                    return False
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            directory_fds.append(child_fd)
+            current_fd = child_fd
+            child_stat = os.fstat(current_fd)
+            if _trusted_production_parent(child_stat, user_uid=uid):
+                continue
+
+            is_product_leaf = index == len(parent_parts) - 1
+            if (
+                is_product_leaf
+                and stat.S_ISDIR(child_stat.st_mode)
+                and child_stat.st_uid == uid
+                and stat.S_IMODE(child_stat.st_mode) & 0o022
+            ):
+                os.fchmod(current_fd, 0o700)
+                os.fsync(current_fd)
+                if _trusted_production_parent(os.fstat(current_fd), user_uid=uid):
+                    continue
+            raise _LicenseUserResourceError
+        return True
+    except _LicenseUserResourceError:
+        raise
+    except OSError:
+        raise _LicenseUserResourceError from None
+    finally:
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
 def _secure_posix_atomic_write_runtime_resource(
     *,
     path: Path,
@@ -1952,6 +2012,12 @@ def _write_license_state(
 ) -> None:
     if secure_root is not None:
         try:
+            if os.name == "posix":
+                _secure_posix_prepare_runtime_parent(
+                    path=path,
+                    profile_root=secure_root,
+                    create_missing=True,
+                )
             raw_state = _secure_read_runtime_resource(
                 path=path,
                 profile_root=secure_root,
@@ -2285,6 +2351,22 @@ def _validate_production_user_file(path: Path, *, required: bool) -> bool:
     except OSError:
         raise _LicenseUserResourceError from None
     return True
+
+
+def _validate_production_license_state_file(path: Path, *, required: bool) -> bool:
+    """Validate state, repairing only a legacy writable product leaf on POSIX."""
+    try:
+        return _validate_production_user_file(path, required=required)
+    except _LicenseUserResourceError:
+        if os.name != "posix":
+            raise
+        if not _secure_posix_prepare_runtime_parent(
+            path=path,
+            profile_root=PRODUCTION_USER_HOME,
+            create_missing=False,
+        ):
+            raise
+        return _validate_production_user_file(path, required=required)
 
 
 def _public_key_fingerprint(public_key_pem: str) -> str:
@@ -2757,7 +2839,10 @@ def load_license_status(
                 policy,
             )
         try:
-            _validate_production_user_file(license_state_path, required=False)
+            _validate_production_license_state_file(
+                license_state_path,
+                required=False,
+            )
         except _LicenseUserResourceError:
             return _policy_error_status(
                 policy,
@@ -2848,7 +2933,10 @@ def _validate_license_token_for_import(
     license_state_path = runtime_license_state_path()
     license_device_path = runtime_license_device_path()
     try:
-        _validate_production_user_file(license_state_path, required=False)
+        _validate_production_license_state_file(
+            license_state_path,
+            required=False,
+        )
     except _LicenseUserResourceError:
         return _policy_error_status(
             policy,
