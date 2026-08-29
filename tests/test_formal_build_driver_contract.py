@@ -79,15 +79,15 @@ def live_process_group_members(process_group, proc_root=Path("/proc")):
 class FormalBuildDriverContractTests(unittest.TestCase):
     def test_driver_exposes_exact_registry_and_contract(self):
         driver = load_driver()
-        self.assertEqual(len(driver.FORMAL_TARGET_REGISTRY), 20)
-        self.assertEqual(driver.FORMAL_TARGET_CONTRACT_BYTES, 1864)
+        self.assertEqual(len(driver.FORMAL_TARGET_REGISTRY), 24)
+        self.assertEqual(driver.FORMAL_TARGET_CONTRACT_BYTES, 2240)
         self.assertEqual(
             driver.FORMAL_TARGET_CONTRACT_SHA256,
-            "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b",
+            "09f8439eddaea5fed0bfc6695358c11264105dd638a575ed7c814a4c439811b1",
         )
         self.assertEqual(
             len(driver.serialize_target_registry(driver.FORMAL_TARGET_REGISTRY)),
-            1864,
+            2240,
         )
         self.assertEqual(
             driver.target_contract_sha256(driver.FORMAL_TARGET_REGISTRY),

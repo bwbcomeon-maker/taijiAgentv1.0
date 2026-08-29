@@ -2134,6 +2134,72 @@ def test_office_pending_begin_abort_and_poll_drift_are_fail_closed():
     assert 'abortExpertTeamOfficeAuthorizerHandoff' in close
 
 
+def test_office_confirmation_is_above_the_drawer_and_owns_focus_handoff():
+    style = STYLE_CSS
+    dialog = UI_JS
+    actions = ACTIONS_JS
+    smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
+    wrapper = _function_body(
+        actions,
+        'async function requestExpertTeamConfirmation',
+        'function officeMutationKey',
+    )
+    show_confirm = _function_body(
+        dialog,
+        'function showConfirmDialog(opts={})',
+        'function showPromptDialog(opts={})',
+    )
+
+    assert '.expert-team-office-confirming .app-dialog-overlay' in style
+    assert 'z-index:10030' in style
+    assert 'expert-team-office-confirming' in wrapper
+    assert 'drawer.inert=true' in wrapper
+    assert 'drawer.inert=false' in wrapper
+    assert 'restoreFocus:false' in wrapper
+    assert 'function focusOfficeDrawerControl' in actions
+    assert 'function releaseExpertTeamOfficeDrawer' in actions
+    assert 'function focusUpdatedExpertTeamWorkbench' in actions
+    revision = _function_body(
+        actions,
+        'async function submitExpertTeamOfficeRevision',
+        'async function startExpertTeamOfficeAuthorizerHandoff',
+    )
+    assert 'focusOfficeDrawerControl(drawer, drawer.querySelector(\'[data-office-close]\'))' in revision
+    assert 'abortExpertTeamOfficeAuthorizerHandoff()' in revision
+    assert 'releaseExpertTeamOfficeDrawer(drawer,{restoreFocus:false})' in revision
+    assert 'focusUpdatedExpertTeamWorkbench()' in revision
+    assert 'if(!renderedUpdatedWorkbench)focusOfficeDrawerControl(drawer, btn)' in revision
+    keydown = _function_body(
+        actions,
+        'function handleExpertTeamOfficeDrawerKeydown',
+        'async function beginExpertTeamOfficeReview',
+    )
+    assert 'event.stopImmediatePropagation()' in keydown
+    assert 'event.stopPropagation()' in keydown
+    app_dialog_keydown = _function_body(
+        dialog,
+        'function _ensureAppDialogBindings',
+        'function showConfirmDialog(opts={})',
+    )
+    app_dialog_tab = app_dialog_keydown[app_dialog_keydown.index("if(e.key==='Tab')"):]
+    assert 'e.stopImmediatePropagation()' in app_dialog_tab
+    assert 'e.stopPropagation()' in app_dialog_tab
+    assert 'restoreFocus' in show_confirm
+    assert 'APP_DIALOG.restoreFocus' in dialog
+    assert 'document.elementFromPoint' in smoke
+    assert '--office-confirm-only' in smoke
+    assert 'Dirty Office confirmation is not the visible, focused top layer' in smoke
+    assert 'Cancelling the Office confirmation did not preserve the original draft focus' in smoke
+    assert 'Office revision failure did not preserve an available drawer focus target' in smoke
+    assert 'Office revision success left a stale drawer or focus target' in smoke
+    assert 'document.activeElement?.id === "appDialogCancel"' in smoke
+    assert '__officeEscapeDocumentLeaks' in smoke
+    assert '__officeTabDocumentLeaks' in smoke
+    assert 'Office confirmation Tab trap leaked to the underlying page' in smoke
+    assert 'abandonCalls.length === 0' in smoke
+    assert 'searchPreserved' in smoke
+
+
 def test_office_evidence_upload_is_discoverable_safe_and_required_before_submit():
     ui = EXPERT_UI_JS
     actions = ACTIONS_JS

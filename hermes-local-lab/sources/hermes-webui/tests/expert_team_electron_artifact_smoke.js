@@ -11,7 +11,7 @@ const {
 } = require("./unified_license_test_fixture");
 
 function parseArgs(argv) {
-  const args = { outDir: "" };
+  const args = { outDir: "", officeConfirmOnly: argv.includes("--office-confirm-only") };
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--out-dir") args.outDir = argv[index + 1] || "";
   }
@@ -388,6 +388,237 @@ async function activeWorkbenchTab(page) {
   });
 }
 
+async function verifyOfficeConfirmationLayer(page) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    document.querySelector("body > [data-expert-team-office-drawer]")?.remove();
+    const drawer = document.createElement("aside");
+    drawer.className = "expert-team-office-drawer";
+    drawer.dataset.expertTeamOfficeDrawer = "";
+    drawer.setAttribute("aria-label", "Office 验收");
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.innerHTML = [
+      '<header class="expert-team-office-drawer-head"><span><strong>Office 验收</strong><small>未提交草稿</small></span><button type="button" data-office-close>关闭</button></header>',
+      '<div class="expert-team-office-scroll"><label>豁免说明<textarea data-office-waiver-reason="confirmation-condition-1"></textarea></label></div>',
+      '<div><label><input type="checkbox" data-office-revision-issue="confirmation-blocking-1">阻断问题</label><button type="button" data-office-revision-submit>退回修改</button></div>',
+    ].join("");
+    document.body.appendChild(drawer);
+    drawer.addEventListener("keydown", event => window.handleExpertTeamOfficeDrawerKeydown(event));
+    const reason = drawer.querySelector('[data-office-waiver-reason="confirmation-condition-1"]');
+    const search = document.getElementById("sessionSearch");
+    if (search) search.value = "office-escape-sentinel";
+    window.__officeEscapeDocumentLeaks = 0;
+    window.__officeTabDocumentLeaks = 0;
+    window.__officeEscapeProbe = event => {
+      if (event.key === "Escape") window.__officeEscapeDocumentLeaks += 1;
+      if (event.key === "Tab") window.__officeTabDocumentLeaks += 1;
+    };
+    document.addEventListener("keydown", window.__officeEscapeProbe);
+    reason.value = "经业务负责人确认，该对齐差异不影响使用。";
+    reason.focus();
+    drawer._expertTeamOfficeBaseline = "";
+  });
+  await page.keyboard.press("Escape");
+  await page.locator("#appDialogOverlay").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.activeElement?.id === "appDialogCancel", { timeout: 5000 });
+  const layer = await page.evaluate(() => {
+    const overlay = document.getElementById("appDialogOverlay");
+    const dialog = document.getElementById("appDialog");
+    const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+    const cancel = document.getElementById("appDialogCancel");
+    const rect = cancel?.getBoundingClientRect();
+    const hit = rect ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) : null;
+    return {
+      overlayZ: Number(getComputedStyle(overlay).zIndex || 0),
+      drawerZ: Number(getComputedStyle(drawer).zIndex || 0),
+      hitInsideDialog: Boolean(hit && dialog?.contains(hit)),
+      drawerInert: Boolean(drawer?.inert),
+      focusCancel: document.activeElement?.id === "appDialogCancel",
+      escapeLeak: Number(window.__officeEscapeDocumentLeaks || 0),
+      searchPreserved: document.getElementById("sessionSearch")?.value === "office-escape-sentinel",
+    };
+  });
+  assertState(
+    layer.overlayZ > layer.drawerZ && layer.hitInsideDialog && layer.drawerInert && layer.focusCancel
+      && layer.escapeLeak === 0 && layer.searchPreserved,
+    "Dirty Office confirmation is not the visible, focused top layer",
+    layer,
+  );
+  await page.keyboard.press("Tab");
+  const confirmationTabTrap = await page.evaluate(() => ({
+    focusedInsideDialog: Boolean(document.activeElement && document.getElementById("appDialog")?.contains(document.activeElement)),
+    leaks: Number(window.__officeTabDocumentLeaks || 0),
+  }));
+  assertState(
+    confirmationTabTrap.focusedInsideDialog && confirmationTabTrap.leaks === 0,
+    "Office confirmation Tab trap leaked to the underlying page",
+    confirmationTabTrap,
+  );
+  await page.screenshot({ path: path.join(outDir, "expert-team-office-confirmation-layer.png"), fullPage: false });
+  await page.click("#appDialogCancel");
+  await page.waitForFunction(
+    () => document.activeElement?.matches('[data-office-waiver-reason="confirmation-condition-1"]'),
+    { timeout: 5000 },
+  );
+  const cancelled = await page.evaluate(() => ({
+    drawerVisible: Boolean(document.querySelector("body > [data-expert-team-office-drawer]:not([hidden])")),
+    dialogVisible: getComputedStyle(document.getElementById("appDialogOverlay")).display !== "none",
+    focused: document.activeElement?.matches('[data-office-waiver-reason="confirmation-condition-1"]') || false,
+  }));
+  assertState(
+    cancelled.drawerVisible && !cancelled.dialogVisible && cancelled.focused,
+    "Cancelling the Office confirmation did not preserve the original draft focus",
+    cancelled,
+  );
+  await page.screenshot({ path: path.join(outDir, "expert-team-office-confirmation-cancelled.png"), fullPage: false });
+  await page.evaluate(() => document.querySelector("[data-office-revision-submit]")?.focus());
+  await page.keyboard.press("Tab");
+  await page.waitForFunction(
+    () => document.activeElement?.matches('[data-office-close]'),
+    { timeout: 5000 },
+  );
+  await page.keyboard.press("Shift+Tab");
+  await page.waitForFunction(
+    () => document.activeElement?.matches('[data-office-revision-submit]'),
+    { timeout: 5000 },
+  );
+  const tabTrap = await page.evaluate(() => ({
+    focused: document.activeElement?.matches('[data-office-revision-submit]') || false,
+    leaks: Number(window.__officeTabDocumentLeaks || 0),
+  }));
+  assertState(
+    tabTrap.focused && tabTrap.leaks === 0,
+    "Office drawer Tab trap leaked to the underlying page",
+    tabTrap,
+  );
+  await page.evaluate(() => {
+    const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+    const revision = drawer?.querySelector("[data-office-revision-submit]");
+    const issue = drawer?.querySelector('[data-office-revision-issue="confirmation-blocking-1"]');
+    if (!drawer || !revision || !issue) throw new Error("Office revision focus fixture is incomplete");
+    issue.checked = true;
+    drawer.dataset.officeReviewSessionStatus = "ready";
+    revision.focus();
+    const makeRun = window.__expertTeamRunFixture;
+    if (!makeRun || !window.ExpertTeamV3?.renderStatusSurface) {
+      throw new Error("Office revision handoff fixture is missing the V3 workbench");
+    }
+    const initialRun = makeRun(S.session.session_id, "awaiting_review", {
+      run_id: "office-confirmation-run",
+      version: 1,
+    });
+    const initialCard = buildExpertTeamCardFromRun(initialRun, { session_id: S.session.session_id });
+    initialCard.sourceSessionId = "";
+    window.__officeOriginalRenderSurface = window.renderExpertTeamStatusSurface;
+    window.renderExpertTeamStatusSurface = window.ExpertTeamV3.renderStatusSurface;
+    window.ExpertTeamV3.renderStatusSurface(initialCard);
+    document.getElementById("mainChat").inert = true;
+    document.getElementById("expertTeamV3Workbench").inert = true;
+    window._activeExpertTeamStatusCard = initialCard;
+    window.__officeRevisionCalls = [];
+    window.__officeAllApiCalls = [];
+    window.__officeRevisionShouldFail = true;
+    window.__officeOriginalApi = window.api;
+    window.__officeRevisionNextRun = makeRun(S.session.session_id, "awaiting_review", {
+      run_id: "office-confirmation-run",
+      version: 2,
+    });
+    window.api = async (url, options) => {
+      const call = { url: String(url), payload: JSON.parse(options?.body || "{}") };
+      window.__officeAllApiCalls.push(call);
+      if (String(url) !== "/api/expert-teams/office-revisions/create") {
+        return window.__officeOriginalApi(url, options);
+      }
+      window.__officeRevisionCalls.push(call);
+      if (window.__officeRevisionShouldFail) throw new Error("simulated revision failure");
+      return { run: window.__officeRevisionNextRun };
+    };
+    window.__officeRevisionFailurePromise = window.submitExpertTeamOfficeRevision(revision);
+  });
+  await page.locator("#appDialogOverlay").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.activeElement?.id === "appDialogCancel", { timeout: 5000 });
+  await page.click("#appDialogConfirm");
+  const revisionFailure = await page.evaluate(() => window.__officeRevisionFailurePromise);
+  await page.waitForFunction(
+    () => document.activeElement?.matches('[data-office-revision-submit]'),
+    { timeout: 5000 },
+  );
+  const failure = await page.evaluate(() => {
+    const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+    const revision = drawer?.querySelector("[data-office-revision-submit]");
+    const overlay = document.getElementById("appDialogOverlay");
+    return {
+      drawerVisible: Boolean(drawer && !drawer.hidden),
+      drawerInert: Boolean(drawer?.inert),
+      dialogVisible: getComputedStyle(overlay).display !== "none",
+      focused: document.activeElement === revision && !revision?.disabled,
+      workbenchInert: Boolean(document.getElementById("expertTeamV3Workbench")?.inert),
+    };
+  });
+  assertState(
+    !revisionFailure && failure.drawerVisible && !failure.drawerInert && !failure.dialogVisible
+      && failure.focused && failure.workbenchInert,
+    "Office revision failure did not preserve an available drawer focus target",
+    { revisionFailure, failure },
+  );
+  await page.evaluate(() => {
+    const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+    const revision = drawer?.querySelector("[data-office-revision-submit]");
+    window.__officeRevisionShouldFail = false;
+    revision?.focus();
+    window.__officeRevisionSuccessPromise = window.submitExpertTeamOfficeRevision(revision);
+  });
+  await page.locator("#appDialogOverlay").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.activeElement?.id === "appDialogCancel", { timeout: 5000 });
+  await page.click("#appDialogConfirm");
+  const revisionSuccess = await page.evaluate(() => window.__officeRevisionSuccessPromise);
+  await page.waitForFunction(
+    () => !document.querySelector("body > [data-expert-team-office-drawer]")
+      && document.activeElement?.matches('#expertTeamV3Workbench [data-et3-action="close-workbench"]'),
+    { timeout: 5000 },
+  );
+  const success = await page.evaluate(() => {
+    const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+    const overlay = document.getElementById("appDialogOverlay");
+    const calls = window.__officeRevisionCalls || [];
+    const allApiCalls = window.__officeAllApiCalls || [];
+    window.api = window.__officeOriginalApi;
+    if (window.__officeOriginalRenderSurface) {
+      window.renderExpertTeamStatusSurface = window.__officeOriginalRenderSurface;
+      delete window.__officeOriginalRenderSurface;
+    }
+    return {
+      calls,
+      abandonCalls: allApiCalls.filter(call => call.url === "/api/docx-engine-v2/quality/wps-visual/begin" && call.payload.action === "abandon"),
+      staleDrawerPresent: Boolean(drawer),
+      staleRevisionPresent: Boolean(document.querySelector("[data-office-revision-submit]")),
+      dialogVisible: getComputedStyle(overlay).display !== "none",
+      focused: document.activeElement?.matches('#expertTeamV3Workbench [data-et3-action="close-workbench"]') || false,
+      workbenchVersion: document.getElementById("expertTeamV3Workbench")?.dataset.expertTeamVersion || "",
+      workbenchInert: Boolean(document.getElementById("expertTeamV3Workbench")?.inert),
+      mainInert: Boolean(document.getElementById("mainChat")?.inert),
+    };
+  });
+  assertState(
+    revisionSuccess && success.calls.length === 2
+      && success.calls.every((call) => call.url === "/api/expert-teams/office-revisions/create" && call.payload.issue_ids?.join(",") === "confirmation-blocking-1")
+      && success.abandonCalls.length === 0 && !success.staleDrawerPresent && !success.staleRevisionPresent && !success.dialogVisible
+      && success.focused && success.workbenchVersion === "2" && !success.workbenchInert && !success.mainInert,
+    "Office revision success left a stale drawer or focus target",
+    { revisionSuccess, success },
+  );
+  await page.screenshot({ path: path.join(outDir, "expert-team-office-confirmation-revision-handoff.png"), fullPage: false });
+  await page.evaluate(() => {
+    document.querySelector("body > [data-expert-team-office-drawer]")?.remove();
+    if (window.__officeEscapeProbe) document.removeEventListener("keydown", window.__officeEscapeProbe);
+    delete window.__officeEscapeProbe;
+    delete window.__officeTabDocumentLeaks;
+    window.ExpertTeamV3?.clearStatusSurface?.();
+  });
+  return { layer, cancelled, failure, success };
+}
+
 async function verifyRolloutGate(page) {
   const requested = process.env.TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT;
   const expectedMode = requested === "pilot" ? "pilot" : "off";
@@ -537,6 +768,12 @@ async function main() {
     await page.evaluate(({ fixtureSource }) => {
       window.__expertTeamRunFixture = eval(`(${fixtureSource})`);
     }, { fixtureSource: runFixture.toString() });
+
+    if (cli.officeConfirmOnly) {
+      const evidence = await verifyOfficeConfirmationLayer(page);
+      console.log("EXPERT TEAM OFFICE CONFIRMATION SMOKE OK", JSON.stringify(evidence));
+      return;
+    }
 
     await verifyRolloutGate(page);
 
@@ -1056,9 +1293,28 @@ async function main() {
     await page.fill('body > [data-expert-team-office-drawer] [data-office-waiver-reason="condition-1"]', "经业务负责人确认，该对齐差异不影响使用。");
     await page.keyboard.press("Escape");
     await page.locator("#appDialogOverlay").waitFor({ state: "visible" });
+    const confirmationLayer = await page.evaluate(() => {
+      const overlay = document.getElementById("appDialogOverlay");
+      const drawer = document.querySelector("body > [data-expert-team-office-drawer]");
+      const cancel = document.getElementById("appDialogCancel");
+      const rect = cancel?.getBoundingClientRect();
+      const hit = rect ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) : null;
+      return {
+        overlayZ: Number(getComputedStyle(overlay).zIndex || 0),
+        drawerZ: Number(getComputedStyle(drawer).zIndex || 0),
+        hitInsideDialog: Boolean(hit && document.getElementById("appDialog")?.contains(hit)),
+        drawerInert: Boolean(drawer?.inert),
+      };
+    });
+    assertState(confirmationLayer.overlayZ > confirmationLayer.drawerZ && confirmationLayer.hitInsideDialog && confirmationLayer.drawerInert, "Dirty Office confirmation is not the visible top layer", confirmationLayer);
     assertState(await page.evaluate(() => document.activeElement?.id === "appDialogCancel"), "Dirty Office confirmation did not focus the safe cancel action");
     await page.click("#appDialogCancel");
-    assertState(await page.isVisible("body > [data-expert-team-office-drawer]"), "Waiver-reason-only dirty draft closed without confirmation");
+    const cancelledConfirmation = await page.evaluate(() => ({
+      drawerVisible: Boolean(document.querySelector("body > [data-expert-team-office-drawer]:not([hidden])")),
+      overlayVisible: getComputedStyle(document.getElementById("appDialogOverlay")).display !== "none",
+      focused: document.activeElement?.matches('[data-office-waiver-reason="condition-1"]') || false,
+    }));
+    assertState(cancelledConfirmation.drawerVisible && !cancelledConfirmation.overlayVisible && cancelledConfirmation.focused, "Cancelling the confirmation did not preserve Office draft focus", cancelledConfirmation);
     await page.evaluate(() => { window.__officeIdentityStatusQueue = [{ enabled: true, authenticated: false, identity_flow_status: "authorizer_same_as_reviewer" }]; });
     await page.click('body > [data-expert-team-office-drawer] [data-office-waiver-issue="condition-1"]');
     await page.waitForFunction(() => document.querySelector("[data-office-live]")?.textContent.includes("仍是原验收人"), { timeout: 5000 });

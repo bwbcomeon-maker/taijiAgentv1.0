@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-FORMAL_TARGET_CONTRACT_BYTES = 1864
-FORMAL_TARGET_CONTRACT_SHA256 = "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b"
+FORMAL_TARGET_CONTRACT_BYTES = 2240
+FORMAL_TARGET_CONTRACT_SHA256 = "09f8439eddaea5fed0bfc6695358c11264105dd638a575ed7c814a4c439811b1"
 FORMAL_SUITE_NAMES = (
     "root-runtime", "desktop-evidence-node", "kylin-install-simulation",
     "agent", "webui-runtime-lint", "webui-python",
@@ -49,6 +49,10 @@ FORMAL_TARGET_REGISTRY = (
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_approval_sse.py"),
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_pr1350_sse_notify_correctness.py"),
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_expert_team_frontend.py"),
+    ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_expert_team_frontend_v2.py"),
+    ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_expert_team_frontend_v3.py"),
+    ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_managed_dialog_static.py"),
+    ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_onboarding_static.py"),
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_ui_visibility_config.py"),
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_issue1800_file_html_interactions.py"),
     ("webui-python", "pytest", "hermes-local-lab/sources/hermes-webui/tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell"),
@@ -98,7 +102,7 @@ record = {
 
 
 def serialize_target_registry(registry: Sequence[Tuple[str, str, str]]) -> bytes:
-    if not isinstance(registry, (tuple, list)) or len(registry) != 20 or len(set(registry)) != 20:
+    if not isinstance(registry, (tuple, list)) or len(registry) != 24 or len(set(registry)) != 24:
         raise ValueError("formal target registry cardinality is not exact")
     rows = []
     for record in registry:
@@ -842,7 +846,7 @@ def run(args: argparse.Namespace) -> int:
             logical_path=npm_logical_path,
         ),
     }
-    lines = ["schema=taiji-formal-build-tests/v2", "source_commit=" + args.source_commit, "python_version=" + versions["python"], "python_executable_sha256=" + hashes["python"], "node_version=" + versions["node"], "node_executable_sha256=" + hashes["node"], "npm_version=" + versions["npm"], "npm_cli_sha256=" + hashes["npm"], "eslint_cli_sha256=" + hashes["eslint"], "target_count=20", "target_contract_sha256=" + target_contract_sha256(FORMAL_TARGET_REGISTRY)]
+    lines = ["schema=taiji-formal-build-tests/v2", "source_commit=" + args.source_commit, "python_version=" + versions["python"], "python_executable_sha256=" + hashes["python"], "node_version=" + versions["node"], "node_executable_sha256=" + hashes["node"], "npm_version=" + versions["npm"], "npm_cli_sha256=" + hashes["npm"], "eslint_cli_sha256=" + hashes["eslint"], "target_count=" + str(len(FORMAL_TARGET_REGISTRY)), "target_contract_sha256=" + target_contract_sha256(FORMAL_TARGET_REGISTRY)]
     try:
         ordinal = 0
         while ordinal < len(FORMAL_TARGET_REGISTRY):

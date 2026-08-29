@@ -106,6 +106,13 @@ body.expert-team-v3-active #mainChat { position: relative; min-height: 0; }
 body.expert-team-v3-active .taiji-workspace-brand-pill { display: none !important; }
 body.expert-team-v3-active #mainChat > .messages-shell { min-width: 0; padding-right: min(520px, 38vw); }
 body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px; }
+
+@media (min-width: 1281px) {
+  body.expert-team-v3-active:not(.expert-team-v3-collapsed) .onboarding-resume-entry {
+    right: var(--et3-onboarding-resume-right, calc(min(520px, 38vw) + 32px));
+  }
+}
+
 .expert-team-v3-workbench { position: absolute; z-index: 80; inset: 0 0 0 auto; width: min(520px, 38vw); min-width: 380px; min-height: 0; overflow: hidden; pointer-events: auto !important; border-left: 1px solid #cfE4ef; background: linear-gradient(180deg, rgba(249,253,255,.98), rgba(241,249,252,.98)); box-shadow: -14px 0 34px rgba(36,74,101,.08); }
 .et3-workbench-restore { display: none; min-width: 52px; min-height: 110px; border: 1px solid var(--et3-line); border-radius: 16px 0 0 16px; background: #fff; color: var(--et3-accent-strong); font-weight: 750; writing-mode: vertical-rl; cursor: pointer; box-shadow: -8px 8px 24px rgba(36,74,101,.12); }
 .expert-team-v3-workbench.is-collapsed { width: 64px; min-width: 64px; overflow: visible; border-left: 0; background: transparent; box-shadow: none; display: grid; place-items: center end; }
@@ -194,6 +201,7 @@ body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px;
 @media (max-width: 1280px) {
   body.expert-team-v3-active #mainChat > .messages-shell { padding-right: 0; }
   body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px; }
+  body.expert-team-v3-active:not(.expert-team-v3-collapsed) .onboarding-resume-entry { display: none !important; }
   .expert-team-v3-workbench { inset: 0; width: 100%; min-width: 0; border-left: 0; }
   .expert-team-v3-workbench.is-collapsed { inset: 0 0 0 auto; width: 64px; min-width: 64px; }
   [data-expert-team-v3-surface="portal"] { padding: 28px; }

@@ -58,6 +58,22 @@ def test_onboarding_css_rules_exist():
         assert selector in css
 
 
+def test_onboarding_resume_entry_yields_to_the_expanded_v3_workbench():
+    v3_css = read("static/expert-team-v3.css")
+    onboarding = read("static/onboarding.js")
+    dismiss_start = onboarding.index("function dismissOnboardingWizard(")
+    dismiss_body = onboarding[dismiss_start : onboarding.index("async function skipOnboarding()", dismiss_start)]
+
+    assert "body.expert-team-v3-active:not(.expert-team-v3-collapsed)" in v3_css
+    assert ".onboarding-resume-entry" in v3_css
+    assert "@media (min-width: 1281px)" in v3_css
+    assert "--et3-onboarding-resume-right" in v3_css
+    assert "@media (max-width: 1280px)" in v3_css
+    assert "display: none !important" in v3_css
+    assert "getClientRects().length" in dismiss_body
+    assert "[data-et3-action=\"close-workbench\"]" in dismiss_body
+
+
 def test_probe_updates_in_place_without_replacing_the_focused_form():
     html = read("static/index.html")
     js = read("static/onboarding.js")

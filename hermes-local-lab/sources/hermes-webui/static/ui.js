@@ -2337,7 +2337,7 @@ function _expertTeamWorkspacePanelHtml(card){
     <div class="expert-team-panel-section-title"><span>参考材料</span><small>${referenceArtifacts.length} 个</small></div>
     <div class="expert-team-panel-artifacts">${referenceArtifacts.slice(0,4).map(item=>artifactItemHtml(item,true)).join('')}</div>
   </section>`:'';
-  return `<div class="expert-team-panel-inner" data-expert-team-run-id="${esc(runId)}" onclick="handleExpertTeamPanelBlankCollapse(event)">
+  return `<div class="expert-team-panel-inner" data-expert-team-run-id="${esc(runId)}">
     <header class="expert-team-panel-head">
       <div class="expert-team-panel-topbar">
         <span class="expert-team-panel-eyebrow">专家团计划</span>
@@ -2594,57 +2594,6 @@ function _setExpertTeamBottomDockExpanded(expanded,trigger){
   return true;
 }
 
-const EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR=[
-  'button',
-  'input',
-  'textarea',
-  'select',
-  'a',
-  '[role="button"]',
-  '[contenteditable="true"]',
-  '.expert-team-panel-section',
-  '.expert-team-panel-priority-card',
-  '.expert-team-panel-phase',
-  '.expert-team-panel-execution-row',
-  '.status-card-expert-question',
-  '.expert-team-panel-artifact',
-  '.expert-team-panel-actions',
-  '.expert-team-member-strip',
-].join(',');
-
-let _expertTeamBlankCollapseListenerAttached=false;
-
-function handleExpertTeamPanelBlankCollapse(event){
-  const target=event&&event.target;
-  if(!(target&&target.closest))return false;
-  const dock=target.closest('#writeflowStatusDock')||document.getElementById('writeflowStatusDock');
-  if(!(dock&&dock.querySelector))return false;
-  const card=target.closest('.status-card-writeflow')||dock.querySelector('.status-card-writeflow');
-  if(!(card&&card.classList&&card.classList.contains('is-expanded')))return false;
-  if(!card.querySelector('.status-card-expert-dock-summary'))return false;
-  if(target.closest(EXPERT_TEAM_PANEL_BLANK_COLLAPSE_PROTECTED_SELECTOR))return false;
-  const blankRoot=target.closest('.expert-team-panel-inner,.status-card-expert-bottom-body,.status-card-writeflow,#writeflowStatusDock,.taiji-main-workspace,main.main,#mainChat,.messages-shell');
-  if(!blankRoot)return false;
-  const collapsed=_setExpertTeamBottomDockExpanded(false,target);
-  if(collapsed)_syncExpertTeamWorkspacePanelVisibility();
-  if(collapsed&&event&&event.stopPropagation)event.stopPropagation();
-  return collapsed;
-}
-
-function _syncExpertTeamBlankCollapseListener(enabled){
-  if(typeof document==='undefined')return false;
-  const shouldEnable=!!enabled;
-  if(shouldEnable===_expertTeamBlankCollapseListenerAttached)return true;
-  if(shouldEnable){
-    document.addEventListener('click',handleExpertTeamPanelBlankCollapse);
-    _expertTeamBlankCollapseListenerAttached=true;
-    return true;
-  }
-  document.removeEventListener('click',handleExpertTeamPanelBlankCollapse);
-  _expertTeamBlankCollapseListenerAttached=false;
-  return true;
-}
-
 function hideExpertTeamWorkspacePanel(btn){
   const panel=typeof document!=='undefined'?document.getElementById('expertTeamWorkspacePanel'):null;
   const runId=_expertTeamWorkspacePanelRunId(panel)||(btn&&btn.closest&&btn.closest('[data-expert-team-run-id]')&&btn.closest('[data-expert-team-run-id]').dataset.expertTeamRunId)||'';
@@ -2784,7 +2733,6 @@ if(typeof window!=='undefined'){
   window.showExpertTeamWorkspacePanel=showExpertTeamWorkspacePanel;
   window.toggleExpertTeamWorkspacePanel=toggleExpertTeamWorkspacePanel;
   window.openExpertTeamReviewPanel=openExpertTeamReviewPanel;
-  window.handleExpertTeamPanelBlankCollapse=handleExpertTeamPanelBlankCollapse;
   window.syncExpertTeamBottomDockState=syncExpertTeamBottomDockState;
   window.shouldPreserveExpertTeamDraftDock=shouldPreserveExpertTeamDraftDock;
 }
@@ -3656,7 +3604,6 @@ function renderExpertTeamStatusSurface(card){
   if(['completed','cancelled','failed'].includes(String(card.status||''))){
     _expertTeamClearWorkspaceDrafts({runId:String(card.runId||card.sessionId||'')});
   }
-  _syncExpertTeamBlankCollapseListener(false);
   _syncExpertTeamQuestionPopover(card);
   return _syncExpertTeamWorkspacePanelVisibility();
 }
@@ -3686,8 +3633,7 @@ function renderWriteflowStatusDock(card){
     }
   }
   dock.hidden=false;
-  dock.onclick=isExpertTeam?handleExpertTeamPanelBlankCollapse:null;
-  _syncExpertTeamBlankCollapseListener(isExpertTeam);
+  dock.onclick=null;
   dock.dataset.writeflowRunId=card.runId||card.sessionId||'';
   dock.dataset.writeflowSourceSessionId=sourceSid;
   if(isExpertTeam){
@@ -3721,7 +3667,6 @@ function clearWriteflowStatusDock(){
   _expertTeamQuestionPopoverOpen=false;
   _expertTeamQuestionPopoverRunId='';
   _expertTeamQuestionPopoverQuestionId='';
-  _syncExpertTeamBlankCollapseListener(false);
   delete dock.dataset.writeflowRunId;
   delete dock.dataset.writeflowSourceSessionId;
   delete dock.dataset.expertTeamRenderKey;
@@ -7928,7 +7873,7 @@ function showToast(msg,ms,type){
 // throughout the UI. Both return Promises and support: title, message, confirmLabel,
 // cancelLabel, danger (confirm only), placeholder/value/inputType (prompt only).
 
-const APP_DIALOG={resolve:null,kind:null,lastFocus:null};
+const APP_DIALOG={resolve:null,kind:null,lastFocus:null,restoreFocus:true};
 let _appDialogBound=false;
 
 function _isAppDialogOpen(){
@@ -7941,7 +7886,7 @@ function _getAppDialogFocusable(){
     .filter(el=>el&&el.style.display!=='none'&&!el.disabled);
 }
 
-function _finishAppDialog(result, restoreFocus=true){
+function _finishAppDialog(result, restoreFocus=APP_DIALOG.restoreFocus){
   const overlay=$('appDialogOverlay');
   const dialog=$('appDialog');
   const input=$('appDialogInput');
@@ -7951,6 +7896,7 @@ function _finishAppDialog(result, restoreFocus=true){
   APP_DIALOG.resolve=null;
   APP_DIALOG.kind=null;
   APP_DIALOG.lastFocus=null;
+  APP_DIALOG.restoreFocus=true;
   if(overlay){overlay.style.display='none';overlay.setAttribute('aria-hidden','true');}
   if(dialog) dialog.setAttribute('role','dialog');
   if(input){input.value='';input.style.display='none';input.placeholder='';}
@@ -8019,6 +7965,11 @@ function _ensureAppDialogBindings(){
       if(e.shiftKey){nextIdx=idx<=0?nodes.length-1:idx-1;}
       else{nextIdx=idx===-1||idx===nodes.length-1?0:idx+1;}
       e.preventDefault();
+      // The active modal owns the full Tab cycle.  Letting the event continue
+      // after moving focus allows document/page shortcuts beneath the dialog to
+      // observe a key that the dialog has already consumed.
+      e.stopImmediatePropagation();
+      e.stopPropagation();
       nodes[nextIdx].focus();
     }
   }, true);
@@ -8029,7 +7980,7 @@ function showConfirmDialog(opts={}){
   if(APP_DIALOG.resolve) _finishAppDialog(false,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
-  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.resolve=null;APP_DIALOG.kind='confirm';APP_DIALOG.lastFocus=document.activeElement;APP_DIALOG.restoreFocus=opts.restoreFocus!==false;
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
@@ -8051,7 +8002,7 @@ function showPromptDialog(opts={}){
   if(APP_DIALOG.resolve) _finishAppDialog(null,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
-  APP_DIALOG.resolve=null;APP_DIALOG.kind='prompt';APP_DIALOG.lastFocus=document.activeElement;
+  APP_DIALOG.resolve=null;APP_DIALOG.kind='prompt';APP_DIALOG.lastFocus=document.activeElement;APP_DIALOG.restoreFocus=opts.restoreFocus!==false;
   if(title) title.textContent=opts.title||t('dialog_prompt_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){

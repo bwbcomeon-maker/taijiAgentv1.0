@@ -23,6 +23,9 @@
     suggestedPrompt: '',
     suggestedSourceSessionId: '',
     autoContinuationKeys: new Set(),
+    workbenchPointer: null,
+    lastWorkbenchDraft: null,
+    onboardingResumeFocused: false,
   };
 
   const teamPresentationDefaults = [
@@ -721,8 +724,27 @@
     };
   }
 
-  function restoreWorkbenchDraft(root, draft, card) {
-    if (!root || !draft || !draft.fingerprint || draft.fingerprint !== draftFingerprint(card)) return;
+  function mergeWorkbenchDraft(snapshot, focusAnchor) {
+    if (!snapshot || !snapshot.fingerprint) return focusAnchor || snapshot;
+    if (!focusAnchor || focusAnchor.fingerprint !== snapshot.fingerprint || snapshot.focusKey) return snapshot;
+    return {
+      ...snapshot,
+      focusKey: focusAnchor.focusKey,
+      selectionStart: focusAnchor.selectionStart,
+      selectionEnd: focusAnchor.selectionEnd,
+    };
+  }
+
+  function scheduleAfterInteraction(callback) {
+    if (typeof setTimeout === 'function') {
+      setTimeout(callback, 0);
+      return;
+    }
+    callback();
+  }
+
+  function restoreWorkbenchDraft(root, draft, card, { deferFocus = false } = {}) {
+    if (!root || !draft || !draft.fingerprint || draft.fingerprint !== draftFingerprint(card)) return false;
     const controls = Array.from(root.querySelectorAll('input:not([type="file"]), textarea, select'));
     const saved = new Map(draft.values.map(item => [item.key, item]));
     controls.forEach((control, index) => {
@@ -733,8 +755,12 @@
     });
     const focusControl = controls.find((control, index) => draftControlKey(control, index) === draft.focusKey);
     if (focusControl) {
-      focusControl.focus({ preventScroll: true });
-      if (draft.selectionStart != null && typeof focusControl.setSelectionRange === 'function') focusControl.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+      const restoreFocus = () => {
+        focusControl.focus({ preventScroll: true });
+        if (draft.selectionStart != null && typeof focusControl.setSelectionRange === 'function') focusControl.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+      };
+      if (deferFocus) scheduleAfterInteraction(restoreFocus);
+      else restoreFocus();
     }
     const scroll = root.querySelector('.et3-workbench-scroll');
     if (scroll) scroll.scrollTop = draft.scrollTop;
@@ -743,6 +769,7 @@
       const disclosure = item.dataset?.et3Disclosure;
       if (disclosure) item.open = openDisclosures.has(disclosure);
     });
+    return Boolean(focusControl);
   }
 
   function captureConflictRevisionDraft(card) {
@@ -894,10 +921,12 @@
     root.dataset.expertTeamInputId = card.pendingInputId || '';
     root.dataset.expertTeamReviewId = card.stageReviewId || '';
     root.dataset.expertTeamReadOnly = String(card.readOnly === true);
+    root.setAttribute?.('aria-labelledby', 'expertTeamV3WorkbenchTitle');
     root.innerHTML = workbenchHtml(card);
-    root.classList.toggle('is-collapsed', state.collapsed);
+    syncWorkbenchCollapsedState(root);
     document.body.classList.add('expert-team-v3-active');
-    document.body.classList.toggle('expert-team-v3-collapsed', state.collapsed);
+    if (state.collapsed) document.body.classList.add('expert-team-v3-collapsed');
+    else document.body.classList.remove('expert-team-v3-collapsed');
     document.querySelector('.taiji-home-shell')?.classList.remove(
       'taiji-expert-team-active', 'taiji-expert-team-panel-visible',
       'taiji-expert-team-panel-hidden', 'taiji-expert-team-panel-collapsed');
@@ -906,6 +935,7 @@
     restoreConflictRevisionDraft(root, card);
     restoreConflictDeliveryDraft(root, card);
     state.draft = null;
+    syncOnboardingResumeGeometry(root);
     scheduleResearchAutoContinuation(card);
     return true;
   }
@@ -954,7 +984,11 @@
     state.collapsed = false;
     state.compositionActive = false;
     state.deferredCard = null;
+    state.workbenchPointer = null;
+    state.lastWorkbenchDraft = null;
+    state.onboardingResumeFocused = false;
     state.autoContinuationKeys.clear();
+    document.body.style?.removeProperty?.('--et3-onboarding-resume-right');
     return true;
   }
 
@@ -969,8 +1003,8 @@
     const stateBanner = card.researchV2 && card.productError?.schema === 'taiji.product.error.v1'
       ? ''
       : `<section class="et3-state-banner"><div><strong>${esc(copy[0])}</strong><p>${esc(copy[1])}</p></div><span class="et3-state-pill">${esc(statusLabel)}</span></section>`;
-    return `<div class="et3-workbench-shell">
-      <header class="et3-workbench-head"><div class="et3-workbench-head-row"><div><p class="et3-eyebrow">专家团工作台</p><h2>${esc(card.researchV2 ? '深度研究报告' : (card.presentation?.visibleTitle || card.subtitle || '专家团任务'))}</h2><p>${esc(card.team?.title || '专家团')}${card.researchV2 ? ' · 深度研究' : ` · ${esc(card.phase || '需求确认')}`}</p></div><button type="button" class="et3-icon-button" data-et3-action="close-workbench" aria-label="收起专家团工作台">×</button></div></header>
+    return `<div id="expertTeamV3WorkbenchContent" class="et3-workbench-shell" data-et3-workbench-content>
+      <header class="et3-workbench-head"><div class="et3-workbench-head-row"><div><p class="et3-eyebrow">专家团工作台</p><h2 id="expertTeamV3WorkbenchTitle">${esc(card.researchV2 ? '深度研究报告' : (card.presentation?.visibleTitle || card.subtitle || '专家团任务'))}</h2><p>${esc(card.team?.title || '专家团')}${card.researchV2 ? ' · 深度研究' : ` · ${esc(card.phase || '需求确认')}`}</p></div><button type="button" class="et3-icon-button" data-et3-action="close-workbench" aria-controls="expertTeamV3WorkbenchContent" aria-expanded="true" aria-label="收起专家团工作台">×</button></div></header>
       ${progressHtml(card)}
       <div class="et3-workbench-scroll">
         ${stateBanner}
@@ -980,7 +1014,7 @@
         ${statePanel(card, current)}
         <p id="expertTeamV3Live" class="et3-live" data-et3-live aria-live="polite"></p>
       </div>
-    </div><button type="button" class="et3-workbench-restore" data-et3-action="restore-workbench" aria-label="展开专家团工作台">专家团</button>`;
+    </div><button type="button" class="et3-workbench-restore" data-et3-action="restore-workbench" aria-controls="expertTeamV3WorkbenchContent" aria-expanded="false" aria-label="展开专家团工作台">专家团</button>`;
   }
 
   function statePanel(card, current) {
@@ -1332,28 +1366,145 @@
     return `<section class="et3-panel"><h3>已保留的阶段结果</h3><p class="et3-help">以下结果未被采用为当前阶段的权威成果，但已安全保留供你核对。请先按建议补充或调整，再重新生成当前阶段。</p>${document}</section>${issues}`;
   }
 
-  function isWorkbenchOutsideBlankTarget(target) {
-    if (!target?.matches) return false;
-    return target.matches([
-      '#mainChat', '#mainChat > .messages-shell', '#messages', '#msgInner',
-      '.taiji-home-shell', '.taiji-main-workspace', '.taiji-hero', '.taiji-session-groups',
-    ].join(', '));
+  function eventOccursInside(node, event) {
+    if (!node || !event) return false;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    return path.includes(node) || node.contains?.(event.target);
   }
 
-  function collapseWorkbench() {
+  function isVisibleModal(node) {
+    if (!node || node.hidden || node.getAttribute?.('aria-hidden') === 'true') return false;
+    if (node.closest?.('[hidden], [aria-hidden="true"]')) return false;
+    return !node.getClientRects || node.getClientRects().length > 0;
+  }
+
+  function visibleModalDialogs() {
+    return document.querySelectorAll?.('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]') || [];
+  }
+
+  function hasVisibleModalOutsideWorkbench(root) {
+    return Array.from(visibleModalDialogs()).some(dialog => !root?.contains?.(dialog) && isVisibleModal(dialog));
+  }
+
+  function hasVisibleForeignModal(root) {
+    const v3Portal = portalRoot();
+    return Array.from(visibleModalDialogs()).some(dialog => (
+      !root?.contains?.(dialog)
+      && !v3Portal?.contains?.(dialog)
+      && isVisibleModal(dialog)
+    ));
+  }
+
+  function hasActiveTextSelection() {
+    const selection = document.getSelection?.();
+    return Boolean(selection && selection.isCollapsed === false);
+  }
+
+  function scheduleWorkbenchFallbackFocus(root) {
+    scheduleAfterInteraction(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && !root?.contains?.(active)) return;
+      root?.querySelector?.('[data-et3-action="restore-workbench"]')?.focus?.();
+    });
+  }
+
+  function syncWorkbenchCollapsedState(root) {
+    if (!root) return false;
+    if (state.collapsed) root.classList.add?.('is-collapsed');
+    else root.classList.remove?.('is-collapsed');
+    const content = root.querySelector?.('[data-et3-workbench-content]');
+    if (content?.toggleAttribute) content.toggleAttribute('aria-hidden', state.collapsed);
+    const close = root.querySelector?.('[data-et3-action="close-workbench"]');
+    const restore = root.querySelector?.('[data-et3-action="restore-workbench"]');
+    close?.setAttribute?.('aria-expanded', String(!state.collapsed));
+    restore?.setAttribute?.('aria-expanded', String(state.collapsed));
+    return true;
+  }
+
+  function focusWorkbenchCloseControl(root = workbenchRoot()) {
+    if (!root || root.inert) return false;
+    const close = root.querySelector?.('[data-et3-action="close-workbench"]');
+    if (!close || close.hidden || typeof close.focus !== 'function') return false;
+    try {
+      close.focus({ preventScroll: true });
+    } catch (_) {
+      close.focus();
+    }
+    return document.activeElement === close;
+  }
+
+  function syncOnboardingResumeGeometry(root) {
+    const style = document.body?.style;
+    if (!style) return false;
+    const resume = document.getElementById('onboardingResumeBtn');
+    const hidesResume = !!root && !state.collapsed && window.innerWidth <= 1280;
+    // A media-query layout pass can blur the just-hidden resume control before
+    // the resize listener runs.  Keep its last meaningful focus ownership so
+    // the keyboard user still receives a visible destination.
+    if (hidesResume && resume && (document.activeElement === resume || state.onboardingResumeFocused)) {
+      if (focusWorkbenchCloseControl(root)) state.onboardingResumeFocused = false;
+    }
+    if (!root || state.collapsed || window.innerWidth <= 1280 || typeof root.getBoundingClientRect !== 'function') {
+      style.removeProperty?.('--et3-onboarding-resume-right');
+      return false;
+    }
+    const rect = root.getBoundingClientRect();
+    const right = Math.max(16, Math.ceil(window.innerWidth - rect.left + 16));
+    style.setProperty?.('--et3-onboarding-resume-right', `${right}px`);
+    return true;
+  }
+
+  function handleWorkbenchPointerDown(event) {
+    const root = workbenchRoot();
+    if (!root || state.collapsed || event?.isPrimary !== true || event.button !== 0) {
+      state.workbenchPointer = null;
+      return false;
+    }
+    const inside = eventOccursInside(root, event);
+    const snapshot = captureWorkbenchDraft(root, state.card);
+    state.lastWorkbenchDraft = mergeWorkbenchDraft(snapshot, state.lastWorkbenchDraft);
+    state.workbenchPointer = {
+      pointerId: event.pointerId,
+      inside,
+      clientX: Number(event.clientX || 0),
+      clientY: Number(event.clientY || 0),
+      // 浏览器会在 click 前处理外部元素的默认聚焦。先在 pointerdown
+      // 记录工作台状态，才能在“外部点击收起”时保留编辑字段和选区。
+      draft: inside ? null : snapshot,
+    };
+    return true;
+  }
+
+  function collapseWorkbench({ focusPolicy = 'restore-trigger', draft = null } = {}) {
     const root = workbenchRoot();
     if (!root || state.collapsed) return false;
-    state.draft = captureWorkbenchDraft(root, state.card);
+    const snapshot = draft || captureWorkbenchDraft(root, state.card);
+    state.draft = mergeWorkbenchDraft(snapshot, state.lastWorkbenchDraft);
+    state.lastWorkbenchDraft = state.draft;
     state.collapsed = true;
-    root.classList.add('is-collapsed');
+    syncWorkbenchCollapsedState(root);
     document.body.classList.add('expert-team-v3-collapsed');
-    root.querySelector('[data-et3-action="restore-workbench"]')?.focus();
+    syncOnboardingResumeGeometry(root);
+    if (focusPolicy === 'restore-trigger') root.querySelector('[data-et3-action="restore-workbench"]')?.focus?.();
+    else if (focusPolicy === 'preserve-target') scheduleWorkbenchFallbackFocus(root);
     return true;
   }
 
   function handleWorkbenchOutsideClick(event) {
-    if (state.collapsed || !isWorkbenchOutsideBlankTarget(event?.target)) return false;
-    return collapseWorkbench();
+    const root = workbenchRoot();
+    const pointer = state.workbenchPointer;
+    state.workbenchPointer = null;
+    if (
+      !root || state.collapsed || event?.isTrusted !== true || event?.detail === 0
+      || event?.button !== 0 || eventOccursInside(root, event)
+      || hasActiveTextSelection() || hasVisibleModalOutsideWorkbench(root)
+      || !pointer || pointer.inside
+    ) return false;
+    if (pointer.pointerId != null && event.pointerId != null && pointer.pointerId !== event.pointerId) return false;
+    const deltaX = Number(event.clientX || 0) - pointer.clientX;
+    const deltaY = Number(event.clientY || 0) - pointer.clientY;
+    if (Math.hypot(deltaX, deltaY) > 8) return false;
+    return collapseWorkbench({ focusPolicy: 'preserve-target', draft: pointer.draft });
   }
 
   function bindWorkbenchEvents(root) {
@@ -1361,13 +1512,21 @@
     state.workbenchController = new AbortController();
     const signal = state.workbenchController.signal;
     root.addEventListener('click', event => handleWorkbenchClick(event), { signal });
-    [document.getElementById('mainChat'), document.querySelector?.('.taiji-home-shell')]
-      .filter(Boolean)
-      .forEach(surface => surface.addEventListener?.(
-        'click',
-        event => handleWorkbenchOutsideClick(event),
-        { signal },
-      ));
+    document.addEventListener?.('pointerdown', event => handleWorkbenchPointerDown(event), { capture: true, signal });
+    document.addEventListener?.('click', event => handleWorkbenchOutsideClick(event), { capture: true, signal });
+    document.addEventListener?.('focusin', event => {
+      const resume = document.getElementById('onboardingResumeBtn');
+      if (!resume) {
+        state.onboardingResumeFocused = false;
+        return;
+      }
+      if (event.target === resume || resume.contains?.(event.target)) {
+        state.onboardingResumeFocused = true;
+      } else if (event.target && event.target !== document.body) {
+        state.onboardingResumeFocused = false;
+      }
+    }, { capture: true, signal });
+    window.addEventListener?.('resize', () => syncOnboardingResumeGeometry(workbenchRoot()), { signal });
     root.addEventListener('compositionstart', event => {
       if (!event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
       state.compositionActive = true;
@@ -1422,15 +1581,19 @@
       return true;
     }
     if (action === 'close-workbench') {
-      return collapseWorkbench();
+      return collapseWorkbench({ focusPolicy: 'restore-trigger' });
     }
     if (action === 'restore-workbench') {
       state.collapsed = false;
-      workbenchRoot()?.classList.remove('is-collapsed');
+      const root = workbenchRoot();
+      syncWorkbenchCollapsedState(root);
       document.body.classList.remove('expert-team-v3-collapsed');
-      restoreWorkbenchDraft(workbenchRoot(), state.draft, state.card);
-      workbenchRoot()?.querySelector('.et3-workbench-head h2')?.setAttribute('tabindex', '-1');
-      workbenchRoot()?.querySelector('.et3-workbench-head h2')?.focus();
+      const restoredFocus = restoreWorkbenchDraft(root, state.draft, state.card, { deferFocus: true });
+      syncOnboardingResumeGeometry(root);
+      if (!restoredFocus) {
+        root?.querySelector('.et3-workbench-head h2')?.setAttribute('tabindex', '-1');
+        root?.querySelector('.et3-workbench-head h2')?.focus?.();
+      }
       return true;
     }
     const requiredAction = {
@@ -2026,15 +2189,43 @@
     button.setAttribute('aria-busy', String(Boolean(busy)));
   }
 
+  function consumeV3DocumentKeydown(event) {
+    event.preventDefault?.();
+    event.stopImmediatePropagation?.();
+    event.stopPropagation?.();
+    return true;
+  }
+
+  function handleV3DocumentKeydown(event) {
+    if (event.key === 'Escape') {
+      if (event.isComposing || event.keyCode === 229 || state.compositionActive) return false;
+      const root = workbenchRoot();
+      // A higher app modal is the single owner of Escape/Tab.  This check must
+      // run before V3's suggestion and portal-dialog branches so one keypress
+      // cannot dismiss both layers.  V3's own portal dialog is excluded above.
+      if (hasVisibleForeignModal(root)) return false;
+      if (state.suggestionMode) {
+        returnSuggestionToComposer();
+        return consumeV3DocumentKeydown(event);
+      }
+      if (closeDialog()) {
+        return consumeV3DocumentKeydown(event);
+      }
+      if (root && collapseWorkbench({ focusPolicy: 'restore-trigger' })) {
+        return consumeV3DocumentKeydown(event);
+      }
+      return false;
+    }
+    if (event.key === 'Tab') {
+      if (hasVisibleForeignModal(workbenchRoot())) return false;
+      return trapDialogFocus(event);
+    }
+    return false;
+  }
+
   function init() {
     if (!state.keyboardBound) {
-      document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') {
-          if (state.suggestionMode) returnSuggestionToComposer();
-          else closeDialog();
-        }
-        if (event.key === 'Tab') trapDialogFocus(event);
-      }, { capture: true });
+      document.addEventListener('keydown', event => handleV3DocumentKeydown(event), { capture: true });
       state.keyboardBound = true;
     }
     renderPortal();

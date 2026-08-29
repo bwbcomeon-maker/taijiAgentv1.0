@@ -504,6 +504,180 @@ def main() -> int:
                         )
                     error_context.close()
 
+                    # A visible onboarding dialog owns Escape before the V3
+                    # workbench.  Once it closes, the resume entry must either
+                    # stay clear of the wide workbench or yield its focus to the
+                    # workbench's close control on narrow layouts.
+                    joint_context = browser.new_context(
+                        locale="zh-CN", viewport={"width": 1281, "height": 800}
+                    )
+                    joint_page = joint_context.new_page()
+                    install_route(joint_page)
+                    joint_errors: list[str] = []
+                    joint_page.on(
+                        "console",
+                        lambda message: joint_errors.append(f"console: {message.text}")
+                        if message.type == "error"
+                        else None,
+                    )
+                    joint_page.on(
+                        "pageerror",
+                        lambda error: joint_errors.append(
+                            f"pageerror: {getattr(error, 'stack', '') or str(error)}"
+                        ),
+                    )
+                    joint_page.goto(base_url + "/", wait_until="domcontentloaded")
+                    joint_overlay = joint_page.locator("#onboardingOverlay")
+                    joint_overlay.wait_for(state="visible")
+                    _wait_until(
+                        lambda: joint_page.locator(".onboarding-check-row").count() == 4,
+                        "four joint-layout setup rows",
+                    )
+                    joint_page.evaluate(
+                        """() => window.ExpertTeamV3.renderStatusSurface({
+                          kind: 'expert_team',
+                          productMode: 'standalone',
+                          readOnly: false,
+                          runId: 'onboarding-v3-smoke',
+                          sourceSessionId: '',
+                          version: 1,
+                          currentStageId: 'draft',
+                          publicState: 'awaiting_stage_confirmation',
+                          allowedActions: ['stage_revise', 'stage_confirm'],
+                          phase: '任务规格',
+                          team: { id: 'content-creator-team', title: '联合烟测专家团' },
+                          presentation: { visibleTitle: '联合布局验收' },
+                          brief: { exactTitle: '联合布局验收', audience: '验收' },
+                          progress: { done: 1, total: 5, current: '任务规格' },
+                          workflow: { currentStage: { title: '任务规格' } },
+                          stageActionBinding: {
+                            session_id: 'onboarding-v3-smoke', run_id: 'onboarding-v3-smoke',
+                            expected_version: 1, stage_id: 'draft', stage_attempt: 1,
+                            artifact_id: 'draft:1', artifact_sha256: 'a'.repeat(64)
+                          },
+                        })"""
+                    )
+                    workbench = joint_page.locator("#expertTeamV3Workbench")
+                    workbench.wait_for(state="attached")
+                    joint_page.keyboard.press("Escape")
+                    joint_overlay.wait_for(state="hidden")
+                    if workbench.evaluate("root => root.classList.contains('is-collapsed')"):
+                        raise AssertionError("onboarding Escape also collapsed the V3 workbench")
+                    joint_resume = joint_page.locator("#onboardingResumeBtn")
+                    joint_resume.wait_for(state="visible")
+                    _wait_until(
+                        lambda: joint_page.evaluate(
+                            "document.activeElement && document.activeElement.id === 'onboardingResumeBtn'"
+                        ),
+                        "wide-layout resume focus after onboarding Escape",
+                    )
+                    wide_layout = joint_page.evaluate(
+                        """() => {
+                          const resume=document.querySelector('#onboardingResumeBtn');
+                          const workbench=document.querySelector('#expertTeamV3Workbench');
+                          const resumeRect=resume.getBoundingClientRect();
+                          const workbenchRect=workbench.getBoundingClientRect();
+                          const centerX=Math.round(resumeRect.left+resumeRect.width/2);
+                          const centerY=Math.round(resumeRect.top+resumeRect.height/2);
+                          const hit=document.elementFromPoint(centerX,centerY);
+                          return {
+                            resumeRight:resumeRect.right,
+                            workbenchLeft:workbenchRect.left,
+                            inViewport:resumeRect.left >= 0 && resumeRect.right <= innerWidth,
+                            hitResume:Boolean(hit && (hit===resume || resume.contains(hit))),
+                          };
+                        }"""
+                    )
+                    if (
+                        not wide_layout["inViewport"]
+                        or not wide_layout["hitResume"]
+                        or wide_layout["resumeRight"] > wide_layout["workbenchLeft"] - 8
+                    ):
+                        raise AssertionError(
+                            f"wide onboarding resume overlaps or is covered by V3 workbench: {wide_layout}"
+                        )
+                    if evidence_dir:
+                        joint_page.screenshot(
+                            path=str(evidence_dir / "onboarding-v3-wide-resume.png"),
+                            full_page=True,
+                        )
+                    joint_page.set_viewport_size({"width": 1280, "height": 800})
+                    _wait_until(
+                        lambda: joint_page.evaluate(
+                            """() => {
+                              const resume=document.querySelector('#onboardingResumeBtn');
+                              return resume.getClientRects().length === 0
+                                && getComputedStyle(resume).display === 'none'
+                                && document.activeElement
+                                && document.activeElement.matches('#expertTeamV3Workbench [data-et3-action="close-workbench"]');
+                            }"""
+                        ),
+                        "resize from wide onboarding resume to narrow V3 close focus",
+                    )
+                    joint_page.evaluate("loadOnboardingWizard()")
+                    joint_overlay.wait_for(state="visible")
+                    joint_page.keyboard.press("Escape")
+                    joint_overlay.wait_for(state="hidden")
+                    if workbench.evaluate("root => root.classList.contains('is-collapsed')"):
+                        raise AssertionError("reopened onboarding Escape also collapsed the V3 workbench")
+
+                    for width, height in ((1280, 800), (1024, 768), (760, 800)):
+                        joint_page.set_viewport_size({"width": width, "height": height})
+                        _wait_until(
+                            lambda: joint_page.evaluate(
+                                """() => {
+                                  const resume=document.querySelector('#onboardingResumeBtn');
+                                  return resume.getClientRects().length === 0
+                                    && getComputedStyle(resume).display === 'none';
+                                }"""
+                            ),
+                            f"hidden narrow-layout resume entry at {width}px",
+                        )
+                        narrow_layout = joint_page.evaluate(
+                            """() => {
+                              const workbench=document.querySelector('#expertTeamV3Workbench');
+                              const parent=workbench.parentElement;
+                              return {
+                                width:workbench.getBoundingClientRect().width,
+                                parentWidth:parent.getBoundingClientRect().width,
+                                viewportWidth:innerWidth,
+                                overflow:document.documentElement.scrollWidth > document.documentElement.clientWidth,
+                              };
+                            }"""
+                        )
+                        if (
+                            (
+                                abs(narrow_layout["width"] - narrow_layout["parentWidth"]) > 1
+                                and abs(narrow_layout["width"] - narrow_layout["viewportWidth"]) > 1
+                            )
+                            or narrow_layout["overflow"]
+                        ):
+                            raise AssertionError(
+                                f"narrow V3 workbench does not fit at {width}px: {narrow_layout}"
+                            )
+                        joint_page.evaluate("loadOnboardingWizard()")
+                        joint_overlay.wait_for(state="visible")
+                        joint_page.keyboard.press("Escape")
+                        joint_overlay.wait_for(state="hidden")
+                        if workbench.evaluate("root => root.classList.contains('is-collapsed')"):
+                            raise AssertionError(
+                                f"narrow onboarding Escape collapsed the V3 workbench at {width}px"
+                            )
+                        _wait_until(
+                            lambda: joint_page.evaluate(
+                                "document.activeElement && document.activeElement.matches('#expertTeamV3Workbench [data-et3-action=\"close-workbench\"]')"
+                            ),
+                            f"narrow workbench close focus after onboarding Escape at {width}px",
+                        )
+                    if joint_errors:
+                        raise AssertionError("joint onboarding/V3 browser errors: " + " | ".join(joint_errors))
+                    if evidence_dir:
+                        joint_page.screenshot(
+                            path=str(evidence_dir / "onboarding-v3-narrow-resume-hidden.png"),
+                            full_page=True,
+                        )
+                    joint_context.close()
+
                     context = browser.new_context(
                         locale="zh-CN", viewport={"width": 1440, "height": 960}
                     )

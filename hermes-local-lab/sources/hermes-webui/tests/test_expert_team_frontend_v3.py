@@ -50,8 +50,9 @@ def _run_v3_hooks(body: str) -> dict:
               returnSuggestionToComposer, continueRegularChat,
               clearSuggestionComposerAfterLaunch,
               resumePanel, reviewDocumentHtml,
-              handleWorkbenchClick, handleWorkbenchOutsideClick,
-              isWorkbenchOutsideBlankTarget, collapseWorkbench,
+              handleWorkbenchClick, handleWorkbenchOutsideClick, handleV3DocumentKeydown,
+              handleWorkbenchPointerDown: typeof handleWorkbenchPointerDown === 'function' ? handleWorkbenchPointerDown : null,
+              collapseWorkbench,
               deliveryActionControl, applyResponse,
                 expertTeamDiagnosticText, copyExpertTeamDiagnostics,
                 deferStatusRenderDuringComposition, releaseDeferredStatusCard,
@@ -293,18 +294,23 @@ def test_v3_workbench_binds_composition_events_and_releases_after_final_input_ev
     assert "renderStatusSurface(deferred)" in script
 
 
-def test_v3_outside_blank_click_collapses_only_from_known_chat_backgrounds_and_preserves_draft():
+def test_v3_outside_primary_click_collapses_without_consuming_or_stealing_target_focus():
     result = _run_v3_hooks(
         """
         context.document.body={classList:{add(name){this.added=name;},remove(){}}};
-        context.document.activeElement=null;
+        let defaultPrevented=false;
+        let stopCount=0;
+        let immediateStopCount=0;
+        let targetActions=0;
         let collapsed=false;
         let restoreFocused=false;
         const field={id:'draft-field',type:'textarea',tagName:'TEXTAREA',dataset:{},value:'未提交草稿',checked:false};
         const restore={focus(){restoreFocused=true;}};
         const heading={setAttribute(){},focus(){}};
+        const outsideTarget={id:'external-action',matches(){return false;},closest(){return null;}};
         const root={
           classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(name){if(name==='is-collapsed')collapsed=false;}},
+          contains(node){return node===this;},
           querySelectorAll(selector){
             if(selector==='input:not([type="file"]), textarea, select')return [field];
             if(selector==='details[data-et3-disclosure]')return [];
@@ -317,37 +323,331 @@ def test_v3_outside_blank_click_collapses_only_from_known_chat_backgrounds_and_p
             return null;
           },
         };
+        context.document.activeElement=outsideTarget;
         context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+        context.document.querySelectorAll=()=>[];
+        context.document.getSelection=()=>({isCollapsed:true});
+        context.requestAnimationFrame=callback=>{callback();return 1;};
         hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
-
-        const target=id=>({matches(selector){
-          const accepted={
-            mainChat:'#mainChat',shell:'#mainChat > .messages-shell',messages:'#messages',inner:'#msgInner',
-            homeShell:'.taiji-home-shell',workspace:'.taiji-main-workspace',hero:'.taiji-hero',sessions:'.taiji-session-groups',
-          };
-          return selector.split(',').map(item=>item.trim()).includes(accepted[id]||'');
-        }});
-        const blank=['mainChat','shell','messages','inner','homeShell','workspace','hero','sessions'].map(id=>hooks.isWorkbenchOutsideBlankTarget(target(id)));
-        const protectedTargets=[
-          {matches(){return false;},tagName:'DIV',className:'message-content'},
-          {matches(){return false;},tagName:'BUTTON'},
-          {matches(){return false;},tagName:'TEXTAREA'},
-          {matches(){return false;},className:'toast'},
-          {matches(){return false;},role:'dialog'},
-        ].map(item=>hooks.isWorkbenchOutsideBlankTarget(item));
-        const handled=hooks.handleWorkbenchOutsideClick({target:target('inner')});
-        console.log(JSON.stringify({blank,protectedTargets,handled,collapsed,restoreFocused,draftValue:field.value}));
+        const event={
+          target:outsideTarget,isTrusted:true,button:0,detail:1,pointerId:9,clientX:64,clientY:72,
+          composedPath(){return [outsideTarget];},
+          preventDefault(){defaultPrevented=true;},
+          stopPropagation(){stopCount+=1;},
+          stopImmediatePropagation(){immediateStopCount+=1;},
+        };
+        const pointerEvent={
+          target:outsideTarget,isPrimary:true,button:0,pointerId:9,clientX:64,clientY:72,
+          composedPath(){return [outsideTarget];},
+        };
+        const hasPointerHandler=typeof hooks.handleWorkbenchPointerDown==='function';
+        if(hasPointerHandler)hooks.handleWorkbenchPointerDown(pointerEvent);
+        const handled=hooks.handleWorkbenchOutsideClick(event);
+        if(!defaultPrevented)targetActions+=1;
+        console.log(JSON.stringify({hasPointerHandler,handled,collapsed,restoreFocused,draftValue:field.value,defaultPrevented,stopCount,immediateStopCount,targetActions}));
         """
     )
 
     assert result == {
-        "blank": [True, True, True, True, True, True, True, True],
-        "protectedTargets": [False, False, False, False, False],
+        "hasPointerHandler": True,
         "handled": True,
         "collapsed": True,
-        "restoreFocused": True,
+        "restoreFocused": False,
         "draftValue": "未提交草稿",
+        "defaultPrevented": False,
+        "stopCount": 0,
+        "immediateStopCount": 0,
+        "targetActions": 1,
     }
+
+
+def test_v3_outside_click_restores_last_editor_after_a_static_workbench_click_blurs_dom_focus():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          context.document.body={classList:{add(){},remove(){}}};
+          let collapsed=false;
+          const field={
+            id:'draft-field',type:'textarea',tagName:'TEXTAREA',dataset:{},value:'保留编辑中的草稿',checked:false,
+            selectionStart:2,selectionEnd:7,
+            focus(){context.document.activeElement=this;},
+            setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;},
+          };
+          const heading={id:'heading',setAttribute(){},focus(){context.document.activeElement=this;}};
+          const restore={id:'restore',dataset:{et3Action:'restore-workbench'},type:'button',focus(){context.document.activeElement=this;}};
+          const outside={id:'outside',matches(){return false;},closest(){return null;}};
+          const root={
+            classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(name){if(name==='is-collapsed')collapsed=false;}},
+            contains(node){return node===this||node===heading||node===field||node===restore;},
+            querySelectorAll(selector){
+              if(selector==='input:not([type="file"]), textarea, select')return [field];
+              if(selector==='details[data-et3-disclosure]')return [];
+              return [];
+            },
+            querySelector(selector){
+              if(selector==='[data-et3-action="restore-workbench"]')return restore;
+              if(selector==='.et3-workbench-head h2')return heading;
+              if(selector==='.et3-workbench-scroll')return {scrollTop:80};
+              return null;
+            },
+          };
+          context.document.activeElement=field;
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.document.querySelectorAll=()=>[];
+          context.document.getSelection=()=>({isCollapsed:true});
+          hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
+          const pointer=(target,path)=>({target,isPrimary:true,button:0,pointerId:23,clientX:30,clientY:40,composedPath(){return path;}});
+          hooks.handleWorkbenchPointerDown(pointer(heading,[heading,root]));
+          context.document.activeElement=heading;
+          hooks.handleWorkbenchPointerDown(pointer(outside,[outside]));
+          context.document.activeElement=outside;
+          const closed=hooks.handleWorkbenchOutsideClick({target:outside,isTrusted:true,button:0,detail:1,pointerId:23,clientX:30,clientY:40,composedPath(){return [outside];}});
+          context.document.activeElement=restore;
+          const restored=await hooks.handleWorkbenchClick({target:{closest(){return restore;}}});
+          console.log(JSON.stringify({closed,restored,collapsed,focused:context.document.activeElement===field,selection:[field.selectionStart,field.selectionEnd],value:field.value}));
+        })();
+        """
+    )
+
+    assert result == {
+        "closed": True,
+        "restored": True,
+        "collapsed": False,
+        "focused": True,
+        "selection": [2, 7],
+        "value": "保留编辑中的草稿",
+    }
+
+
+def test_v3_outside_click_ignores_internal_gesture_selection_and_visible_modal_owner():
+    result = _run_v3_hooks(
+        """
+        context.document.body={classList:{add(){},remove(){}}};
+        let collapsed=false;
+        const insideTarget={id:'inside',matches(){return false;},closest(){return null;}};
+        const outsideTarget={id:'outside',matches(){return false;},closest(){return null;}};
+        const root={
+          classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(){}},
+          contains(node){return node===insideTarget;},
+          querySelectorAll(selector){
+            if(selector==='input:not([type="file"]), textarea, select')return [];
+            if(selector==='details[data-et3-disclosure]')return [];
+            return [];
+          },
+          querySelector(){return null;},
+        };
+        const modal={hidden:false,getAttribute(name){return name==='aria-hidden'?'false':null;},getClientRects(){return [{}];}};
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+        context.document.activeElement=outsideTarget;
+        context.document.getSelection=()=>({isCollapsed:false});
+        context.document.querySelectorAll=()=>[];
+        hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
+        const pointer=(target,button=0)=>({target,isPrimary:true,button,pointerId:17,clientX:20,clientY:20,composedPath(){return [target];}});
+        const click=(target,button=0)=>({target,isTrusted:true,button,detail:1,pointerId:17,clientX:20,clientY:20,composedPath(){return [target];}});
+        const hasPointerHandler=typeof hooks.handleWorkbenchPointerDown==='function';
+        if(hasPointerHandler)hooks.handleWorkbenchPointerDown(pointer(insideTarget));
+        const internal=hooks.handleWorkbenchOutsideClick(click(insideTarget));
+        if(hasPointerHandler)hooks.handleWorkbenchPointerDown(pointer(outsideTarget,2));
+        const nonPrimary=hooks.handleWorkbenchOutsideClick(click(outsideTarget,2));
+        if(hasPointerHandler)hooks.handleWorkbenchPointerDown(pointer(outsideTarget));
+        const selection=hooks.handleWorkbenchOutsideClick(click(outsideTarget));
+        context.document.getSelection=()=>({isCollapsed:true});
+        context.document.querySelectorAll=()=>[modal];
+        if(hasPointerHandler)hooks.handleWorkbenchPointerDown(pointer(outsideTarget));
+        const modalOwned=hooks.handleWorkbenchOutsideClick(click(outsideTarget));
+        console.log(JSON.stringify({hasPointerHandler,internal,nonPrimary,selection,modalOwned,collapsed}));
+        """
+    )
+
+    assert result == {
+        "hasPointerHandler": True,
+        "internal": False,
+        "nonPrimary": False,
+        "selection": False,
+        "modalOwned": False,
+        "collapsed": False,
+    }
+
+
+def test_v3_outside_click_does_not_collapse_beneath_its_own_open_portal_dialog():
+    result = _run_v3_hooks(
+        """
+        context.document.body={classList:{add(){},remove(){}}};
+        let collapsed=false;
+        const backdropTarget={id:'dialog-backdrop',matches(){return false;},closest(){return null;}};
+        const root={
+          classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(){}},
+          contains(){return false;},
+          querySelectorAll(selector){
+            if(selector==='input:not([type="file"]), textarea, select')return [];
+            if(selector==='details[data-et3-disclosure]')return [];
+            return [];
+          },
+          querySelector(){return null;},
+        };
+        const v3Dialog={
+          hidden:false,
+          getAttribute(name){return name==='aria-hidden'?'false':null;},
+          getClientRects(){return [{}];},
+        };
+        const portal={contains(node){return node===v3Dialog;}};
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:(id==='expertTeamV3PortalRoot'?portal:null);
+        context.document.getSelection=()=>({isCollapsed:true});
+        context.document.querySelectorAll=()=>[v3Dialog];
+        hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
+        const pointer={target:backdropTarget,isPrimary:true,button:0,pointerId:31,clientX:20,clientY:20,composedPath(){return [backdropTarget];}};
+        const click={target:backdropTarget,isTrusted:true,button:0,detail:1,pointerId:31,clientX:20,clientY:20,composedPath(){return [backdropTarget];}};
+        const pointerCaptured=hooks.handleWorkbenchPointerDown(pointer);
+        const closed=hooks.handleWorkbenchOutsideClick(click);
+        console.log(JSON.stringify({pointerCaptured,closed,collapsed,portalDialogStillVisible:!v3Dialog.hidden}));
+        """
+    )
+
+    assert result == {
+        "pointerCaptured": True,
+        "closed": False,
+        "collapsed": False,
+        "portalDialogStillVisible": True,
+    }
+
+
+def test_v3_escape_closes_only_the_workbench_when_no_higher_modal_or_ime_is_active():
+    result = _run_v3_hooks(
+        """
+        context.document.body={classList:{add(){},remove(){}}};
+        let collapsed=false;
+        let restoreFocused=false;
+        let prevented=0;
+        let stopped=0;
+        const restore={focus(){restoreFocused=true;}};
+        const root={
+          classList:{add(name){if(name==='is-collapsed')collapsed=true;},remove(){}},
+          contains(){return false;},
+          querySelectorAll(selector){
+            if(selector==='input:not([type="file"]), textarea, select')return [];
+            if(selector==='details[data-et3-disclosure]')return [];
+            return [];
+          },
+          querySelector(selector){return selector==='[data-et3-action="restore-workbench"]'?restore:null;},
+        };
+        const modal={hidden:false,getAttribute(name){return name==='aria-hidden'?'false':null;},getClientRects(){return [{}];}};
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+        context.document.getSelection=()=>({isCollapsed:true});
+        context.document.querySelectorAll=()=>[modal];
+        hooks.setCard({kind:'expert_team',runId:'run-1',publicState:'intake',questions:[]});
+        const event=extra=>({key:'Escape',preventDefault(){prevented+=1;},stopPropagation(){stopped+=1;},...extra});
+        hooks.setSuggestion(true,'仍在确认的专家团草稿');
+        const suggestionModalOwned=hooks.handleV3DocumentKeydown(event({}));
+        const suggestionStillOpen=hooks.getRelaunchState().suggestionMode;
+        hooks.setSuggestion(false,'');
+        const modalOwned=hooks.handleV3DocumentKeydown(event({}));
+        context.document.querySelectorAll=()=>[];
+        const ime=hooks.handleV3DocumentKeydown(event({isComposing:true}));
+        const workbench=hooks.handleV3DocumentKeydown(event({}));
+        console.log(JSON.stringify({suggestionModalOwned,suggestionStillOpen,modalOwned,ime,workbench,collapsed,restoreFocused,prevented,stopped}));
+        """
+    )
+
+    assert result == {
+        "suggestionModalOwned": False,
+        "suggestionStillOpen": True,
+        "modalOwned": False,
+        "ime": False,
+        "workbench": True,
+        "collapsed": True,
+        "restoreFocused": True,
+        "prevented": 1,
+        "stopped": 1,
+    }
+
+
+def test_v3_keyboard_keeps_foreign_modal_priority_and_owns_its_portal_dialog_afterward():
+    result = _run_v3_hooks(
+        """
+        let prevented=0;
+        let stopped=0;
+        let stoppedImmediately=0;
+        let firstFocused=0;
+        const root={contains(){return false;}};
+        const first={focus(){firstFocused+=1;}};
+        const last={};
+        const v3Dialog={
+          hidden:false,
+          getAttribute(name){return name==='aria-hidden'?'false':null;},
+          getClientRects(){return [{}];},
+          querySelectorAll(){return [first,last];},
+        };
+        const backdrop={
+          hidden:false,
+          querySelector(selector){return selector==='[data-et3-dialog]'?v3Dialog:null;},
+        };
+        const portal={
+          contains(node){return node===v3Dialog;},
+          querySelector(selector){return selector==='[data-et3-dialog-backdrop]'?backdrop:null;},
+        };
+        const foreign={
+          hidden:false,
+          getAttribute(name){return name==='aria-hidden'?'false':null;},
+          getClientRects(){return [{}];},
+        };
+        context.document.activeElement=last;
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:(id==='expertTeamV3PortalRoot'?portal:null);
+        context.document.querySelectorAll=()=>[foreign,v3Dialog];
+        hooks.setSuggestion(true,'仍在确认的专家团草稿');
+        const event=extra=>({
+          preventDefault(){prevented+=1;},
+          stopPropagation(){stopped+=1;},
+          stopImmediatePropagation(){stoppedImmediately+=1;},
+          ...extra,
+        });
+        const foreignEscape=hooks.handleV3DocumentKeydown(event({key:'Escape'}));
+        const foreignTab=hooks.handleV3DocumentKeydown(event({key:'Tab'}));
+        const suggestionStillOpen=hooks.getRelaunchState().suggestionMode;
+        const foreignKeptV3DialogOpen=!backdrop.hidden;
+        context.document.querySelectorAll=()=>[v3Dialog];
+        hooks.setSuggestion(false,'');
+        const v3Escape=hooks.handleV3DocumentKeydown(event({key:'Escape'}));
+        console.log(JSON.stringify({
+          foreignEscape,foreignTab,suggestionStillOpen,foreignKeptV3DialogOpen,
+          v3Escape,backdropHidden:backdrop.hidden,prevented,stopped,stoppedImmediately,firstFocused,
+        }));
+        """
+    )
+
+    assert result == {
+        "foreignEscape": False,
+        "foreignTab": False,
+        "suggestionStillOpen": True,
+        "foreignKeptV3DialogOpen": True,
+        "v3Escape": True,
+        "backdropHidden": True,
+        "prevented": 1,
+        "stopped": 1,
+        "stoppedImmediately": 1,
+        "firstFocused": 0,
+    }
+
+
+def test_v3_workbench_has_named_nonmodal_region_and_restore_semantics():
+    script = _read(SCRIPT)
+
+    for expected in (
+        "root.setAttribute?.('aria-labelledby', 'expertTeamV3WorkbenchTitle')",
+        'id="expertTeamV3WorkbenchTitle"',
+        'data-et3-workbench-content',
+        'aria-controls="expertTeamV3WorkbenchContent"',
+        'aria-expanded="false"',
+        "content.toggleAttribute('aria-hidden', state.collapsed)",
+    ):
+        assert expected in script
+
+
+def test_v3_is_the_only_expert_team_blank_click_owner():
+    legacy_ui = _read(ROOT / "static" / "ui.js")
+
+    assert "handleExpertTeamPanelBlankCollapse" not in legacy_ui
+    assert "_syncExpertTeamBlankCollapseListener" not in legacy_ui
+    assert "EXPERT_TEAM_PANEL_BLANK_COLLAPSE" not in legacy_ui
 
 
 def test_v3_ime_composition_defers_poll_renders_and_restores_final_input_focus_selection_and_scroll():
@@ -892,15 +1192,49 @@ def test_v3_electron_smoke_script_covers_flow_and_non_expert_isolation_gate():
     assert "switchPanel(\"tasks\")" in smoke
     assert "expert-team-v3-active" in smoke
     assert "page.screenshot" in smoke
+    assert "data-smoke-message-body" in smoke
+    assert "document.elementFromPoint" in smoke
+    assert "__et3OutsideActionCount" in smoke
+    assert "Escape did not collapse the independent workbench" in smoke
+    assert "verifyOnboardingWorkbenchJointFlow" in smoke
+    assert "onboarding-v3-wide-resume.png" in smoke
+    assert "onboarding-v3-narrow-resume-hidden.png" in smoke
+    assert "onboardingResumeBtn" in smoke
+    assert "Resize to narrow V3 kept focus on the CSS-hidden onboarding resume" in smoke
+    assert "ONBOARDING_V3_JOINT_SMOKE_PASSED" in smoke
+
+
+def test_v3_resize_reclaims_focus_before_hiding_the_onboarding_resume_entry():
+    script = _read(SCRIPT)
+
+    assert "function focusWorkbenchCloseControl" in script
+    assert "document.activeElement === resume" in script
+    assert "window.innerWidth <= 1280" in script
+    assert "focusWorkbenchCloseControl(root)" in script
+
+
+def test_v3_resize_keeps_the_last_resume_focus_owner_when_css_has_already_blurred_it():
+    script = _read(SCRIPT)
+
+    assert "onboardingResumeFocused" in script
+    assert "document.addEventListener?.('focusin'" in script
+    assert "document.activeElement === resume || state.onboardingResumeFocused" in script
+
+
+def test_v3_clear_status_surface_forgets_the_transient_onboarding_focus_owner():
+    script = _read(SCRIPT)
+    clear = script[script.index("function clearStatusSurface() {"):script.index("function workbenchHtml(card)")]
+
+    assert "state.onboardingResumeFocused = false;" in clear
 
 
 def test_v3_electron_smoke_binds_python_to_the_current_worktree_by_default():
     smoke = _read(ELECTRON_SMOKE)
 
-    assert "process.env.HERMES_WEBUI_PYTHON || path.join(repoRoot" in smoke
-    assert "HERMES_WEBUI_PYTHON: pythonBin" in smoke
-    assert "TAIJI_AGENT_PYTHON: pythonBin" in smoke
-    assert "TAIJI_WEBUI_PYTHON: pythonBin" in smoke
+    assert "process.env.HERMES_WEBUI_PYTHON || path.join(agentDir" in smoke
+    assert "prepareUnifiedLicenseFixture({ repoRoot, agentDir, pythonBin, runtimeEnv })" in smoke
+    assert "env: runtimeEnv" in smoke
+    assert "cleanupUnifiedLicenseFixture({ runtimeEnv })" in smoke
     assert "pythonRequestedPath: path.resolve(pythonBin)" in smoke
     assert "pythonBinRealpath: fs.realpathSync(pythonBin)" in smoke
     assert "const electronHostRoot = process.env.TAIJI_ELECTRON_HOST_ROOT || process.env.TAIJI_MAIN_REPO_ROOT || repoRoot" in smoke

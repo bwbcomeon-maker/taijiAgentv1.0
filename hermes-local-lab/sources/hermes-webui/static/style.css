@@ -11908,6 +11908,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .expert-team-office-summary dd{margin-top:3px;overflow:hidden;text-overflow:ellipsis;font-weight:650;color:var(--text)}
 .expert-team-office-summary details{font-size:12px;color:var(--muted)}
 .expert-team-office-drawer{position:fixed;z-index:10020;inset:0 0 0 auto;width:min(720px,calc(100vw - 24px));height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto;background:var(--bg);border-left:1px solid var(--border);box-shadow:-18px 0 48px rgba(9,16,31,.22);color:var(--text)}
+.expert-team-office-confirming .app-dialog-overlay{z-index:10030}
 .expert-team-office-drawer[hidden]{display:none}
 .expert-team-office-drawer::before{content:"";position:fixed;z-index:-1;inset:0 720px 0 0;background:rgba(4,10,20,.42)}
 .expert-team-office-drawer-head,.expert-team-office-drawer-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border);background:var(--bg)}

@@ -883,7 +883,11 @@ function dismissOnboardingWizard({focusResume=true}={}){
   _syncOnboardingResumeEntry();
   if(focusResume)requestAnimationFrame(()=>{
     const resume=$('onboardingResumeBtn');
-    if(resume&&!resume.hidden)resume.focus();
+    const resumeVisible=resume&&!resume.hidden&&resume.getClientRects().length>0;
+    if(resumeVisible){resume.focus();return;}
+    const workbenchClose=document.querySelector('#expertTeamV3Workbench:not(.is-collapsed) [data-et3-action="close-workbench"]');
+    if(workbenchClose&&workbenchClose.getClientRects().length>0){workbenchClose.focus();return;}
+    $('msg')?.focus();
   });
 }
 

@@ -37,7 +37,7 @@ FORMAL_SUITES = (
     "webui-python",
 )
 FORMAL_TARGET_CONTRACT_SHA256 = (
-    "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b"
+    "09f8439eddaea5fed0bfc6695358c11264105dd638a575ed7c814a4c439811b1"
 )
 
 
@@ -121,7 +121,7 @@ def canonical_formal_v2_log(
         "npm_version=" + npm_version,
         "npm_cli_sha256=" + npm_cli_sha256,
         "eslint_cli_sha256=" + ("6" * 64),
-        "target_count=20",
+        "target_count=" + str(len(driver.FORMAL_TARGET_REGISTRY)),
         "target_contract_sha256=" + FORMAL_TARGET_CONTRACT_SHA256,
     ]
     for suite in FORMAL_SUITES:
@@ -1032,6 +1032,10 @@ validate_source_archive_integrity
             "tests/test_approval_sse.py",
             "tests/test_pr1350_sse_notify_correctness.py",
             "tests/test_expert_team_frontend.py",
+            "tests/test_expert_team_frontend_v2.py",
+            "tests/test_expert_team_frontend_v3.py",
+            "tests/test_managed_dialog_static.py",
+            "tests/test_onboarding_static.py",
             "tests/test_ui_visibility_config.py",
             "tests/test_issue1800_file_html_interactions.py",
             "tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell",
@@ -1289,7 +1293,7 @@ validate_source_archive_integrity
                 "eslint_cli_sha256=" + ("6" * 64) + "\n", "", 1
             ),
             "wrong-target-count-header": valid_log.replace(
-                "target_count=20", "target_count=19", 1
+                "target_count=24", "target_count=23", 1
             ),
             "wrong-target-contract": valid_log.replace(
                 FORMAL_TARGET_CONTRACT_SHA256, "f" * 64, 1

@@ -286,6 +286,10 @@ jobs:
             tests/test_approval_sse.py \
             tests/test_pr1350_sse_notify_correctness.py \
             tests/test_expert_team_frontend.py \
+            tests/test_expert_team_frontend_v2.py \
+            tests/test_expert_team_frontend_v3.py \
+            tests/test_managed_dialog_static.py \
+            tests/test_onboarding_static.py \
             tests/test_ui_visibility_config.py \
             tests/test_issue1800_file_html_interactions.py \
             tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell \

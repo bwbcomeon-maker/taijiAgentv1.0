@@ -23,11 +23,28 @@
       if(typeof showToast==='function')showToast('确认弹窗尚未就绪，未执行此操作。');
       return false;
     }
+    const drawer=document.querySelector('[data-expert-team-office-drawer]:not([hidden])');
+    const returnFocus=document.activeElement;
+    let confirmed=false;
+    if(drawer){
+      document.body.classList.add('expert-team-office-confirming');
+      drawer.inert=true;
+    }
     try{
-      return !!(await dialog({...options,focusCancel:true}));
+      confirmed=!!(await dialog(drawer?{...options,focusCancel:true,restoreFocus:false}:{...options,focusCancel:true}));
+      return confirmed;
     }catch(_error){
       if(typeof showToast==='function')showToast('无法打开确认弹窗，未执行此操作。');
       return false;
+    }finally{
+      if(drawer){
+        drawer.inert=false;
+        document.body.classList.remove('expert-team-office-confirming');
+        if(!confirmed&&returnFocus&&returnFocus.isConnected&&typeof returnFocus.focus==='function'){
+          const schedule=typeof requestAnimationFrame==='function'?requestAnimationFrame:callback=>setTimeout(callback,0);
+          schedule(()=>returnFocus.focus());
+        }
+      }
     }
   }
   function officeMutationKey(card,kind){
@@ -124,6 +141,33 @@
     btn.textContent=ready?'切换验收身份':'登录验收身份';const focusTarget=ready&&begin?begin:btn;if(focusTarget&&focusTarget.focus)focusTarget.focus();return ready;
   }
   function officeDrawer(btn){return btn&&btn.closest?btn.closest('[data-expert-team-office-drawer]'):null;}
+  function focusOfficeDrawerControl(drawer,preferred){
+    if(!drawer||drawer.hidden||drawer.isConnected===false)return false;
+    const fallback=drawer.querySelector('[data-office-close],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled])');
+    const target=[preferred,fallback].find(item=>item&&item.isConnected!==false&&!item.disabled&&!item.hidden&&typeof item.focus==='function');
+    if(!target)return false;
+    target.focus();
+    return document.activeElement===target;
+  }
+  function focusUpdatedExpertTeamWorkbench(){
+    const workbench=document.getElementById('expertTeamV3Workbench');
+    const close=workbench&&workbench.querySelector('[data-et3-action="close-workbench"]');
+    if(close&&close.focus){
+      try{close.focus({preventScroll:true});}catch(_){close.focus();}
+      return document.activeElement===close;
+    }
+    const panel=document.getElementById('expertTeamWorkspacePanel');
+    const fallback=panel&&panel.querySelector('[data-expert-team-action]:not([disabled]),button:not([disabled])');
+    if(fallback&&fallback.focus){
+      try{fallback.focus({preventScroll:true});}catch(_){fallback.focus();}
+      return document.activeElement===fallback;
+    }
+    return false;
+  }
+  function setExpertTeamV3WorkbenchInert(inert){
+    const workbench=document.getElementById('expertTeamV3Workbench');
+    if(workbench)workbench.inert=!!inert;
+  }
   function openExpertTeamOfficeDrawer(btn){
     const root=btn&&btn.closest?btn.closest('.expert-team-panel-inner'):null;
     const drawer=root&&root.querySelector?root.querySelector('[data-expert-team-office-drawer]'):null;
@@ -137,6 +181,7 @@
     document.body.appendChild(drawer);drawer.hidden=false;
     drawer.dataset.officeEvidenceCount='0';
     const main=document.getElementById('mainChat');if(main)main.inert=true;
+    setExpertTeamV3WorkbenchInert(true);
     drawer._expertTeamOfficeBaseline=officeDrawerDraftState(drawer);
     const first=drawer.querySelector('button,input:not([disabled])');if(first&&first.focus)first.focus();
     return true;
@@ -155,6 +200,20 @@
     });
   }
   function officeDrawerIsDirty(drawer){return !!(drawer&&officeDrawerDraftState(drawer)!==String(drawer._expertTeamOfficeBaseline||''));}
+  function releaseExpertTeamOfficeDrawer(drawer,{restoreFocus=true}={}){
+    if(!drawer)return false;
+    drawer.hidden=true;const main=document.getElementById('mainChat');if(main)main.inert=false;
+    setExpertTeamV3WorkbenchInert(false);
+    const placeholder=drawer._expertTeamOfficePlaceholder;
+    if(placeholder&&placeholder.parentNode)placeholder.parentNode.replaceChild(drawer,placeholder);else if(drawer.parentNode)drawer.parentNode.removeChild(drawer);
+    drawer._expertTeamOfficePlaceholder=null;drawer._expertTeamOfficeRoot=null;
+    const returnTarget=officeDrawerReturnFocus&&officeDrawerReturnFocus.isConnected
+      ? officeDrawerReturnFocus
+      : (document.querySelector('#expertTeamWorkspacePanel [data-expert-team-office-open]')||null);
+    officeDrawerReturnFocus=null;
+    if(restoreFocus&&returnTarget&&returnTarget.focus)returnTarget.focus();
+    return true;
+  }
   function closeExpertTeamOfficeDrawer(btn,force){
     const drawer=officeDrawer(btn);if(!drawer)return false;
     if(!force&&officeDrawerIsDirty(drawer)){
@@ -171,19 +230,13 @@
     if(drawer.dataset.officeReviewSessionStatus==='ready'&&typeof api==='function'){
       Promise.resolve(api('/api/docx-engine-v2/quality/wps-visual/begin',{method:'POST',body:JSON.stringify({session_id:closingCard.sourceSessionId,run_id:closingCard.runId,expected_version:Number(closingCard.version||0),action:'abandon'})})).catch(()=>{});
     }
-    drawer.hidden=true;const main=document.getElementById('mainChat');if(main)main.inert=false;
-    const placeholder=drawer._expertTeamOfficePlaceholder;
-    if(placeholder&&placeholder.parentNode)placeholder.parentNode.replaceChild(drawer,placeholder);else if(drawer.parentNode)drawer.parentNode.removeChild(drawer);
-    drawer._expertTeamOfficePlaceholder=null;drawer._expertTeamOfficeRoot=null;
-    const returnTarget=officeDrawerReturnFocus&&officeDrawerReturnFocus.isConnected
-      ? officeDrawerReturnFocus
-      : (document.querySelector('#expertTeamWorkspacePanel [data-expert-team-office-open]')||null);
-    if(returnTarget&&returnTarget.focus)returnTarget.focus();officeDrawerReturnFocus=null;return true;
+    return releaseExpertTeamOfficeDrawer(drawer);
   }
   function handleExpertTeamOfficeDrawerKeydown(event){
     const drawer=event&&event.target&&event.target.closest?event.target.closest('[data-expert-team-office-drawer]'):null;if(!drawer)return false;
-    if(event.key==='Escape'){event.preventDefault();return closeExpertTeamOfficeDrawer(drawer.querySelector('[data-office-close]'));}
+    if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();event.stopPropagation();return closeExpertTeamOfficeDrawer(drawer.querySelector('[data-office-close]'));}
     if(event.key!=='Tab')return false;
+    event.stopImmediatePropagation();event.stopPropagation();
     const items=Array.from(drawer.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')).filter(item=>!item.hidden);
     if(!items.length)return false;const first=items[0],last=items[items.length-1];
     if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}return true;
@@ -264,10 +317,22 @@
       danger:true,
     });
     if(!confirmed)return false;
+    focusOfficeDrawerControl(drawer, drawer.querySelector('[data-office-close]'));
     if(btn.disabled)return false;btn.disabled=true;btn.setAttribute('aria-busy','true');
-    try{const result=await api('/api/expert-teams/office-revisions/create',{method:'POST',body:JSON.stringify(officeRevisionMutationPayload(card,ids))});if(result&&result.run)applyExpertTeamActionResponse(result);if(typeof showToast==='function')showToast('已按结构化问题退回修改。');return true;}
+    let renderedUpdatedWorkbench=false;
+    try{
+      const result=await api('/api/expert-teams/office-revisions/create',{method:'POST',body:JSON.stringify(officeRevisionMutationPayload(card,ids))});
+      if(!result||!result.run)throw new Error('退回修改未返回最新工作台状态，请刷新后重试。');
+      applyExpertTeamActionResponse(result);
+      abortExpertTeamOfficeAuthorizerHandoff();
+      releaseExpertTeamOfficeDrawer(drawer,{restoreFocus:false});
+      renderedUpdatedWorkbench=true;
+      focusUpdatedExpertTeamWorkbench();
+      if(typeof showToast==='function')showToast('已按结构化问题退回修改。');
+      return true;
+    }
     catch(error){if(typeof showToast==='function')showToast('退回修改失败：'+(error&&error.message||error));return false;}
-    finally{btn.disabled=false;btn.removeAttribute('aria-busy');}
+    finally{btn.disabled=false;btn.removeAttribute('aria-busy');if(!renderedUpdatedWorkbench)focusOfficeDrawerControl(drawer, btn);}
   }
   async function startExpertTeamOfficeAuthorizerHandoff(btn){
     const card=activeExpertTeamCard(btn);const drawer=officeDrawer(btn);const live=drawer&&drawer.querySelector('[data-office-live]');

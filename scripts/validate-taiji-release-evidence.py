@@ -114,10 +114,10 @@ ACCEPTANCE_MANIFEST_FIELDS = {
 }
 FORMAL_BUILD_TEST_LOG_BASENAME = "formal-build-tests.log"
 FORMAL_BUILD_TEST_LOG_SCHEMA = "taiji-formal-build-tests/v2"
-FORMAL_BUILD_TEST_TARGET_COUNT = 20
-FORMAL_BUILD_TEST_TARGET_CONTRACT_BYTES = 1864
+FORMAL_BUILD_TEST_TARGET_COUNT = 24
+FORMAL_BUILD_TEST_TARGET_CONTRACT_BYTES = 2240
 FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256 = (
-    "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b"
+    "09f8439eddaea5fed0bfc6695358c11264105dd638a575ed7c814a4c439811b1"
 )
 FORMAL_BUILD_TEST_FIELDS = {
     "formal_build_tests_status",
@@ -2339,7 +2339,7 @@ def validate_formal_build_test_payloads(
         index += 1
 
     if next_ordinal != FORMAL_BUILD_TEST_TARGET_COUNT:
-        raise EvidenceError("正式构建测试 target 总数不是 exact 20")
+        raise EvidenceError("正式构建测试 target 总数不是 exact 24")
     if (
         len(serialized_targets) != FORMAL_BUILD_TEST_TARGET_CONTRACT_BYTES
         or hashlib.sha256(serialized_targets).hexdigest()

@@ -122,7 +122,7 @@ emit_agent_plan() {
 
 emit_webui_plan() {
   emit_plan "webui-lint" "$WEBUI_REL" "npm run lint:runtime"
-  emit_plan "webui-tests" "$WEBUI_REL" "$ROOT_PYTHON -m pytest -q tests/test_brand_privacy.py tests/test_model_config_api.py tests/test_model_config_frontend.py tests/test_approval_queue.py tests/test_approval_sse.py tests/test_pr1350_sse_notify_correctness.py tests/test_expert_team_frontend.py tests/test_ui_visibility_config.py tests/test_issue1800_file_html_interactions.py tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell tests/test_issue1116_composer_placeholder.py"
+  emit_plan "webui-tests" "$WEBUI_REL" "$ROOT_PYTHON -m pytest -q tests/test_brand_privacy.py tests/test_model_config_api.py tests/test_model_config_frontend.py tests/test_approval_queue.py tests/test_approval_sse.py tests/test_pr1350_sse_notify_correctness.py tests/test_expert_team_frontend.py tests/test_expert_team_frontend_v2.py tests/test_expert_team_frontend_v3.py tests/test_managed_dialog_static.py tests/test_onboarding_static.py tests/test_ui_visibility_config.py tests/test_issue1800_file_html_interactions.py tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell tests/test_issue1116_composer_placeholder.py"
 }
 
 emit_extra_plan() {
@@ -315,6 +315,10 @@ preflight_selected_suites() {
       tests/test_approval_sse.py \
       tests/test_pr1350_sse_notify_correctness.py \
       tests/test_expert_team_frontend.py \
+      tests/test_expert_team_frontend_v2.py \
+      tests/test_expert_team_frontend_v3.py \
+      tests/test_managed_dialog_static.py \
+      tests/test_onboarding_static.py \
       tests/test_ui_visibility_config.py \
       tests/test_issue1800_file_html_interactions.py \
       tests/test_writeflow_frontend.py \
@@ -370,6 +374,10 @@ run_webui() {
     tests/test_approval_sse.py \
     tests/test_pr1350_sse_notify_correctness.py \
     tests/test_expert_team_frontend.py \
+    tests/test_expert_team_frontend_v2.py \
+    tests/test_expert_team_frontend_v3.py \
+    tests/test_managed_dialog_static.py \
+    tests/test_onboarding_static.py \
     tests/test_ui_visibility_config.py \
     tests/test_issue1800_file_html_interactions.py \
     tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell \

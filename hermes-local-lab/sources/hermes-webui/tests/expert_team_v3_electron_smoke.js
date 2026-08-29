@@ -103,6 +103,141 @@ function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version
   };
 }
 
+async function verifyOnboardingWorkbenchJointFlow(page, outDir, fixtureSource) {
+  await page.setViewportSize({ width: 1281, height: 800 });
+  await page.evaluate(async ({ fixtureSource }) => {
+    const preflight = {
+      schema_version: 'taiji-setup-status/v1',
+      overall_ready: true,
+      items: [
+        ['license', '授权'], ['model', '模型'], ['workspace', '工作区'], ['security', '安全策略'],
+      ].map(([id, label]) => ({ id, label, status: 'ready', ready: true, reason: '联合烟测已就绪。', recovery: { id: 'retry', label: '重新检查' } })),
+    };
+    const status = {
+      completed: false,
+      settings: { default_model: 'smoke/model', default_workspace: '', password_enabled: false, bot_name: 'taiji Agent' },
+      system: { hermes_found: true, imports_ok: true, config_exists: true, chat_ready: true, provider_configured: true, provider_ready: true, setup_state: 'ready', provider_note: '模型已就绪。', current_provider: 'smoke', current_model: 'smoke/model' },
+      setup: { providers: [], categories: [], unsupported_note: '', current_is_oauth: false, current: { provider: 'smoke', model: 'smoke/model', base_url: '' } },
+      workspaces: { items: [], last: null },
+      models: ['smoke/model'],
+      preflight,
+    };
+    window.__et3OriginalOnboardingApi = window.api;
+    window.api = async (url, options) => {
+      if (String(url) === '/api/onboarding/status') return status;
+      if (String(url) === '/api/setup/status') return preflight;
+      return window.__et3OriginalOnboardingApi(url, options);
+    };
+    await loadOnboardingWizard();
+    const makeRun = eval(`(${fixtureSource})`);
+    const card = buildExpertTeamCardFromRun(makeRun('onboarding-v3-smoke'));
+    card.sourceSessionId = '';
+    window.ExpertTeamV3.renderStatusSurface(card);
+  }, { fixtureSource });
+
+  const overlay = page.locator('#onboardingOverlay');
+  const workbench = page.locator('#expertTeamV3Workbench');
+  try {
+    await overlay.waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.querySelectorAll('.onboarding-check-row').length === 4, null, { timeout: 10000 });
+    await workbench.waitFor({ state: 'attached' });
+    await page.keyboard.press('Escape');
+    await overlay.waitFor({ state: 'hidden' });
+    assert(!await workbench.evaluate(root => root.classList.contains('is-collapsed')), 'Onboarding Escape also collapsed the V3 workbench');
+    const resume = page.locator('#onboardingResumeBtn');
+    await resume.waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.activeElement?.id === 'onboardingResumeBtn', null, { timeout: 5000 });
+    const wideLayout = await page.evaluate(() => {
+      const resume = document.getElementById('onboardingResumeBtn');
+      const workbench = document.getElementById('expertTeamV3Workbench');
+      const resumeRect = resume?.getBoundingClientRect();
+      const workbenchRect = workbench?.getBoundingClientRect();
+      const hit = resumeRect ? document.elementFromPoint(Math.round(resumeRect.left + resumeRect.width / 2), Math.round(resumeRect.top + resumeRect.height / 2)) : null;
+      return {
+        resumeRight: resumeRect?.right || 0,
+        workbenchLeft: workbenchRect?.left || 0,
+        inViewport: Boolean(resumeRect && resumeRect.left >= 0 && resumeRect.right <= innerWidth),
+        hitResume: Boolean(hit && resume && (hit === resume || resume.contains(hit))),
+      };
+    });
+    assert(
+      wideLayout.inViewport && wideLayout.hitResume && wideLayout.resumeRight <= wideLayout.workbenchLeft - 8,
+      'Wide onboarding resume overlaps or is covered by V3 workbench',
+      wideLayout,
+    );
+    await page.screenshot({ path: path.join(outDir, 'onboarding-v3-wide-resume.png'), fullPage: false });
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForFunction(() => {
+      const resume = document.getElementById('onboardingResumeBtn');
+      return Boolean(
+        resume && resume.getClientRects().length === 0
+          && getComputedStyle(resume).display === 'none',
+      );
+    }, null, { timeout: 5000 });
+    await page.waitForTimeout(50);
+    const resizeFocus = await page.evaluate(() => ({
+      activeId: document.activeElement?.getAttribute('data-et3-action') || '',
+      resumeVisible: Boolean(document.getElementById('onboardingResumeBtn')?.getClientRects().length),
+      workbenchInert: Boolean(document.getElementById('expertTeamV3Workbench')?.inert),
+      workbenchCollapsed: Boolean(document.getElementById('expertTeamV3Workbench')?.classList.contains('is-collapsed')),
+    }));
+    assert(
+      resizeFocus.activeId === 'close-workbench' && !resizeFocus.resumeVisible,
+      'Resize to narrow V3 kept focus on the CSS-hidden onboarding resume',
+      resizeFocus,
+    );
+    await page.evaluate(() => loadOnboardingWizard());
+    await overlay.waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    await overlay.waitFor({ state: 'hidden' });
+    assert(!await workbench.evaluate(root => root.classList.contains('is-collapsed')), 'Reopened onboarding Escape also collapsed the V3 workbench');
+
+    for (const [width, height] of [[1280, 800], [1024, 768], [760, 800]]) {
+      await page.setViewportSize({ width, height });
+      await page.waitForFunction(() => {
+        const resume = document.getElementById('onboardingResumeBtn');
+        return Boolean(resume && resume.getClientRects().length === 0 && getComputedStyle(resume).display === 'none');
+      }, null, { timeout: 5000 });
+      const narrowLayout = await page.evaluate(() => {
+        const workbench = document.getElementById('expertTeamV3Workbench');
+        const parent = workbench?.parentElement;
+        return {
+          width: workbench?.getBoundingClientRect().width || 0,
+          parentWidth: parent?.getBoundingClientRect().width || 0,
+          viewportWidth: innerWidth,
+          overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        };
+      });
+      assert(
+        (
+          Math.abs(narrowLayout.width - narrowLayout.parentWidth) <= 1
+          || Math.abs(narrowLayout.width - narrowLayout.viewportWidth) <= 1
+        ) && !narrowLayout.overflow,
+        `Narrow V3 workbench does not fit at ${width}px`,
+        narrowLayout,
+      );
+      await page.evaluate(() => loadOnboardingWizard());
+      await overlay.waitFor({ state: 'visible' });
+      await page.keyboard.press('Escape');
+      await overlay.waitFor({ state: 'hidden' });
+      assert(!await workbench.evaluate(root => root.classList.contains('is-collapsed')), `Narrow onboarding Escape collapsed the V3 workbench at ${width}px`);
+      await page.waitForFunction(
+        () => document.activeElement?.matches('#expertTeamV3Workbench [data-et3-action="close-workbench"]'),
+        null,
+        { timeout: 5000 },
+      );
+    }
+    await page.screenshot({ path: path.join(outDir, 'onboarding-v3-narrow-resume-hidden.png'), fullPage: false });
+  } finally {
+    await page.evaluate(() => {
+      window.ExpertTeamV3.clearStatusSurface();
+      if (window.__et3OriginalOnboardingApi) window.api = window.__et3OriginalOnboardingApi;
+      delete window.__et3OriginalOnboardingApi;
+    }).catch(() => {});
+    await page.setViewportSize({ width: 1600, height: 900 });
+  }
+}
+
 async function main() {
   const { _electron } = loadPlaywright();
   const webuiDir = path.resolve(__dirname, '..');
@@ -177,6 +312,11 @@ async function main() {
     });
     await page.bringToFront();
     await page.setViewportSize({ width: 1600, height: 900 });
+    await verifyOnboardingWorkbenchJointFlow(page, outDir, fixture.toString());
+    if (process.argv.includes('--onboarding-only')) {
+      process.stdout.write('ONBOARDING_V3_JOINT_SMOKE_PASSED\n');
+      return;
+    }
     await page.evaluate(async ({ workspace }) => {
       document.getElementById('onboardingOverlay')?.remove();
       const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
@@ -198,47 +338,125 @@ async function main() {
       ));
     }, { source: fixture.toString() });
     await page.waitForSelector('#expertTeamV3Workbench [data-et3-revision]', { timeout: 20000 });
+    await page.evaluate(() => {
+      const main = document.getElementById('mainChat');
+      if (!main) throw new Error('chat surface is unavailable');
+      const workbench = document.getElementById('expertTeamV3Workbench');
+      if (!workbench) throw new Error('expert workbench is unavailable');
+      const workbenchRect = workbench.getBoundingClientRect();
+      const availableWidth = workbenchRect.left - 48;
+      const width = Math.max(180, Math.min(320, availableWidth));
+      const left = Math.max(16, workbenchRect.left - width - 24);
+      const top = Math.max(80, workbenchRect.top + 120);
+      const fixture = document.createElement('article');
+      fixture.id = 'et3OutsideMessage';
+      fixture.setAttribute('data-smoke-message', 'true');
+      fixture.style.cssText = `position:fixed;z-index:90;top:${top}px;left:${left}px;display:grid;gap:10px;width:${width}px;padding:18px;border:1px solid #b8dce8;border-radius:14px;background:#fff;color:#14334d;`;
+      fixture.innerHTML = '<p data-smoke-message-body style="margin:0">真实消息正文子节点：点击后应收起工作台，但不能吞掉当前点击。</p><button id="et3OutsideAction" type="button"><span data-smoke-action-label>执行外部操作</span></button>';
+      fixture.querySelector('#et3OutsideAction').addEventListener('click', () => {
+        window.__et3OutsideActionCount = Number(window.__et3OutsideActionCount || 0) + 1;
+      });
+      document.body.appendChild(fixture);
+    });
     const outsideClickDraft = page.locator('#expertTeamV3Workbench [data-et3-revision]');
     await outsideClickDraft.fill('外部空白点击后仍需保留的草稿');
+    await outsideClickDraft.evaluate(field => {
+      field.focus();
+      field.setSelectionRange(2, 7);
+      const scroll = field.closest('#expertTeamV3Workbench')?.querySelector('.et3-workbench-scroll');
+      if (scroll) scroll.scrollTop = 80;
+    });
     await page.locator('#expertTeamV3Workbench .et3-workbench-head h2').click();
     assert(!await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Workbench collapsed after an internal click');
-    await page.locator('#msg').click({ position: { x: 8, y: 8 } });
-    assert(!await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Workbench collapsed after clicking an outside interactive control');
-    const blankPoint = await page.evaluate(() => {
-      const root = document.getElementById('expertTeamV3Workbench');
-      const rootRect = root?.getBoundingClientRect();
-      if (!rootRect) return null;
-      const blankSelector = '#mainChat, #mainChat > .messages-shell, #messages, #msgInner, .taiji-home-shell, .taiji-main-workspace, .taiji-hero, .taiji-session-groups';
-      for (let y = 60; y < innerHeight - 120; y += 20) {
-        for (let x = 20; x < rootRect.left - 20; x += 20) {
-          const target = document.elementFromPoint(x, y);
-          if (target?.matches(blankSelector)) return { x, y, id: target.id, className: String(target.className || '') };
-        }
-      }
+
+    const pointFor = async locator => locator.evaluate(node => {
+      const rect = node.getBoundingClientRect();
+      const x = Math.round(rect.left + rect.width / 2);
+      const y = Math.round(rect.top + rect.height / 2);
+      const hit = document.elementFromPoint(x, y);
       return {
-        missing: true,
-        innerWidth,
-        innerHeight,
-        rootRect: rootRect.toJSON(),
-        samples: [
-          document.elementFromPoint(40, 100),
-          document.elementFromPoint(Math.max(20, rootRect.left - 40), 200),
-          document.elementFromPoint(Math.max(20, rootRect.left / 2), innerHeight / 2),
-        ].map(node => node ? `${node.tagName}#${node.id}.${String(node.className || '')}` : 'null'),
+        x, y,
+        hit: hit ? `${hit.tagName}#${hit.id}.${String(hit.className || '')}` : 'null',
+        hitInside: Boolean(hit && (hit === node || node.contains(hit))),
+        rect: rect.toJSON(),
       };
     });
-    assert(blankPoint && !blankPoint.missing, 'No visible blank chat background was available outside the workbench', blankPoint);
-    await page.mouse.click(blankPoint.x, blankPoint.y);
-    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Blank chat background did not collapse the workbench');
-    await page.screenshot({ path: path.join(outDir, '00-outside-click-collapsed.png'), fullPage: false });
+    const ensureExpanded = async () => {
+      if (await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed'))) {
+        await page.getByRole('button', { name: '展开专家团工作台' }).click();
+      }
+    };
+    const messageBody = page.locator('[data-smoke-message-body]');
+    const messagePoint = await pointFor(messageBody);
+    assert(messagePoint.hitInside, 'Message body is not the event target at its semantic click point', messagePoint);
+    await page.mouse.click(messagePoint.x, messagePoint.y);
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Message body did not collapse the workbench');
+    await page.screenshot({ path: path.join(outDir, '00-outside-message-collapsed.png'), fullPage: false });
     await page.getByRole('button', { name: '展开专家团工作台' }).click();
     assert((await outsideClickDraft.inputValue()) === '外部空白点击后仍需保留的草稿', 'Outside-click collapse lost the current draft');
-    await page.getByRole('button', { name: '收起专家团工作台' }).click();
-    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Close button no longer collapses the workbench');
+    try {
+      await page.waitForFunction(() => document.activeElement?.matches('#expertTeamV3Workbench [data-et3-revision]'), null, { timeout: 5000 });
+    } catch (error) {
+      const focusDebug = await page.evaluate(() => {
+        const field = document.querySelector('#expertTeamV3Workbench [data-et3-revision]');
+        return {
+          active: document.activeElement ? `${document.activeElement.tagName}#${document.activeElement.id}.${String(document.activeElement.className || '')}` : 'null',
+          fieldValue: field?.value || '',
+          selection: field ? [field.selectionStart, field.selectionEnd] : null,
+        };
+      });
+      throw new Error(`${error.message}; focusDebug=${JSON.stringify(focusDebug)}`);
+    }
+    const restoredDraft = await outsideClickDraft.evaluate(field => ({
+      focused: document.activeElement === field,
+      selection: [field.selectionStart, field.selectionEnd],
+      scrollTop: field.closest('#expertTeamV3Workbench')?.querySelector('.et3-workbench-scroll')?.scrollTop || 0,
+    }));
+    assert(
+      restoredDraft.focused
+      && JSON.stringify(restoredDraft.selection) === JSON.stringify([2, 7])
+      && restoredDraft.scrollTop >= 72,
+      'Message click did not restore saved draft focus, selection, and scroll position',
+      restoredDraft,
+    );
+
+    await ensureExpanded();
+    const sessionSearch = page.locator('#taijiSessionSearch');
+    const searchPoint = await pointFor(sessionSearch);
+    assert(searchPoint.hitInside, 'Conversation search is not the event target at its semantic click point', searchPoint);
+    await page.mouse.click(searchPoint.x, searchPoint.y);
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Conversation search click did not collapse the workbench');
+    assert(await page.evaluate(() => document.activeElement?.id === 'taijiSessionSearch'), 'Conversation search click lost focus to the workbench restore control');
+
+    await ensureExpanded();
+    const action = page.locator('#et3OutsideAction');
+    const actionPoint = await pointFor(action);
+    assert(actionPoint.hitInside, 'External action is not the event target at its semantic click point', actionPoint);
+    const actionCountBefore = await page.evaluate(() => Number(window.__et3OutsideActionCount || 0));
+    await page.mouse.click(actionPoint.x, actionPoint.y);
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'External button click did not collapse the workbench');
+    const actionResult = await page.evaluate(() => ({ count: Number(window.__et3OutsideActionCount || 0), focused: document.activeElement?.id || '' }));
+    assert(actionResult.count === actionCountBefore + 1 && actionResult.focused === 'et3OutsideAction', 'Outside action was consumed or lost focus', actionResult);
+
+    await ensureExpanded();
+    await page.mouse.click(messagePoint.x, messagePoint.y, { button: 'right' });
+    assert(!await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Secondary click collapsed the workbench');
+    await page.locator('#expertTeamV3Workbench .et3-workbench-head h2').click();
+    await page.keyboard.press('Escape');
+    assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Escape did not collapse the independent workbench');
     await page.getByRole('button', { name: '展开专家团工作台' }).click();
     await page.screenshot({ path: path.join(outDir, '00-outside-click-restored.png'), fullPage: false });
+    const outsideClickEvidence = await page.evaluate(() => ({
+      collapsed: document.getElementById('expertTeamV3Workbench')?.classList.contains('is-collapsed') || false,
+      draft: document.querySelector('#expertTeamV3Workbench [data-et3-revision]')?.value || '',
+      activeId: document.activeElement?.id || '',
+      actionCount: Number(window.__et3OutsideActionCount || 0),
+    }));
+    fs.writeFileSync(path.join(outDir, 'outside-click-result.json'), JSON.stringify(outsideClickEvidence, null, 2));
     process.stdout.write('EXPERT_TEAM_OUTSIDE_CLICK_SMOKE_PASSED\n');
+    if (process.argv.includes('--outside-only')) return;
     await page.evaluate(async () => {
+      document.getElementById('et3OutsideMessage')?.remove();
       window.ExpertTeamV3.clearStatusSurface();
       await switchPanel('writing');
     });

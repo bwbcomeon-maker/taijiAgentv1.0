@@ -61,10 +61,10 @@ def test_high_risk_dialogs_use_managed_dialog_controllers():
     boot = read("static/boot.js")
 
     assert "ManagedDialog.create" in onboarding
-    assert "initialFocus:'#onboardingNextBtn'" in onboarding
+    assert "initialFocus:'#onboardingTitle'" in onboarding
     assert "closeOnBackdrop:false" in onboarding
-    assert "function dismissOnboardingWizard()" in onboarding
-    assert "_getOnboardingDialog().close()" in onboarding
+    assert "function dismissOnboardingWizard({focusResume=true}={})" in onboarding
+    assert "_getOnboardingDialog().close({restoreFocus:false})" in onboarding
 
     assert "ManagedDialog.create" in panels
     assert "initialFocus:'#writeflowTeamModalTitle'" in panels
