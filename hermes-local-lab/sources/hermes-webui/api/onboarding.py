@@ -40,12 +40,21 @@ logger = logging.getLogger(__name__)
 SETUP_STATUS_SCHEMA = "taiji-setup-status/v1"
 
 
-def _setup_recovery(recovery_id: str, label: str, *, target_step: str | None = None, target_section: str | None = None) -> dict:
+def _setup_recovery(
+    recovery_id: str,
+    label: str,
+    *,
+    target_step: str | None = None,
+    target_section: str | None = None,
+    target_element: str | None = None,
+) -> dict:
     recovery = {"id": recovery_id, "label": label}
     if target_step:
         recovery["target_step"] = target_step
     if target_section:
         recovery["target_section"] = target_section
+    if target_element:
+        recovery["target_element"] = target_element
     return recovery
 
 
@@ -120,6 +129,13 @@ def get_setup_status(*, config: dict | None = None, imports_ok: bool | None = No
         if imports_ok is None:
             imports_ok, _missing, _errors = verify_hermes_imports()
         runtime = _status_from_runtime(cfg, bool(imports_ok))
+        if runtime.get("setup_state") == "agent_unavailable":
+            model_recovery = _setup_recovery(
+                "open_system_diagnostics",
+                "查看系统诊断",
+                target_section="system",
+                target_element="productDiagnosticsCard",
+            )
         model_item = _setup_item(
             "model",
             "模型",
@@ -173,7 +189,12 @@ def get_setup_status(*, config: dict | None = None, imports_ok: bool | None = No
             unavailable=True,
         )
 
-    security_recovery = _setup_recovery("open_security", "打开安全设置", target_section="system")
+    security_recovery = _setup_recovery(
+        "open_security",
+        "打开安全设置",
+        target_section="system",
+        target_element="settingsSecurityProfileSelect",
+    )
     try:
         security = build_security_status_payload()
         mode = str(security.get("mode") or "").strip().lower()
@@ -181,9 +202,9 @@ def get_setup_status(*, config: dict | None = None, imports_ok: bool | None = No
         if installed_production:
             security_ready = mode == "restricted" and profile == "strict"
             security_reason = (
-                "已启用安装态严格安全策略。"
+                "已启用企业安全模式。"
                 if security_ready
-                else "正式安装态必须使用 restricted/strict 安全策略。"
+                else "正式安装需要使用“企业安全”模式。请打开安全设置，选择“企业安全（推荐）”，保存后关闭并重新打开应用。"
             )
         else:
             security_ready = mode in {"restricted", "full"} and profile in {
@@ -903,15 +924,18 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
 
     if not _HERMES_FOUND or not imports_ok:
         state = "agent_unavailable"
-        note = (
-            "本机应用当前仍在准备中。请先完成初始化或修复安装状态，然后再配置提供商。"
-        )
+        if provider_ready:
+            note = "模型和凭据已保存，但应用组件未正确识别；无需重复填写密钥。请打开系统诊断并重新检查。"
+        elif provider_configured:
+            note = "模型选择已保留；应用组件恢复后，请在模型配置中确认凭据状态。请先打开系统诊断并重新检查。"
+        else:
+            note = "本机应用当前仍在准备中。请先打开系统诊断，修复安装状态后再配置模型。"
     elif chat_ready:
         state = "ready"
         provider_name = _PROVIDER_DISPLAY.get(
             provider, provider.title() if provider else "太极 Agent"
         )
-        note = f"太极 Agent 已完成基础配置，可以通过 {provider_name} 开始对话。"
+        note = f"{provider_name} 的基础配置已保存；首次对话时会验证连接是否可用。"
     elif provider_configured:
         state = "provider_incomplete"
         if provider == "custom" and not base_url:

@@ -214,8 +214,8 @@ _ERROR_CATALOG: Final = {
         "retryable": True,
     },
     "diagnostics_unavailable": {
-        "title": "安全诊断暂不可用",
-        "message": "暂时无法生成安全诊断，请稍后重试。",
+        "title": "运行检查暂不可用",
+        "message": "暂时无法完成运行检查，请稍后重试。",
         "actions": ("retry", "restart_app"),
         "retryable": True,
     },

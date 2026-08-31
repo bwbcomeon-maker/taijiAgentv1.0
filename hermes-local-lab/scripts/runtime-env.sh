@@ -328,7 +328,7 @@ if [ "$TAIJI_LAUNCH_PROFILE" = "installed-production" ]; then
     strict)
       TAIJI_SECURITY_PROFILE="strict"
       ;;
-    ""|local_controlled)
+    local_controlled)
       TAIJI_SECURITY_PROFILE="local_controlled"
       ;;
     *)

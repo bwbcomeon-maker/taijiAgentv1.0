@@ -157,7 +157,14 @@ def _discover_agent_dir() -> Path:
         candidates.append(Path(sys_prefix) / "hermes-agent")
 
     for path in candidates:
-        if path.exists() and (path / "run_agent.py").exists():
+        # Formal Linux packages intentionally prune Python source after
+        # ``compileall -b``.  The runtime entrypoint therefore exists as a
+        # sibling ``run_agent.pyc`` even though the source checkout uses
+        # ``run_agent.py``.
+        if path.exists() and any(
+            (path / entrypoint).is_file()
+            for entrypoint in ("run_agent.py", "run_agent.pyc")
+        ):
             return path.resolve()
 
     return None

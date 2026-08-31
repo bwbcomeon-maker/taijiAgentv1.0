@@ -121,6 +121,29 @@ def test_env_mutation_repairs_target_duplicates_and_preserves_other_lines(
     assert os.environ["API_KEY"] == "fresh-secret"
 
 
+def test_env_mutation_can_defer_process_projection_until_restart(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    env_path.write_text("TAIJI_SECURITY_PROFILE=strict\n", encoding="utf-8")
+    monkeypatch.setenv("TAIJI_SECURITY_PROFILE", "strict")
+
+    applied = mutate_env_unique(
+        {"TAIJI_SECURITY_PROFILE": "local_controlled"},
+        config_path=config_path,
+        project_process_env=False,
+    )
+
+    assert applied == {"TAIJI_SECURITY_PROFILE": True}
+    assert env_path.read_text(encoding="utf-8") == (
+        "TAIJI_SECURITY_PROFILE=local_controlled\n"
+    )
+    assert os.environ["TAIJI_SECURITY_PROFILE"] == "strict"
+
+
 def test_env_only_writer_atomically_invalidates_matching_taiji_main_receipt(
     monkeypatch,
     tmp_path,

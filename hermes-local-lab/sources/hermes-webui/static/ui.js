@@ -8582,8 +8582,9 @@ else startSystemHealthMonitor();
 // ── Security profile/status chip ───────────────────────────────────────
 let _securityStatusCache=null;
 let _securityStatusTimer=null;
+let _securityPendingProfile=null;
 function _securityProfileLabel(profile){
-  const map={strict:'严格',local_controlled:'本机可控',full:'Full',custom_restricted:'自定义'};
+  const map={strict:'企业安全',local_controlled:'本机调试',full:'完全开放',custom_restricted:'自定义'};
   return map[profile]||'未知';
 }
 function _securityCapabilityLabel(name){
@@ -8609,11 +8610,19 @@ function renderSecurityStatus(payload){
   const save=$('settingsSecurityProfileSave');
   const status=$('settingsSecurityStatus');
   if(select&&data){
-    if(data.profile==='strict'||data.profile==='local_controlled')select.value=data.profile;
+    if(_securityPendingProfile&&data.profile===_securityPendingProfile)_securityPendingProfile=null;
+    const persistedPending=['strict','local_controlled'].includes(data.pending_profile)&&data.pending_profile!==data.profile
+      ?data.pending_profile
+      :null;
+    const pending=_securityPendingProfile||persistedPending;
+    const selected=pending||data.profile;
+    if(selected==='strict'||selected==='local_controlled')select.value=selected;
     const writable=!!data.desktop_profile_write_enabled&&data.profile!=='full';
     select.disabled=!writable;
     if(save)save.disabled=!writable;
-    if(status)status.textContent=writable?'当前设置可在桌面端保存；变更后需要重启 Agent 完整生效。':'当前档位由管理员环境变量或非桌面运行态控制，设置页只读。';
+    if(status)status.textContent=pending
+      ? `已保存为“${_securityProfileLabel(pending)}”。当前仍为“${_securityProfileLabel(data.profile)}”；请关闭并重新打开 taiji Agent 后再检查。`
+      : (writable?'当前设置可在桌面端保存；变更后需要关闭并重新打开 taiji Agent。':'当前档位由管理员环境变量或非桌面运行态控制，设置页只读。');
   }
   const caps=$('settingsSecurityCapabilities');
   if(caps&&data&&data.capabilities){
@@ -8664,10 +8673,18 @@ async function saveSecurityProfile(){
   if(status)status.textContent='正在保存安全模式...';
   try{
     const result=await api('/api/security/profile',{method:'POST',body:JSON.stringify({profile:select.value})});
+    const savedProfile=result&&result.pending_profile?result.pending_profile:select.value;
+    const restartRequired=!!(result&&result.restart_required);
+    _securityPendingProfile=restartRequired?savedProfile:null;
     if(result&&result.status)renderSecurityStatus(result.status);
-    if(status)status.textContent=result&&result.restart_required?'已保存。请重启 taiji Agent，使 Agent 进程完整应用新档位。':'已保存。';
-    if(typeof showToast==='function')showToast('安全模式已保存，重启后完整生效。',3500);
-    await refreshSecurityStatus(true);
+    if(status&&result)status.textContent=restartRequired
+      ?`已保存为“${_securityProfileLabel(savedProfile)}”。当前运行状态未改变；请关闭并重新打开 taiji Agent 后再检查。`
+      :`当前已是“${_securityProfileLabel(savedProfile)}”，无需重新打开应用。`;
+    if(typeof showToast==='function')showToast(
+      restartRequired?'安全模式已保存，请关闭并重新打开应用。':'安全模式未改变，无需重新打开应用。',
+      4500,
+      restartRequired?'warning':'success'
+    );
   }catch(e){
     const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope(e):null;
     const message=productError?`${productError.title}：${productError.message}`:'安全模式保存失败，请重试。';

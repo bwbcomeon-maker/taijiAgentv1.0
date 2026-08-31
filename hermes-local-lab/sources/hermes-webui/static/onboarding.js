@@ -218,7 +218,7 @@ function _syncOnboardingActionState(){
     nextBtn.setAttribute('aria-busy',ONBOARDING.busy?'true':'false');
     nextBtn.textContent=key==='finish'
       ? (preflightReady?t('onboarding_open'):'保存并重新检查')
-      : t('onboarding_continue');
+      : (key==='system'?'进入配置':t('onboarding_continue'));
   }
   if(backBtn){
     backBtn.disabled=ONBOARDING.busy;
@@ -333,20 +333,24 @@ function openOnboardingRecovery(id){
   if(recovery.target_section&&typeof switchSettingsSection==='function'){
     dismissOnboardingWizard({focusResume:false});
     switchSettingsSection(recovery.target_section);
-    requestAnimationFrame(()=>focusSettingsRecoveryTarget(recovery.target_section));
+    requestAnimationFrame(()=>focusSettingsRecoveryTarget(recovery.target_section,recovery.target_element));
     showToast('处理完成后点击“继续配置·开始使用检查”返回检查。',5000,'info');
     return;
   }
   retryOnboardingCheck(id);
 }
 
-function focusSettingsRecoveryTarget(section){
+function focusSettingsRecoveryTarget(section,targetElement){
   const activePane=document.querySelector('[id^="settingsPane"].active');
   const heading=activePane&&activePane.querySelector('.settings-section-title');
   const fallback=document.querySelector(`#settingsMenu [data-settings-section="${CSS.escape(section||'')}"]`);
-  const target=heading||fallback;
+  const allowedTargets=new Set(['productDiagnosticsCard','settingsSecurityProfileSelect']);
+  const requested=allowedTargets.has(String(targetElement||''))?$(targetElement):null;
+  const target=requested||heading||fallback;
   if(!target)return;
   if(!target.matches('button,a,input,select,textarea,[tabindex]'))target.setAttribute('tabindex','-1');
+  const reduceMotion=!!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  target.scrollIntoView({block:'center',behavior:reduceMotion?'auto':'smooth'});
   target.focus();
 }
 

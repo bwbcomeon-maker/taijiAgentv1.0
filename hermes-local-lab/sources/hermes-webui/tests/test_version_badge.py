@@ -227,6 +227,15 @@ class TestDetectAgentVersion:
         )
         assert result == 'v0.60.1'
 
+    def test_installed_release_version_env_is_preferred(self, tmp_path, monkeypatch):
+        """Sourceless installed packages expose the Taiji release version via env."""
+        import api.updates as upd
+
+        monkeypatch.setenv("TAIJI_LAUNCH_PROFILE", "installed-production")
+        monkeypatch.setenv("TAIJI_RELEASE_VERSION", "1.0.2")
+        with patch.object(upd, '_AGENT_DIR', tmp_path / 'runtime' / 'agent'):
+            assert upd._detect_agent_version() == '1.0.2'
+
     def test_git_fallback_used_when_version_file_missing(self, tmp_path):
         """When VERSION file is absent, we fall back to git describe in agent path."""
         (tmp_path / '.git').mkdir()

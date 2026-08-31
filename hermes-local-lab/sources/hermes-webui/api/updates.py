@@ -379,6 +379,11 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
 
 def _detect_agent_version() -> str:
     """Detect the running Hermes Agent version for UI display."""
+    if os.environ.get('TAIJI_LAUNCH_PROFILE', '').strip() == 'installed-production':
+        release_version = os.environ.get('TAIJI_RELEASE_VERSION', '').strip()
+        if release_version:
+            return release_version
+
     agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
 
     if agent_dir is not None:

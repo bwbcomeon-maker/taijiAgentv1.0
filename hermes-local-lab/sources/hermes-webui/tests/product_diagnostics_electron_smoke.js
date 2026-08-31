@@ -343,6 +343,35 @@ async function run() {
     await openDiagnosticsByKeyboard(page);
     mark("opened Settings > System by keyboard");
 
+    const delayedRecoveryDiagnosticsRoute = async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await route.continue();
+    };
+    await page.route("**/api/product/diagnostics", delayedRecoveryDiagnosticsRoute);
+    await page.evaluate(() => {
+      ONBOARDING.preflight = {
+        items: [{
+          id: "model",
+          recovery: {
+            target_section: "system",
+            target_element: "productDiagnosticsCard",
+          },
+        }],
+      };
+      _productDiagnosticsData = null;
+      _productDiagnosticsPending = null;
+      switchSettingsSection("models");
+      openOnboardingRecovery("model");
+    });
+    await page.waitForFunction(() => (
+      document.activeElement?.id === "productDiagnosticsCard"
+      && document.getElementById("btnRefreshProductDiagnostics")?.disabled === true
+      && document.getElementById("settingsPaneSystem")?.classList.contains("active")
+    ));
+    await page.waitForFunction(() => !document.getElementById("btnRefreshProductDiagnostics")?.disabled);
+    await page.unroute("**/api/product/diagnostics", delayedRecoveryDiagnosticsRoute);
+    mark("onboarding diagnostics recovery keeps keyboard focus during refresh");
+
     const diagnostics = await fetchDiagnostics(page);
     assertState(diagnostics.ok && diagnostics.status === 200, "Diagnostics endpoint failed inside App", diagnostics);
     assertPublicPayload(diagnostics.payload);
@@ -400,8 +429,8 @@ async function run() {
     assert.strictEqual(errorState.status, "检查失败");
     assert.strictEqual(errorState.incident, "inc-0123456789ab");
     assert.strictEqual(errorState.copyDisabled, false);
-    assert.ok(errorState.errorText.includes("安全诊断暂不可用"));
-    assert.ok(errorState.errorText.includes("暂时无法生成安全诊断，请稍后重试。"));
+    assert.ok(errorState.errorText.includes("运行检查暂不可用"));
+    assert.ok(errorState.errorText.includes("暂时无法完成运行检查，请稍后重试。"));
     assert.ok(errorState.recoveryText.includes("重试"));
     assert.ok(errorState.recoveryText.includes("关闭并重新打开桌面 App"));
     assert.ok(!JSON.stringify(errorState).includes("attacker"));
@@ -476,6 +505,32 @@ async function run() {
     injectingExpectedSecurity403 = false;
     await page.unroute("**/api/security/profile", securityFailureRoute);
     mark("nested product error stayed allowlisted in Desktop App");
+
+    const effectiveSecurity = await page.evaluate(async () => {
+      const response = await fetch("/api/security/status", { credentials: "include" });
+      return await response.json();
+    });
+    const unchangedSecurityRoute = async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          profile: effectiveSecurity.profile,
+          pending_profile: null,
+          restart_required: false,
+          status: effectiveSecurity,
+        }),
+      });
+    };
+    await page.route("**/api/security/profile", unchangedSecurityRoute);
+    await securitySave.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => (
+      document.getElementById("settingsSecurityStatus")?.textContent.includes("无需重新打开应用")
+    ));
+    await page.unroute("**/api/security/profile", unchangedSecurityRoute);
+    mark("unchanged security profile avoids a false restart prompt");
 
     const safeDocxEvidence = await page.evaluate(() => _docxEngineFailureEvidence({
       payload: {

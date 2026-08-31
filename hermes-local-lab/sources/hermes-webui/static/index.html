@@ -2173,11 +2173,11 @@
                 <span id="checkUpdatesStatus"></span>
               </div>
             </div>
-            <section class="settings-field product-diagnostics-card" id="productDiagnosticsCard" aria-labelledby="productDiagnosticsTitle">
+            <section class="settings-field product-diagnostics-card" id="productDiagnosticsCard" tabindex="-1" aria-labelledby="productDiagnosticsTitle">
               <div class="product-diagnostics-head">
                 <div>
-                  <h3 id="productDiagnosticsTitle">安全诊断</h3>
-                  <p>只展示运行状态与安全版本号，不包含日志、本地路径、环境变量或密钥。</p>
+                  <h3 id="productDiagnosticsTitle">运行检查</h3>
+                  <p>检查基础功能和扩展能力。只展示状态与安全版本号，不包含日志、本地路径、环境变量或密钥。</p>
                 </div>
                 <div class="product-diagnostics-status" id="productDiagnosticsStatus" role="status" aria-live="polite" data-status="unknown">等待检查</div>
               </div>
@@ -2204,11 +2204,11 @@
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field security-profile-card" id="settingsSecurityProfile" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsSecurityProfileSelect">安全模式</label>
-              <div class="settings-security-copy">strict 会关闭终端/代码等高风险能力；local_controlled 面向本机开发演示，危险命令仍保留审批。</div>
+              <div class="settings-security-copy">正式安装建议使用“企业安全”；“本机调试”只供开发人员临时排查问题，切换后需要重新启动应用。</div>
               <div class="settings-security-row">
                 <select id="settingsSecurityProfileSelect" aria-label="选择安全模式">
-                  <option value="strict">strict：严格模式</option>
-                  <option value="local_controlled">local_controlled：本机可控</option>
+                  <option value="strict">企业安全（推荐）</option>
+                  <option value="local_controlled">本机调试（仅开发人员）</option>
                 </select>
                 <button class="sm-btn" id="settingsSecurityProfileSave" type="button" onclick="saveSecurityProfile()">保存安全模式</button>
               </div>

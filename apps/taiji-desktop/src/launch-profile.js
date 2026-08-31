@@ -298,9 +298,7 @@ function applySecurityProfile({
 }) {
   if (launchProfile.kind === INSTALLED_PROFILE) {
     const requestedProfile = String(sourceEnv.TAIJI_SECURITY_PROFILE || "").trim();
-    const profileName = requestedProfile === "" || requestedProfile === "local_controlled"
-      ? "local_controlled"
-      : "strict";
+    const profileName = requestedProfile === "local_controlled" ? "local_controlled" : "strict";
     const delegateEnabled = Object.prototype.hasOwnProperty.call(
       sourceEnv,
       "TAIJI_ALLOW_DELEGATE_TASK",

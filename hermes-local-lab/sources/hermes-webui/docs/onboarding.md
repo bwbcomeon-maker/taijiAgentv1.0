@@ -81,6 +81,18 @@ The first screen reports the runtime state WebUI can see:
 - Password status: whether WebUI password protection is enabled.
 - Config paths: the active `config.yaml` and `.env` locations for this profile.
 
+In a formal Taiji desktop installation, the same workbench also checks the
+offline license, workspace, and enterprise security profile. A reinstall keeps
+the current user's model configuration and API key unless that user state was
+explicitly removed. "Model ready" means the provider, model, and credential
+references are present; the first real conversation still verifies the live
+provider connection.
+
+Formal installed runs default to **Enterprise Security** (`strict`). The local
+debug profile is intended only for developer troubleshooting. Saving a profile
+does not change the already-running Agent process: close and reopen the desktop
+app, then run the check again.
+
 If the agent check fails, use [Troubleshooting](troubleshooting.md), especially
 the `AIAgent not available` section. If provider setup is incomplete, continue
 through the wizard or run `hermes model` in the same machine environment that

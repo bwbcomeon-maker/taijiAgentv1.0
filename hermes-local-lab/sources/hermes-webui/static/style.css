@@ -4134,6 +4134,7 @@ main.main > #mainPlugin{display:none;}
 .product-diagnostics-component[data-status="degraded"] .product-diagnostics-component-state{color:var(--warning);}
 .product-diagnostics-component[data-status="blocked"] .product-diagnostics-component-state{color:var(--error,#c53b4d);}
 .product-diagnostics-version{grid-column:1 / -1;color:var(--muted);font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.product-diagnostics-component-impact{grid-column:1 / -1;color:var(--muted);font-size:11px;line-height:1.45;}
 .product-diagnostics-empty{grid-column:1 / -1;padding:12px;border:1px dashed var(--border);border-radius:9px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
 .product-diagnostics-error{color:var(--error,#c53b4d);display:flex;flex-direction:column;gap:4px;text-align:left;}
 .product-diagnostics-error strong{font-size:12px;line-height:1.35;}

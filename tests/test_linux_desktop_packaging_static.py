@@ -601,7 +601,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         ):
             self.assertIn(var, launch_profile)
 
-    def test_installed_runtime_defaults_to_local_controlled_after_user_dotenv(self):
+    def test_installed_runtime_defaults_to_strict_after_user_dotenv(self):
         source_runtime_env = ROOT / "hermes-local-lab/scripts/runtime-env.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir).resolve()
@@ -666,9 +666,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertEqual(
                 result.stdout.splitlines(),
                 [
-                    "local_controlled",
+                    "strict",
                     "restricted",
-                    "1",
+                    "0",
                     "true",
                     "1.2.3",
                     "0123456789abcdef0123456789abcdef01234567",
@@ -695,6 +695,33 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertEqual(
                 strict_result.stdout.splitlines()[:4],
                 ["strict", "restricted", "0", "true"],
+            )
+            (runtime_home / ".env").write_text(
+                "TAIJI_SECURITY_PROFILE=local_controlled\n"
+                "TAIJI_SECURITY_MODE=full\n"
+                "TAIJI_ALLOW_TERMINAL=0\n"
+                "TAIJI_ALLOW_EXECUTE_CODE=0\n",
+                encoding="utf-8",
+            )
+            local_result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'source "$1"; printf "%s\\n" '
+                    '"$TAIJI_SECURITY_PROFILE" "$TAIJI_SECURITY_MODE" '
+                    '"$TAIJI_ALLOW_TERMINAL" "$TAIJI_ALLOW_EXECUTE_CODE"',
+                    "bash",
+                    str(runtime_env),
+                ],
+                env=run_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(local_result.returncode, 0, local_result.stderr)
+            self.assertEqual(
+                local_result.stdout.splitlines(),
+                ["local_controlled", "restricted", "1", "1"],
             )
             (runtime_home / ".env").write_text(
                 "TAIJI_SECURITY_PROFILE=tampered-profile\n"

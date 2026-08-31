@@ -89,12 +89,26 @@ def test_probe_updates_in_place_without_replacing_the_focused_form():
 
 
 def test_external_recovery_keeps_focus_in_the_selected_settings_section():
+    html = read("static/index.html")
     js = read("static/onboarding.js")
     recovery_start = js.index("function openOnboardingRecovery")
     recovery_body = js[recovery_start : js.index("function _renderOnboardingOverwriteConflict", recovery_start)]
 
     assert "dismissOnboardingWizard({focusResume:false})" in recovery_body
-    assert "focusSettingsRecoveryTarget(recovery.target_section)" in recovery_body
+    assert "focusSettingsRecoveryTarget(recovery.target_section,recovery.target_element)" in recovery_body
+    assert "allowedTargets.has(String(targetElement||''))" in recovery_body
+    assert "productDiagnosticsCard" in recovery_body
+    assert "settingsSecurityProfileSelect" in recovery_body
+    assert 'id="productDiagnosticsCard" tabindex="-1"' in html
+    assert "prefers-reduced-motion: reduce" in recovery_body
+
+
+def test_first_check_action_names_the_next_step():
+    js = read("static/onboarding.js")
+    sync_start = js.index("function _syncOnboardingActionState()")
+    sync_body = js[sync_start : js.index("function _markOnboardingDirty()", sync_start)]
+
+    assert "key==='system'?'进入配置'" in sync_body
 
 
 def test_onboarding_steps_and_mobile_actions_follow_semantic_dom_order():

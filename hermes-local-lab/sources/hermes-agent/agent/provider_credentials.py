@@ -3791,8 +3791,16 @@ def mutate_env_unique(
     *,
     config_path: Path | None = None,
     expected_values: Mapping[str, str | None] | None = None,
+    project_process_env: bool = True,
 ) -> dict[str, bool]:
-    """Atomically mutate selected .env keys while rejecting other duplicates."""
+    """Atomically mutate selected .env keys while rejecting other duplicates.
+
+    ``project_process_env=False`` is reserved for settings that are defined to
+    take effect only after a process restart.  The disk transaction remains
+    identical, but its recovered values are not projected into this process.
+    """
+    if not isinstance(project_process_env, bool):
+        raise TypeError("project_process_env must be a boolean")
     _reject_managed_credential_write("modify credentials", config_path)
     with credential_transaction(config_path) as spec:
         env_exists, original = _read_optional_bytes(spec.env_target)
@@ -3806,11 +3814,11 @@ def mutate_env_unique(
             payload,
             applied,
         )
-        projection_keys = [
-            key
-            for key, did_apply in applied.items()
-            if did_apply
-        ]
+        projection_keys = (
+            [key for key, did_apply in applied.items() if did_apply]
+            if project_process_env
+            else []
+        )
         config_exists = False
         config_before = b""
         config_target = b""

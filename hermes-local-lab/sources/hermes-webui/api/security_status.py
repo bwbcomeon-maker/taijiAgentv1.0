@@ -67,6 +67,13 @@ def _capability(name: str, allow_var: str | None, allowed: bool, approval_applic
 
 def build_security_status_payload() -> dict[str, Any]:
     mode = _security_mode()
+    profile = _effective_profile()
+    persisted_profile = _persisted_security_profile()
+    pending_profile = (
+        persisted_profile
+        if profile in _PROFILE_CHOICES and persisted_profile != profile
+        else None
+    )
     restricted = mode == "restricted"
     terminal_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_TERMINAL")
     execute_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_EXECUTE_CODE")
@@ -74,7 +81,9 @@ def build_security_status_payload() -> dict[str, Any]:
     delegate_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_DELEGATE_TASK")
     return {
         "mode": mode,
-        "profile": _effective_profile(),
+        "profile": profile,
+        "pending_profile": pending_profile,
+        "restart_required": pending_profile is not None,
         "profile_choices": sorted(_PROFILE_CHOICES),
         "desktop_profile_write_enabled": os.environ.get("TAIJI_DESKTOP_ONLY") == "1",
         "approval_available": True,
@@ -105,6 +114,33 @@ def _env_file() -> Path:
     return _runtime_home() / ".env"
 
 
+def _persisted_security_profile() -> str | None:
+    """Return a canonical restart-pending profile without exposing env contents."""
+    if os.environ.get("TAIJI_DESKTOP_ONLY") != "1":
+        return None
+    try:
+        from agent.provider_credentials import load_credential_snapshot
+
+        snapshot = load_credential_snapshot(_runtime_home() / "config.yaml")
+        values = snapshot.env
+    except Exception:
+        # Pending metadata is optional; an unreadable or invalid credential
+        # store must not hide the effective security status.
+        return None
+    selected = str(values.get("TAIJI_SECURITY_PROFILE") or "").strip()
+    if selected not in _PROFILE_CHOICES:
+        return None
+    if str(values.get("TAIJI_SECURITY_MODE") or "").strip() != "restricted":
+        return None
+    terminal = str(values.get("TAIJI_ALLOW_TERMINAL") or "").strip()
+    execute_code = str(values.get("TAIJI_ALLOW_EXECUTE_CODE") or "").strip()
+    if selected == "strict" and (terminal, execute_code) != ("0", "0"):
+        return None
+    if selected == "local_controlled" and (terminal, execute_code) != ("1", "1"):
+        return None
+    return selected
+
+
 def _write_env(values: dict[str, str]) -> Path:
     from agent.provider_credentials import mutate_env_unique
 
@@ -113,6 +149,7 @@ def _write_env(values: dict[str, str]) -> Path:
     mutate_env_unique(
         values,
         config_path=runtime_home / "config.yaml",
+        project_process_env=False,
     )
     return env_path
 
@@ -139,10 +176,14 @@ def set_security_profile(profile: str) -> dict[str, Any]:
         ),
     }
     _write_env(values)
-    os.environ.update(values)
+    status = build_security_status_payload()
+    pending_profile = selected if selected != status["profile"] else None
     return {
         "ok": True,
         "profile": selected,
-        "restart_required": True,
-        "status": build_security_status_payload(),
+        "pending_profile": pending_profile,
+        "restart_required": pending_profile is not None,
+        # This is the effective state of the currently running Agent process.
+        # Persisted changes become effective only after the desktop app restarts.
+        "status": status,
     }

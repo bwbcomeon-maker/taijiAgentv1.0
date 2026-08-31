@@ -244,7 +244,7 @@ test("installed-production rejects a symlinked runtime code directory", (t) => {
   );
 });
 
-test("installed-production defaults to local-controlled terminal and code execution", (t) => {
+test("installed-production defaults to the strict enterprise profile", (t) => {
   const { applySecurityProfile } = loadLaunchProfile();
   const fixture = resolveInstalled(t);
   const profile = fixture.resolve();
@@ -257,11 +257,11 @@ test("installed-production defaults to local-controlled terminal and code execut
     sourceEnv: env,
     packaged: false,
   });
-  assert.deepEqual(security, { name: "local_controlled", mode: "restricted", allow: true });
-  assert.equal(env.TAIJI_SECURITY_PROFILE, "local_controlled");
+  assert.deepEqual(security, { name: "strict", mode: "restricted", allow: false });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
   assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
-  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
-  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
   assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
   assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
   assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "true");

@@ -28,7 +28,7 @@ def test_system_settings_has_visible_accessible_diagnostics_entry():
         'aria-labelledby="productDiagnosticsTitle"',
         'role="status"',
         'aria-live="polite"',
-        "安全诊断",
+        "运行检查",
         "预览并导出脱敏支持包",
     ):
         assert expected in system
@@ -70,6 +70,42 @@ def test_security_profile_failure_uses_allowlisted_product_copy():
     assert "安全模式保存失败，请重试。" in function
 
 
+def test_security_profile_uses_plain_labels_and_preserves_pending_restart_state():
+    html = read("static/index.html")
+    ui = read("static/ui.js")
+    function = ui[ui.index("async function saveSecurityProfile()") : ui.index("function startSecurityStatusMonitor()")]
+
+    assert "企业安全（推荐）" in html
+    assert "本机调试（仅开发人员）" in html
+    assert "_securityPendingProfile" in ui
+    assert "result.pending_profile" in function
+    assert "data.pending_profile" in ui
+    assert "const savedProfile=" in function
+    assert "const restartRequired=" in function
+    assert "restartRequired?savedProfile:null" in function
+    assert "_securityProfileLabel(savedProfile)" in function
+    assert "关闭并重新打开" in function
+    assert "无需重新打开应用" in function
+    assert "restartRequired?'warning':'success'" in function
+    assert "await refreshSecurityStatus(true)" not in function
+
+
+def test_product_error_copy_comes_from_the_local_allowlist():
+    panels = read("static/panels.js")
+    function = panels[
+        panels.index("function _safeProductErrorEnvelope(error)") :
+        panels.index("function handleProductErrorAction", panels.index("function _safeProductErrorEnvelope(error)"))
+    ]
+
+    assert "const definition=_productErrorCatalog[code]" in function
+    assert "title:definition.title" in function
+    assert "message:definition.message" in function
+    assert "definition.actions.map" in function
+    assert "raw.title" not in function
+    assert "raw.message" not in function
+    assert "raw.recovery_actions" not in function
+
+
 def test_diagnostics_styles_keep_status_and_actions_discoverable():
     styles = read("static/style.css")
 
@@ -84,6 +120,20 @@ def test_diagnostics_styles_keep_status_and_actions_discoverable():
         "@media (max-width:1200px)",
     ):
         assert selector in styles
+    assert ".product-diagnostics-component-impact" in styles
+
+
+def test_diagnostics_explains_optional_component_impact_in_plain_language():
+    html = read("static/index.html")
+    panels = read("static/panels.js")
+
+    assert "运行检查" in html
+    assert "function _productComponentImpact" in panels
+    assert "不影响基础对话" in panels
+    assert "仅影响 Word 文档" in panels
+    assert "if(status==='not_applicable')return'当前未启用，不影响本机基础对话。'" in panels
+    assert "if(status==='blocked')return'本地任务服务不可用，会影响基础对话" in panels
+    assert "基础功能正常，扩展能力待处理" in panels
 
 
 def test_desktop_settings_have_one_vertical_scroll_owner():

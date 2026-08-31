@@ -149,11 +149,23 @@ def _probe_docx() -> dict[str, object]:
         registry_ready = isinstance(registry, Mapping)
         dependencies = package.get("dependencies") if isinstance(package, Mapping) else None
         builtin = registry.get("builtin") if isinstance(registry, Mapping) else None
-        builtin_paths = {
-            str(item.get("templateId") or ""): str(item.get("path") or "")
-            for item in (builtin if isinstance(builtin, list) else [])
-            if isinstance(item, Mapping)
-        }
+        builtin_paths: dict[str, str] = {}
+        templates_ready = isinstance(builtin, list) and bool(builtin)
+        if templates_ready:
+            for item in builtin:
+                if not isinstance(item, Mapping):
+                    templates_ready = False
+                    break
+                template_id = str(item.get("templateId") or "")
+                relative = str(item.get("path") or "")
+                if (
+                    not _PRODUCT_SKILL_ID_RE.fullmatch(template_id)
+                    or relative != f"templates/{template_id}"
+                    or template_id in builtin_paths
+                ):
+                    templates_ready = False
+                    break
+                builtin_paths[template_id] = relative
         dependencies_ready = isinstance(dependencies, Mapping) and bool(dependencies)
         if dependencies_ready:
             for name in dependencies:
@@ -166,10 +178,6 @@ def _probe_docx() -> dict[str, object]:
                 if not isinstance(dependency, Mapping) or str(dependency.get("name") or "") != str(name):
                     dependencies_ready = False
                     break
-        templates_ready = builtin_paths == {
-            "general-proposal": "templates/general-proposal",
-            "meeting-minutes": "templates/meeting-minutes",
-        }
         if templates_ready:
             for template_id in builtin_paths:
                 template = root / "templates" / template_id / "template.docx"
@@ -304,11 +312,17 @@ def _installed_production() -> bool:
 
 def _probe_node() -> dict[str, object]:
     runtime_home = str(os.environ.get("TAIJI_RUNTIME_HOME") or "").strip()
-    packaged = Path(runtime_home).expanduser() / "runtime" / "node" / "bin" / "node" if runtime_home else None
+    agent_root = str(os.environ.get("TAIJI_AGENT_ROOT") or "").strip()
+    packaged = Path(agent_root).expanduser() / "runtime" / "node" / "bin" / "node" if agent_root else None
+    development_node = Path(runtime_home).expanduser() / "runtime" / "node" / "bin" / "node" if runtime_home else None
     if _installed_production():
         available = bool(packaged and packaged.is_file() and os.access(packaged, os.X_OK))
     else:
-        available = bool(packaged and packaged.is_file() and os.access(packaged, os.X_OK)) or shutil.which("node") is not None
+        available = bool(
+            (packaged and packaged.is_file() and os.access(packaged, os.X_OK))
+            or (development_node and development_node.is_file() and os.access(development_node, os.X_OK))
+            or shutil.which("node") is not None
+        )
     return {"status": "ready" if available else "degraded"}
 
 
@@ -342,7 +356,11 @@ def _overall_status(components: list[dict[str, object]]) -> str:
     status_by_id = {str(item["id"]): str(item["status"]) for item in components}
     if any(status_by_id.get(component_id) == "blocked" for component_id in required):
         return "blocked"
-    material = [str(item["status"]) for item in components if item["status"] != "not_applicable"]
+    material = [
+        status_by_id.get(component_id, "unknown")
+        for component_id in required
+        if status_by_id.get(component_id) != "not_applicable"
+    ]
     if any(status in {"blocked", "degraded", "unknown"} for status in material):
         return "degraded"
     return "ready"

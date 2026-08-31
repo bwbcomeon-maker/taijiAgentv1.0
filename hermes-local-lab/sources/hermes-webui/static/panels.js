@@ -10775,10 +10775,62 @@ const _productDiagnosticsLabels={
  not_applicable:'不适用',
  unknown:'待确认'
 };
-const _productRecoveryActionIds=new Set([
- 'retry','restart_app','open_model_settings','open_security_settings','open_license',
- 'regenerate','open_result','open_office_review','export_diagnostics','refresh','start_new'
-]);
+function _productComponentImpact(id,status){
+ if(status==='ready')return'';
+ if(id==='gateway'){
+  if(status==='not_applicable')return'当前未启用，不影响本机基础对话。';
+  if(status==='blocked')return'本地任务服务不可用，会影响基础对话，请重启桌面 App 后重新检查。';
+  return'本地任务服务需要关注，请重新检查；持续异常时重启桌面 App。';
+ }
+ const impacts={
+  docx:'仅影响 Word 文档生成，不影响基础对话。',
+  node:'仅影响 Word 文档等扩展能力，不影响基础对话。',
+  skills:'仅影响对应的专家能力，不影响基础对话。',
+  agent:'会影响基础对话，请重启桌面 App 后重新检查。',
+  license:'会影响正式使用，请先处理授权。'
+ };
+ return impacts[id]||'请重新检查；持续异常时导出脱敏支持包。';
+}
+const _productRecoveryActions={
+ retry:'重试',restart_app:'重启应用',open_model_settings:'打开模型配置',
+ open_security_settings:'打开安全设置',open_license:'打开授权管理',regenerate:'重新生成',
+ open_result:'查看文档成果',open_office_review:'打开 Office 验收',export_diagnostics:'导出诊断',
+ refresh:'刷新任务状态',start_new:'重新发起任务'
+};
+const _productErrorCatalog={
+ agent_unavailable:{title:'本地服务暂不可用',message:'太极智能体尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics'],retryable:true},
+ backend_unavailable:{title:'本地服务暂不可用',message:'本次操作未完成，已保存的会话、任务规格和结果不会丢失。请稍后重试。',actions:['retry','restart_app','export_diagnostics'],retryable:true},
+ gateway_unavailable:{title:'本地任务服务暂不可用',message:'本地任务服务尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics'],retryable:true},
+ model_configuration_required:{title:'模型配置待完成',message:'请先完成模型配置，再重新执行此操作。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ permission_denied:{title:'当前操作未获授权',message:'请检查安全模式或联系管理员确认操作权限。',actions:['open_security_settings','export_diagnostics'],retryable:false},
+ license_blocked:{title:'授权状态需要处理',message:'当前授权不可用，请先在授权管理中完成处理。',actions:['open_license','export_diagnostics'],retryable:false},
+ artifact_generation_failed:{title:'文档生成未完成',message:'文档成果未能生成，请重试或重新生成。',actions:['retry','regenerate','export_diagnostics'],retryable:true},
+ office_review_required:{title:'文档仍待办公软件复核',message:'请在 WPS 或 Word 中检查文档后，再确认交付结果。',actions:['open_office_review','export_diagnostics'],retryable:false},
+ provider_authorization_failed:{title:'API Key 无效或已失效',message:'当前模型服务拒绝了 API Key，可能已停用、删除或过期。会话内容已保留。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ provider_account_unavailable:{title:'模型服务账户不可用',message:'当前账户的余额、额度或套餐不可用。请检查 Provider 账户或切换模型。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ provider_rate_limited:{title:'模型服务暂时繁忙',message:'任务规格和已有结果已保留。请稍后由你重试当前阶段，系统不会自动重复调用。',actions:['retry','export_diagnostics'],retryable:true},
+ provider_timeout:{title:'模型服务响应超时',message:'任务规格和已有结果已保留。本次状态会先完成对账，请刷新后再决定是否重试。',actions:['refresh','retry','export_diagnostics'],retryable:true},
+ provider_model_unavailable:{title:'当前模型不可用',message:'模型可能已删除、停用或当前账户无权访问。请切换或重新配置模型。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ provider_network_unavailable:{title:'无法连接模型服务',message:'请检查网络、代理和模型服务地址后重试。',actions:['retry','export_diagnostics'],retryable:true},
+ provider_service_unavailable:{title:'模型服务暂不可用',message:'模型服务返回异常或正在过载，请稍后重试。',actions:['retry','export_diagnostics'],retryable:true},
+ model_input_too_large:{title:'输入内容过大',message:'请缩减输入或附件，或新建对话后再试。',actions:['start_new','export_diagnostics'],retryable:false},
+ provider_content_blocked:{title:'模型服务拒绝了当前内容',message:'请调整输入、缩小范围或切换模型后再试。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ provider_request_rejected:{title:'模型服务拒绝了请求',message:'当前请求不符合模型服务协议或限制。请调整输入或切换模型。',actions:['open_model_settings','export_diagnostics'],retryable:false},
+ gateway_authentication_failed:{title:'本地任务服务认证失败',message:'请重启应用。这不是 Provider API Key 问题，无需修改模型密钥。',actions:['restart_app','export_diagnostics'],retryable:false},
+ session_persistence_failed:{title:'错误状态未能保存',message:'会话的待处理状态已保留，请导出诊断并重启应用后再试。',actions:['restart_app','export_diagnostics'],retryable:false},
+ model_output_invalid:{title:'生成结果格式异常',message:'任务规格和资料已保留，这份异常结果未被采用。请由你重新生成当前阶段。',actions:['regenerate','export_diagnostics'],retryable:true},
+ expert_team_content_blocked:{title:'阶段内容需要处理',message:'本次生成内容已保留，但存在必须处理的阻断项。请查看问题后重新生成当前阶段。',actions:['open_result','regenerate','export_diagnostics'],retryable:true},
+ expert_team_evidence_required:{title:'研究依据需要补充',message:'本次阶段结果、任务规格和现有资料已保留。当前冻结规格中的依据不足，直接重试不会增加资料。请重新发起任务，补充资料或缩小研究范围后再生成。',actions:['open_result','start_new','export_diagnostics'],retryable:false},
+ expert_team_state_conflict:{title:'任务状态已更新',message:'当前任务已被另一个请求推进，你的草稿和已有结果已保留。请刷新后按最新状态操作。',actions:['refresh','export_diagnostics'],retryable:true},
+ expert_team_in_progress:{title:'当前阶段正在处理',message:'同一阶段已有生成任务在运行，已有进度和结果不会丢失。请等待状态更新，不要重复发起。',actions:['refresh','export_diagnostics'],retryable:true},
+ expert_team_not_found:{title:'未找到当前专家团任务',message:'当前会话中未找到这项任务，其他任务和已有交付文件已保留、不受影响。请返回会话列表重新打开。',actions:['refresh','export_diagnostics'],retryable:false},
+ expert_team_source_invalid:{title:'资料校验未通过',message:'任务规格和已添加资料已保留，本次未调用模型。资料数量或完整性与当前任务合同不一致，请重新发起任务并按页面提示添加资料。',actions:['start_new','export_diagnostics'],retryable:false},
+ document_render_failed:{title:'DOCX 生成未完成',message:'已确认的正文已保留，无需重做内容。请只重新生成并检查 DOCX。',actions:['retry','open_result','export_diagnostics'],retryable:true},
+ document_open_failed:{title:'未能打开交付文件',message:'交付文件已保留，不会丢失。请重试，或打开文件夹后使用 WPS/Word 打开。',actions:['retry','export_diagnostics'],retryable:true},
+ delivery_copy_failed:{title:'副本保存未完成',message:'原交付文件已保留，不会丢失。请选择另一个可写目录后重试。',actions:['retry','export_diagnostics'],retryable:true},
+ diagnostics_unavailable:{title:'运行检查暂不可用',message:'暂时无法完成运行检查，请稍后重试。',actions:['retry','restart_app'],retryable:true},
+ unknown_error:{title:'操作未能完成',message:'本次操作未完成，已保存的任务规格和结果不会丢失。请刷新后重试或导出诊断。',actions:['refresh','retry','export_diagnostics'],retryable:true}
+};
 
 function _safeProductErrorEnvelope(error){
  const payload=error&&error.payload;
@@ -10786,21 +10838,16 @@ function _safeProductErrorEnvelope(error){
  if(!raw||raw.schema!=='taiji.product.error.v1') return null;
  const code=String(raw.code||'');
  const incident=String(raw.incident_id||'');
- const title=String(raw.title||'').trim();
- const message=String(raw.message||'').trim();
- if(!code||!title||title.length>120||!message||message.length>320||!/^inc-[0-9a-f]{12,32}$/.test(incident)) return null;
- const offered=Array.isArray(raw.recovery_actions)?raw.recovery_actions:[];
+ const definition=_productErrorCatalog[code];
+ if(!definition||!/^inc-[0-9a-f]{12,32}$/.test(incident)) return null;
  return {
   schema:'taiji.product.error.v1',
   code,
-  title,
-  message,
+  title:definition.title,
+  message:definition.message,
   incident_id:incident,
-  retryable:raw.retryable===true,
-  recovery_actions:offered.map(item=>({
-   id:String((item&&item.id)||''),
-   label:String((item&&item.label)||'').trim()
-  })).filter(action=>_productRecoveryActionIds.has(action.id)&&action.label&&action.label.length<=40)
+  retryable:definition.retryable,
+  recovery_actions:definition.actions.map(id=>({id,label:_productRecoveryActions[id]}))
  };
 }
 
@@ -10835,9 +10882,9 @@ function _renderProductDiagnosticsError(error){
   errorCard.className='product-diagnostics-empty product-diagnostics-error';
   errorCard.setAttribute('role','listitem');
   const title=document.createElement('strong');
-  title.textContent=envelope?envelope.title:'安全诊断加载失败';
+  title.textContent=envelope?envelope.title:'运行检查加载失败';
   const message=document.createElement('span');
-  message.textContent=envelope?envelope.message:'无法取得安全诊断，请确认桌面 App 服务已启动后重新检查。';
+  message.textContent=envelope?envelope.message:'无法取得运行检查结果，请确认桌面 App 服务已启动后重新检查。';
   errorCard.append(title,message);
   componentsEl.appendChild(errorCard);
  }
@@ -10877,16 +10924,20 @@ function _renderProductDiagnosticsRecovery(data){
  if(!recovery) return;
  const components=Array.isArray(data&&data.components)?data.components:[];
  const byId=Object.fromEntries(components.map(item=>[item&&item.id,item&&item.status]));
+ const optionalAttention=components.filter(item=>['docx','node','skills'].includes(item&&item.id)&&['degraded','blocked','unknown'].includes(item&&item.status));
  if(byId.license==='blocked'){
   recovery.innerHTML='<span>授权状态需要处理。请先进入模型配置中的授权管理，处理后重新检查。</span><button type="button" onclick="switchSettingsSection(\'models\')">打开授权管理</button>';
  }else if(byId.agent==='blocked'||byId.gateway==='blocked'){
   recovery.textContent='本地基础服务不可用。请重启桌面 App，然后选择“重新检查”；仍未恢复时导出脱敏支持包。';
  }else if(data&&data.overall==='degraded'){
   recovery.textContent='部分组件需要关注。请先重新检查；状态持续异常时导出脱敏支持包交给管理员。';
+ }else if(data&&data.overall==='ready'&&optionalAttention.length){
+  const names=optionalAttention.map(item=>String(item.label||'扩展能力')).join('、');
+  recovery.textContent=`基础对话可以正常使用；${names}需要关注，仅影响对应的扩展能力。`;
  }else if(data&&data.overall==='ready'){
   recovery.textContent='当前未发现阻塞项。若实际操作仍异常，可重新检查或导出脱敏支持包。';
  }else{
-  recovery.textContent='暂未取得安全诊断，请重新检查。';
+  recovery.textContent='暂未取得运行检查结果，请重新检查。';
  }
 }
 
@@ -10895,8 +10946,12 @@ function _renderProductDiagnostics(data){
  const componentsEl=$('productDiagnosticsComponents');
  if(!statusEl||!componentsEl) return;
  const overall=(data&&['ready','degraded','blocked'].includes(data.overall))?data.overall:'unknown';
+ const components=Array.isArray(data&&data.components)?data.components:[];
+ const optionalAttention=components.some(item=>['docx','node','skills'].includes(item&&item.id)&&['degraded','blocked','unknown'].includes(item&&item.status));
  statusEl.dataset.status=overall;
- statusEl.textContent=_productDiagnosticsLabels[overall]||_productDiagnosticsLabels.unknown;
+ statusEl.textContent=overall==='ready'&&optionalAttention
+  ?'基础功能正常，扩展能力待处理'
+  :(_productDiagnosticsLabels[overall]||_productDiagnosticsLabels.unknown);
  const checkedAt=$('productDiagnosticsCheckedAt');
  const incidentEl=$('productDiagnosticsIncidentId');
  const copyBtn=$('btnCopyProductDiagnosticsIncident');
@@ -10915,16 +10970,17 @@ function _renderProductDiagnostics(data){
  const incidentSafe=/^inc-[0-9a-f]{12,32}$/.test(incident);
  if(incidentEl) incidentEl.textContent=incidentSafe?incident:'—';
  if(copyBtn) copyBtn.disabled=!incidentSafe;
- const components=Array.isArray(data&&data.components)?data.components:[];
  if(!components.length){
-  componentsEl.innerHTML='<div class="product-diagnostics-empty" role="listitem">暂未取得诊断结果，请重新检查。</div>';
+  componentsEl.innerHTML='<div class="product-diagnostics-empty" role="listitem">暂未取得运行检查结果，请重新检查。</div>';
   _renderProductDiagnosticsRecovery(data);
   return;
  }
  componentsEl.innerHTML=components.map(item=>{
   const status=['ready','degraded','blocked','not_applicable','unknown'].includes(item&&item.status)?item.status:'unknown';
   const version=item&&item.version?`<span class="product-diagnostics-version">${esc(String(item.version))}</span>`:'';
-  return `<div class="product-diagnostics-component" role="listitem" data-status="${status}"><span class="product-diagnostics-component-name">${esc(String((item&&item.label)||'组件'))}</span><span class="product-diagnostics-component-state">${esc(_productDiagnosticsLabels[status]||_productDiagnosticsLabels.unknown)}</span>${version}</div>`;
+  const impact=_productComponentImpact(String((item&&item.id)||''),status);
+  const impactHtml=impact?`<span class="product-diagnostics-component-impact">${esc(impact)}</span>`:'';
+  return `<div class="product-diagnostics-component" role="listitem" data-status="${status}"><span class="product-diagnostics-component-name">${esc(String((item&&item.label)||'组件'))}</span><span class="product-diagnostics-component-state">${esc(_productDiagnosticsLabels[status]||_productDiagnosticsLabels.unknown)}</span>${version}${impactHtml}</div>`;
  }).join('');
  _renderProductDiagnosticsRecovery(data);
 }

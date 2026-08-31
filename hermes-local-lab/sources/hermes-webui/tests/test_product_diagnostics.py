@@ -32,13 +32,14 @@ def _write_ready_docx_root(root: Path) -> None:
         "builtin": [
             {"templateId": "general-proposal", "path": "templates/general-proposal"},
             {"templateId": "meeting-minutes", "path": "templates/meeting-minutes"},
+            {"templateId": "enterprise-work-report", "path": "templates/enterprise-work-report"},
         ],
         "installed": [],
     }
     (root / "src/cli").mkdir(parents=True)
     (root / "src/workflow").mkdir(parents=True)
     (root / "node_modules/ajv").mkdir(parents=True)
-    for template_id in ("general-proposal", "meeting-minutes"):
+    for template_id in ("general-proposal", "meeting-minutes", "enterprise-work-report"):
         template = root / "templates" / template_id / "template.docx"
         template.parent.mkdir(parents=True)
         template.write_bytes(b"PK\x03\x04" + b"fixture" * 16)
@@ -170,15 +171,49 @@ def test_default_probes_require_real_runtime_entries(tmp_path, monkeypatch):
 
 
 def test_installed_node_probe_requires_packaged_executable(tmp_path, monkeypatch):
-    runtime_home = tmp_path / "runtime-home"
-    node = runtime_home / "runtime" / "node" / "bin" / "node"
+    install_root = tmp_path / "opt" / "taiji-agent"
+    node = install_root / "runtime" / "node" / "bin" / "node"
     node.parent.mkdir(parents=True)
     node.write_text("#!/bin/sh\n", encoding="utf-8")
     node.chmod(0o755)
-    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(tmp_path / "runtime-home"))
+    monkeypatch.setenv("TAIJI_AGENT_ROOT", str(install_root))
     monkeypatch.setattr("api.product_diagnostics._installed_production", lambda: True)
 
     assert _probe_node() == {"status": "ready"}
+
+
+def test_optional_component_warning_does_not_degrade_core_readiness():
+    for optional_id in ("docx", "skills", "node"):
+        for optional_status in ("degraded", "blocked", "unknown", "not_applicable"):
+            probes = {
+                "webui": {"status": "ready"},
+                "agent": {"status": "ready"},
+                "gateway": {"status": "not_applicable"},
+                "license": {"status": "ready"},
+                "docx": {"status": "ready"},
+                "skills": {"status": "ready"},
+                "node": {"status": "ready"},
+            }
+            probes[optional_id] = {"status": optional_status}
+
+            assert build_product_diagnostics(probes=probes)["overall"] == "ready"
+
+
+def test_required_component_status_still_controls_core_readiness():
+    expected = {"degraded": "degraded", "unknown": "degraded", "blocked": "blocked"}
+    for required_status, overall in expected.items():
+        probes = {
+            "webui": {"status": "ready"},
+            "agent": {"status": required_status},
+            "gateway": {"status": "not_applicable"},
+            "license": {"status": "ready"},
+            "docx": {"status": "ready"},
+            "skills": {"status": "ready"},
+            "node": {"status": "ready"},
+        }
+
+        assert build_product_diagnostics(probes=probes)["overall"] == overall
 
 
 def test_source_node_probe_may_use_developer_path(tmp_path, monkeypatch):

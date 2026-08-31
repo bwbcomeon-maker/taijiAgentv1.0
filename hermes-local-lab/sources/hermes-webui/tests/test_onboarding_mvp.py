@@ -423,6 +423,94 @@ def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(m
     assert ready["overall_ready"] is True
 
 
+def test_agent_discovery_accepts_sourceless_installed_entrypoint(monkeypatch, tmp_path):
+    from api import config
+
+    installed_agent = tmp_path / "runtime" / "agent"
+    installed_agent.mkdir(parents=True)
+    (installed_agent / "run_agent.pyc").write_bytes(b"compiled-agent-entrypoint")
+    monkeypatch.setenv("HERMES_WEBUI_AGENT_DIR", str(installed_agent))
+
+    assert config._discover_agent_dir() == installed_agent.resolve()
+
+
+def test_ready_model_copy_distinguishes_saved_config_from_live_connection(monkeypatch):
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(onboarding, "_HERMES_FOUND", True)
+    monkeypatch.setattr(onboarding, "_extract_current_provider", lambda _cfg: "zai-cn")
+    monkeypatch.setattr(onboarding, "_extract_current_model", lambda _cfg: "glm-5")
+    monkeypatch.setattr(onboarding, "_extract_current_base_url", lambda _cfg: None)
+    monkeypatch.setattr(onboarding, "_provider_api_key_present", lambda *_args: True)
+
+    result = onboarding._status_from_runtime({}, True)
+
+    assert result["chat_ready"] is True
+    assert "基础配置已保存" in result["provider_note"]
+    assert "首次对话" in result["provider_note"]
+    assert "验证连接" in result["provider_note"]
+    assert "可以通过" not in result["provider_note"]
+
+
+def test_agent_failure_only_says_credentials_are_saved_when_key_is_present(monkeypatch):
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(onboarding, "_HERMES_FOUND", True)
+    monkeypatch.setattr(onboarding, "_extract_current_provider", lambda _cfg: "zai-cn")
+    monkeypatch.setattr(onboarding, "_extract_current_model", lambda _cfg: "glm-5")
+    monkeypatch.setattr(onboarding, "_extract_current_base_url", lambda _cfg: None)
+    monkeypatch.setattr(onboarding, "_provider_api_key_present", lambda *_args: False)
+
+    incomplete = onboarding._status_from_runtime({}, False)
+    assert incomplete["setup_state"] == "agent_unavailable"
+    assert "模型选择已保留" in incomplete["provider_note"]
+    assert "确认凭据状态" in incomplete["provider_note"]
+    assert "无需重复填写密钥" not in incomplete["provider_note"]
+
+    monkeypatch.setattr(onboarding, "_provider_api_key_present", lambda *_args: True)
+    configured = onboarding._status_from_runtime({}, False)
+    assert "模型和凭据已保存" in configured["provider_note"]
+    assert "无需重复填写密钥" in configured["provider_note"]
+
+
+def test_configured_model_with_agent_failure_routes_to_system_diagnostics(monkeypatch, tmp_path):
+    import api.onboarding as onboarding
+
+    ready_license = onboarding._setup_item(
+        "license", "授权", ready=True, reason="ready", recovery={"id": "open", "label": "open"}
+    )
+    monkeypatch.setattr(onboarding, "_license_setup_item", lambda: (ready_license, True))
+    monkeypatch.setattr(onboarding, "get_config", lambda: {})
+    monkeypatch.setattr(onboarding, "verify_hermes_imports", lambda: (False, [], {}))
+    monkeypatch.setattr(
+        onboarding,
+        "_status_from_runtime",
+        lambda _cfg, _imports_ok: {
+            "chat_ready": False,
+            "provider_configured": True,
+            "setup_state": "agent_unavailable",
+            "provider_note": "模型配置已保存，但应用组件未正确识别。",
+            "current_provider": "zai-cn",
+            "current_model": "glm-5",
+        },
+    )
+    monkeypatch.setattr(onboarding, "load_settings", lambda: {"default_workspace": str(tmp_path)})
+    monkeypatch.setattr(onboarding, "validate_workspace_to_add", lambda _path: tmp_path)
+    monkeypatch.setattr(
+        onboarding,
+        "build_security_status_payload",
+        lambda: {"mode": "restricted", "profile": "strict"},
+    )
+
+    status = onboarding.get_setup_status()
+    model = next(item for item in status["items"] if item["id"] == "model")
+
+    assert model["recovery"]["label"] == "查看系统诊断"
+    assert model["recovery"]["target_section"] == "system"
+    assert model["recovery"]["target_element"] == "productDiagnosticsCard"
+    assert "target_step" not in model["recovery"]
+
+
 def test_license_setup_is_ready_only_for_required_valid_status(monkeypatch):
     import api.onboarding as onboarding
     import api.product_diagnostics as product_diagnostics
