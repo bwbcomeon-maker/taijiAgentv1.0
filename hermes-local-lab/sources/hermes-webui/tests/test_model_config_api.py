@@ -310,6 +310,54 @@ def _read_config(tmp_path):
     return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
 
 
+def test_get_model_config_projects_effective_fixed_endpoint_and_residue(monkeypatch, tmp_path):
+    _use_home(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  provider: zai-cn\n  default: glm-5\n  base_url: https://api.deepseek.com/v1\n",
+        encoding="utf-8",
+    )
+
+    result = model_config.get_model_config()
+
+    assert result["main"]["endpoint"] == {
+        "display_url": "https://open.bigmodel.cn/api/paas/v4",
+        "policy": "fixed",
+        "source": "system",
+        "editable": False,
+        "status": "resolved",
+        "override_ignored": True,
+    }
+    assert result["main"]["base_url"] == ""
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert "api.deepseek.com" not in dumped
+
+
+def test_legacy_default_model_writer_does_not_restore_fixed_endpoint_fields(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  provider: zai-cn\n  default: glm-5\n  base_url: https://api.deepseek.com/v1\n  api_mode: codex_responses\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(api_config, "reload_config", lambda: None)
+    monkeypatch.setattr(api_config, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(
+        api_config,
+        "cfg",
+        yaml.safe_load(config_path.read_text(encoding="utf-8")),
+    )
+
+    result = api_config.set_hermes_default_model("glm-5")
+    saved = _read_config(tmp_path)
+
+    assert result["ok"] is True
+    assert "base_url" not in saved["model"]
+    assert "api_mode" not in saved["model"]
+
+
 def _assert_verification_tombstone(
     state,
     *,

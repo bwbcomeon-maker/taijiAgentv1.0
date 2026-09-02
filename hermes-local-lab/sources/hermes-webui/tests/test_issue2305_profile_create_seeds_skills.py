@@ -176,6 +176,93 @@ class TestCloneSkipsSeeding:
         # Profile dict must still be returned.
         assert result['name'] == 'clonedprofile'
 
+    def test_clone_cleans_target_fixed_residue_and_preserves_source(
+        self, fake_hermes_home
+    ):
+        source = _isolated_profiles_root(fake_hermes_home) / 'sourceprofile'
+        source.mkdir(parents=True)
+        source_config = (
+            'model:\n'
+            '  provider: zai-cn\n'
+            '  default: glm-5\n'
+            '  base_url: https://candidate.example/v1\n'
+            '  temperature: 0.2\n'
+            'other:\n  keep: true\n'
+        ).encode()
+        source_env = b'GLM_CN_API_KEY=TEST_ONLY_SOURCE\n'
+        (source / 'config.yaml').write_bytes(source_config)
+        (source / '.env').write_bytes(source_env)
+
+        def fake_create(name, clone_from=None, clone_config=False, **_kwargs):
+            target = _make_profile_dir(_isolated_profiles_root(fake_hermes_home), name)
+            if clone_config:
+                (target / 'config.yaml').write_bytes((source / 'config.yaml').read_bytes())
+                (target / '.env').write_bytes((source / '.env').read_bytes())
+
+        _remove_hermes_cli()
+        _install_hermes_cli_profiles_mock(fake_create, lambda *_args, **_kwargs: None)
+        try:
+            with patch.object(profiles_mod, 'list_profiles_api', return_value=[]):
+                profiles_mod.create_profile_api(
+                    'cloned-fixed', clone_from='sourceprofile', clone_config=True
+                )
+        finally:
+            _remove_hermes_cli()
+            _restore_real_hermes_cli()
+
+        target_model = (fake_hermes_home / 'profiles' / 'cloned-fixed' / 'config.yaml').read_text()
+        assert 'base_url:' not in target_model
+        assert 'provider: zai-cn' in target_model
+        assert 'temperature: 0.2' in target_model
+        assert 'keep: true' in target_model
+        assert (fake_hermes_home / 'profiles' / 'sourceprofile' / 'config.yaml').read_bytes() == source_config
+        assert (fake_hermes_home / 'profiles' / 'sourceprofile' / '.env').read_bytes() == source_env
+
+    def test_clone_normalization_failure_rolls_back_target_pair(
+        self, fake_hermes_home, monkeypatch
+    ):
+        source = _isolated_profiles_root(fake_hermes_home) / 'sourceprofile'
+        source.mkdir(parents=True)
+        (source / 'config.yaml').write_text(
+            'model:\n  provider: zai-cn\n  base_url: https://candidate.example/v1\n',
+            encoding='utf-8',
+        )
+        (source / '.env').write_text('GLM_CN_API_KEY=TEST_ONLY_SOURCE\n', encoding='utf-8')
+
+        def fake_create(name, clone_config=False, **_kwargs):
+            target = _make_profile_dir(_isolated_profiles_root(fake_hermes_home), name)
+            if clone_config:
+                shutil.copy2(source / 'config.yaml', target / 'config.yaml')
+                shutil.copy2(source / '.env', target / '.env')
+
+        import shutil
+        import agent.provider_credentials as credential_store
+
+        _remove_hermes_cli()
+        _install_hermes_cli_profiles_mock(fake_create, lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            credential_store,
+            '_write_credential_journal',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('journal unavailable')),
+        )
+        try:
+            with patch.object(profiles_mod, 'list_profiles_api', return_value=[]):
+                with pytest.raises(OSError, match='journal unavailable'):
+                    profiles_mod.create_profile_api(
+                        'clone-rollback', clone_from='sourceprofile', clone_config=True
+                    )
+        finally:
+            _remove_hermes_cli()
+            _restore_real_hermes_cli()
+
+        target = fake_hermes_home / 'profiles' / 'clone-rollback'
+        assert not (target / 'config.yaml').exists()
+        assert not (target / '.env').exists()
+        assert (source / 'config.yaml').read_bytes() == (
+            b'model:\n  provider: zai-cn\n  base_url: https://candidate.example/v1\n'
+        )
+        assert (source / '.env').read_bytes() == b'GLM_CN_API_KEY=TEST_ONLY_SOURCE\n'
+
 
 class TestImplicitCloneSourceIsolation:
     def test_clone_config_binds_each_request_tls_profile_before_cli(

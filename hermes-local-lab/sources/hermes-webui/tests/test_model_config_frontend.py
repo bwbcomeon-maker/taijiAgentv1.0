@@ -917,7 +917,7 @@ function control(id,value=''){
   setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},focus(){this.focused=true;},
   querySelector(){return null;},querySelectorAll(){return [];}};
 }
-const ids=['btnSaveMainModel','btnReloadAllModelConfig','modelConfigDraftStatus','modelConfigProvider','modelConfigModel','modelConfigBaseUrl',
+const ids=['btnSaveMainModel','btnReloadAllModelConfig','modelConfigDraftStatus','modelConfigProvider','modelConfigModel','modelConfigBaseUrl','modelConfigBaseUrlError',
  'modelConfigApiKey','visionConfigModel','visionConfigApiKey','imageGenConfigModel','imageGenConfigApiKey',
  'platformCredentialLabel','platformCredentialSecret'];
 const elements={};for(const id of ids)elements[id]=control(id);
@@ -934,6 +934,7 @@ elements.platformCredentialSecret.value='FAKE-platform-key';
 const secretFields=[elements.modelConfigApiKey,elements.visionConfigApiKey,elements.imageGenConfigApiKey,elements.platformCredentialSecret];
 secretFields.forEach(item=>{item.dataset.secretField='true';});
 const $=id=>elements[id]||null;
+const t=key=>key;
 const document={querySelectorAll(selector){return selector.includes('data-secret-field')?secretFields:[];}};
 const oldVision={provider:'alibaba',model:'vision-baseline'};
 const oldImage={provider:'dashscope',model:'image-baseline'};
@@ -943,6 +944,7 @@ let _modelConfigData={profile:'default',main:{provider:'openai',model:'gpt-4o',b
 const _imageCapabilityProviderDrafts={vision:{alibaba:{Model:'vision-provider-draft',ApiKey:'FAKE-vision-provider'}},
  image:{dashscope:{Model:'image-provider-draft',ApiKey:'FAKE-image-provider'}}};
 const scenario=process.argv[3]||'timeout_matching';
+if(scenario==='builtin_clean_payload'||scenario==='zai_clean_payload')elements.modelConfigApiKey.value='';
 const expectedRequestId='00112233445566778899aabbccddeeff';
 const crypto={getRandomValues(bytes){bytes.set(Buffer.from(expectedRequestId,'hex'));return bytes;}};
 const authoritative={profile:'default',main_request_id:scenario==='nonmatching_receipt'?'ffeeddccbbaa99887766554433221100':expectedRequestId,
@@ -952,14 +954,19 @@ const authoritative={profile:'default',main_request_id:scenario==='nonmatching_r
 if(scenario==='matching_refresh_pending'){authoritative.runtime_state='refresh_pending';authoritative.refresh_pending=true;}
 if(scenario==='http_200_unconfigured'){authoritative.main.key_status={configured:false,source:'none'};}
 if(scenario==='http_200_unexpected_base_url'){authoritative.main.base_url='https://stale-relay.example/v1';}
-const apiCalls=[];let busyDuringPost=null;let postRequestId='';let postPayloadHasApiKey=false;
+if(scenario==='zai_clean_payload'){elements.modelConfigProvider.value='zai-cn';elements.modelConfigModel.value='glm-5';authoritative.main.provider='zai-cn';authoritative.main.model='glm-5';}
+if(scenario==='custom_payload'||scenario==='custom_payload_nonempty'){elements.modelConfigProvider.value='custom';elements.modelConfigModel.value='research';elements.modelConfigBaseUrl.value='https://custom.example/v1';if(scenario==='custom_payload')elements.modelConfigApiKey.value='';authoritative.main.provider='custom';authoritative.main.model='research';authoritative.main.base_url='https://custom.example/v1';}
+if(scenario==='custom_invalid_base'){elements.modelConfigProvider.value='custom';elements.modelConfigModel.value='research';elements.modelConfigBaseUrl.value='https://bad.example/v1?token=secret';authoritative.main.provider='custom';authoritative.main.model='research';authoritative.main.base_url='https://bad.example/v1';}
+if(scenario==='custom_missing'){elements.modelConfigProvider.value='custom';elements.modelConfigModel.value='research';elements.modelConfigBaseUrl.value='';}
+const apiCalls=[];let busyDuringPost=null;let postRequestId='';let postPayloadHasApiKey=false;let postPayload={};
 let authoritativeReadCount=0,refreshBusyDuringGet=null;
 const api=async(url,options)=>{
  apiCalls.push({url,method:options&&options.method||'GET',timeoutToast:options&&options.timeoutToast,retryNetworkErrors:options&&options.retryNetworkErrors});
  if(url==='/api/model-config/main'){
   busyDuringPost={disabled:elements.btnSaveMainModel.disabled,ariaBusy:elements.btnSaveMainModel.attrs['aria-busy']||null};
-  const body=JSON.parse(options.body||'{}');postRequestId=String(body.request_id||'');postPayloadHasApiKey=!!body.api_key;
+  const body=JSON.parse(options.body||'{}');postPayload=body;postRequestId=String(body.request_id||'');postPayloadHasApiKey=!!body.api_key;
   if(scenario==='http_4xx'){const error=new Error('request rejected');error.status=400;throw error;}
+  if(scenario==='custom_invalid_base'){const error=new Error('invalid base URL');error.status=400;error.payload={error:'The supplied URL is invalid',error_code:'invalid_base_url'};throw error;}
   if(scenario==='http_5xx_matching'||scenario==='matching_refresh_pending'){const error=new Error('server failed after commit');error.status=503;throw error;}
   if(scenario==='http_200_unconfigured'||scenario==='http_200_unexpected_base_url')return Object.assign({commit_state:'committed',runtime_state:'applied'},authoritative);
   const error=new Error('request timed out');error.name='TimeoutError';error.timeout=true;throw error;
@@ -983,6 +990,7 @@ const toasts=[];
 const showToast=(message,duration,tone)=>toasts.push({message,duration,tone});
 let confirmCount=0,fullLoadCount=0,imageLoadCount=0,renderedMain=null,populateCount=0,closedCount=0;
 const showConfirmDialog=async()=>{confirmCount++;return false;};
+const _setFieldError=(id,message)=>{const field=elements[id];if(field){field.textContent=message;field.attrs['role']='alert';} };
 const loadModelConfigPanel=async()=>{fullLoadCount++;return authoritative;};
 const _modelConfigHasUnsavedChanges=()=>true;
 const _syncMainModelConfigControls=()=>{};
@@ -1009,9 +1017,9 @@ async function run(){
  await saveMainModelConfig();
  if(scenario.startsWith('get_failure_then_'))await refreshModelAndImageCapabilities();
  return {
-  apiCalls,
+  apiCalls,postPayload,
   expectedRequestId,postRequestId,postPayloadHasApiKey,mainRequestId:_modelConfigData.main_request_id||'',
-  main:_modelConfigData.main,
+  main:_modelConfigData.main,baseUrlDraft:elements.modelConfigBaseUrl.value,baseUrlError:elements.modelConfigBaseUrlError.textContent,baseUrlFocused:!!elements.modelConfigBaseUrl.focused,
   providers:_modelConfigData.providers,
   preserved:{vision:_modelConfigData.vision===oldVision,image:_modelConfigData.image_gen===oldImage,
    credentials:_modelConfigData.provider_credentials===oldCredentials,
@@ -1522,6 +1530,188 @@ def test_main_model_timeout_reconciles_authoritative_state_without_clobbering_ot
     assert all("待配置" not in toast["message"] for toast in result["toasts"])
 
 
+def test_builtin_main_payload_omits_endpoint_and_secret_fields(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "builtin_clean_payload")
+    payload = result["postPayload"]
+    assert set(payload) == {"provider", "model", "request_id"}
+    assert payload["provider"] == "deepseek"
+    assert payload["model"] == "deepseek-chat"
+    assert re.fullmatch(r"[0-9a-f]{32}", payload["request_id"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_zai_cn_main_payload_omits_endpoint_and_empty_secret(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "zai_clean_payload")
+    assert result["postPayload"] == {
+        "provider": "zai-cn",
+        "model": "glm-5",
+        "request_id": result["expectedRequestId"],
+    }
+    assert result["mainRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "applied"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_generic_custom_main_payload_includes_only_nonempty_endpoint_and_key(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "custom_payload")
+    assert result["postPayload"]["provider"] == "custom"
+    assert result["postPayload"]["base_url"] == "https://custom.example/v1"
+    assert "api_key" not in result["postPayload"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_generic_custom_main_payload_includes_nonempty_key(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "custom_payload_nonempty")
+    assert result["postPayload"]["base_url"] == "https://custom.example/v1"
+    assert result["postPayload"]["api_key"] == "FAKE-main-key"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_invalid_custom_base_url_keeps_draft_and_focuses_accessible_error(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "custom_invalid_base")
+    assert result["status"]["state"] == "failed"
+    assert result["baseUrlDraft"] == "https://bad.example/v1?token=secret"
+    assert result["baseUrlError"] == "The supplied URL is invalid"
+    assert result["baseUrlFocused"] is True
+    assert "secret" not in result["baseUrlError"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_missing_custom_base_url_stops_before_post_and_focuses_error(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "custom_missing")
+    assert result["apiCalls"] == []
+    assert result["baseUrlError"] == "provider_endpoint_base_url_required"
+    assert result["baseUrlFocused"] is True
+
+
+def test_main_model_payload_scopes_custom_endpoint_and_model_config_has_accessible_error_slot():
+    body = _top_level_js_function_body(PANELS_JS, "saveMainModelConfig")
+    assert "if(provider==='custom')" in body
+    assert "payload.base_url=baseUrl" in body
+    assert 'id="modelConfigBaseUrlError"' in INDEX_HTML
+    assert 'aria-describedby="modelConfigBaseUrlError"' in INDEX_HTML
+    assert 'role="alert"' in INDEX_HTML
+    assert "_setFieldError('modelConfigBaseUrlError'" in PANELS_JS
+
+
+def test_main_model_reconcile_ignores_builtin_base_url_and_uses_authoritative_endpoint():
+    body = _top_level_js_function_body(PANELS_JS, "_mainModelConfigMatchesExpected")
+    assert "targetProvider==='custom'" in body
+    assert "main.endpoint" in PANELS_JS
+    assert "modelConfigMainEndpointValue" in INDEX_HTML
+    assert "modelConfigMainEndpointSource" in INDEX_HTML
+    assert "modelConfigMainEndpointStatus" in INDEX_HTML
+
+
+def test_main_model_editor_projects_provider_endpoint_without_reusing_stale_main_url():
+    assert 'id="modelConfigEditEndpointPreview"' in INDEX_HTML
+    assert 'id="modelConfigEditEndpointValue"' in INDEX_HTML
+    assert "provider.endpoint" in PANELS_JS
+    assert "modelConfigEditEndpointValue" in PANELS_JS
+    assert 'id="modelConfigMainUpdateKey"' in INDEX_HTML
+    assert "custom:research" in PANELS_JS or "isNamedCustom" in PANELS_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_named_custom_main_editor_is_readonly_without_key_focus_or_bigmodel_reuse(tmp_path):
+    driver = tmp_path / "named-custom-main-editor.js"
+    driver.write_text(
+        r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),d=1;i++;while(d&&i<source.length){if(source[i]==='{')d++;else if(source[i]==='}')d--;i++;}return source.slice(start,i);}
+function el(id){return {id,value:'',style:{display:''},dataset:{},disabled:false,hidden:false,placeholder:'',textContent:'',setAttribute(){},querySelector(){return null;}};}
+const elements={modelConfigProvider:el('modelConfigProvider'),modelConfigModel:el('modelConfigModel'),modelConfigBaseUrlRow:el('modelConfigBaseUrlRow'),modelConfigBaseUrl:el('modelConfigBaseUrl'),modelConfigApiKeyRow:el('modelConfigApiKeyRow'),modelConfigApiKey:el('modelConfigApiKey'),modelConfigProviderHint:el('modelConfigProviderHint'),modelConfigMainUpdateKey:el('modelConfigMainUpdateKey'),modelConfigEditEndpointValue:el('modelConfigEditEndpointValue')};
+elements.modelConfigProvider.value='custom:research';elements.modelConfigProvider.dataset.lastProvider='zai-cn';elements.modelConfigModel.value='glm-5';elements.modelConfigBaseUrl.value='https://bigmodel.example/v1';
+const $=id=>elements[id]||null;const t=key=>'i18n:'+key;const _setDatalistOptions=()=>{};const _providerEndpointText=(kind,value)=>'i18n:'+kind+':'+value;const _modelConfigProviderById=id=>({id,configurable:false,models:[{id:'research-model'}],endpoint:{display_url:'https://admin.example/v1',status:'resolved',source:'managed'}});eval(extractFunc('_renderMainModelEditEndpoint'));eval(extractFunc('_syncMainModelConfigControls'));_syncMainModelConfigControls();process.stdout.write(JSON.stringify({baseDisplay:elements.modelConfigBaseUrlRow.style.display,keyDisplay:elements.modelConfigApiKeyRow.style.display,keyDisabled:elements.modelConfigApiKey.disabled,updateHidden:elements.modelConfigMainUpdateKey.hidden,hint:elements.modelConfigProviderHint.textContent,model:elements.modelConfigModel.value,preview:elements.modelConfigEditEndpointValue.textContent}));
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run([NODE, str(driver), str(ROOT / "static" / "panels.js")], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "baseDisplay": "none",
+        "keyDisplay": "none",
+        "keyDisabled": True,
+        "updateHidden": True,
+        "hint": "i18n:provider_endpoint_admin_readonly",
+        "model": "research-model",
+        "preview": "https://admin.example/v1",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_generic_custom_main_editor_replaces_preview_with_editable_base_url(tmp_path):
+    driver = tmp_path / "generic-custom-main-editor.js"
+    driver.write_text(
+        r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),d=1;i++;while(d&&i<source.length){if(source[i]==='{')d++;else if(source[i]==='}')d--;i++;}return source.slice(start,i);}
+function el(id){return {id,value:'',style:{display:''},dataset:{},disabled:false,hidden:false,placeholder:'',textContent:'',setAttribute(){},querySelector(){return null;}};}
+const elements={modelConfigProvider:el('modelConfigProvider'),modelConfigModel:el('modelConfigModel'),modelConfigBaseUrlRow:el('modelConfigBaseUrlRow'),modelConfigBaseUrl:el('modelConfigBaseUrl'),modelConfigApiKeyRow:el('modelConfigApiKeyRow'),modelConfigApiKey:el('modelConfigApiKey'),modelConfigProviderHint:el('modelConfigProviderHint'),modelConfigMainUpdateKey:el('modelConfigMainUpdateKey'),modelConfigEditEndpointPreview:el('modelConfigEditEndpointPreview'),modelConfigEditEndpointValue:el('modelConfigEditEndpointValue')};
+elements.modelConfigProvider.value='custom';elements.modelConfigProvider.dataset.lastProvider='custom';elements.modelConfigModel.value='research';elements.modelConfigBaseUrl.value='https://custom.example/v1';
+const $=id=>elements[id]||null;const t=key=>'i18n:'+key;const _setDatalistOptions=()=>{};const _providerEndpointText=(kind,value)=>'i18n:'+kind+':'+value;const _modelConfigProviderById=id=>({id,configurable:id==='custom',models:[{id:'research'}],endpoint:{display_url:'https://admin.example/v1',status:'resolved',source:'managed'}});eval(extractFunc('_renderMainModelEditEndpoint'));eval(extractFunc('_syncMainModelConfigControls'));_syncMainModelConfigControls();process.stdout.write(JSON.stringify({previewHidden:elements.modelConfigEditEndpointPreview.hidden,previewDisplay:elements.modelConfigEditEndpointPreview.style.display,baseDisplay:elements.modelConfigBaseUrlRow.style.display,baseHidden:elements.modelConfigBaseUrlRow.hidden,baseValue:elements.modelConfigBaseUrl.value,preview:elements.modelConfigEditEndpointValue.textContent}));
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "previewHidden": True,
+        "previewDisplay": "none",
+        "baseDisplay": "",
+        "baseHidden": False,
+        "baseValue": "https://custom.example/v1",
+        "preview": "https://custom.example/v1",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_expected_and_pending_endpoint_fields_follow_provider_ownership(tmp_path):
+    driver = tmp_path / "main-model-endpoint-ownership.js"
+    driver.write_text(
+        r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');const start=source.search(re);if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),d=1;i++;while(d&&i<source.length){if(source[i]==='{')d++;else if(source[i]==='}')d--;i++;}return source.slice(start,i);}
+function el(id){return {id,value:'',disabled:false,hidden:false,dataset:{},attrs:{},textContent:'',focused:false,setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},focus(){this.focused=true;}};}
+const elements={modelConfigProvider:el('modelConfigProvider'),modelConfigModel:el('modelConfigModel'),modelConfigBaseUrl:el('modelConfigBaseUrl'),modelConfigBaseUrlError:el('modelConfigBaseUrlError'),modelConfigApiKey:el('modelConfigApiKey'),btnSaveMainModel:el('btnSaveMainModel'),modelConfigDraftStatus:el('modelConfigDraftStatus')};
+const $=id=>elements[id]||null;const t=key=>key;const crypto={getRandomValues(bytes){bytes.fill(0x11);return bytes;}};const document={querySelectorAll(){return [];}};
+const _setFieldError=(id,message)=>{if($(id))$(id).textContent=message;};const _setMainModelConfigSaveState=()=>{};const _clearModelConfigSecrets=()=>{};const _reconcileMainModelConfigSave=async()=>{};const _mainModelConfigSaveResultIsUncertain=()=>true;const _handleRuntimeRefreshOutcome=()=>({pending:false});const _applyAuthoritativeMainModelConfig=()=>({});const _mainModelConfigReceiptMatches=()=>true;const _mainModelConfigMatchesExpected=()=>true;const populateModelDropdown=()=>{};const toggleModelConfigSection=()=>{};const showToast=()=>{};
+let _pendingMainModelConfigReconciliation=null;let captured=[];let pendingCaptured=[];
+eval(extractFunc('_rememberPendingMainModelConfigReconciliation'));
+const rememberPending=_rememberPendingMainModelConfigReconciliation;
+_rememberPendingMainModelConfigReconciliation=expected=>{rememberPending(expected);captured.push(JSON.parse(JSON.stringify(expected)));pendingCaptured.push(JSON.parse(JSON.stringify(_pendingMainModelConfigReconciliation)));};
+const api=async()=>{const error=new Error('request timed out');error.name='TimeoutError';error.timeout=true;throw error;};
+eval(extractFunc('_newMainModelConfigRequestId'));eval(extractFunc('saveMainModelConfig'));
+async function run(provider,model,baseUrl){elements.modelConfigProvider.value=provider;elements.modelConfigModel.value=model;elements.modelConfigBaseUrl.value=baseUrl;elements.modelConfigApiKey.value='';await saveMainModelConfig();return captured.pop();}
+(async()=>{const zai=await run('zai-cn','glm-5','https://open.bigmodel.cn/api/paas/v4');const zaiPending=pendingCaptured.pop();const named=await run('custom:research','research','https://admin.example/v1');const namedPending=pendingCaptured.pop();const custom=await run('custom','research','https://custom.example/v1');const customPending=pendingCaptured.pop();process.stdout.write(JSON.stringify({zai,zaiPending,named,namedPending,custom,customPending}));})().catch(error=>{console.error(error);process.exit(1);});
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    for provider in ("zai", "named", "zaiPending", "namedPending"):
+        assert set(payload[provider]) == {"provider", "model", "request_id"}
+        assert "base_url" not in payload[provider]
+    assert payload["custom"] == {
+        "provider": "custom",
+        "model": "research",
+        "base_url": "https://custom.example/v1",
+        "request_id": "11" * 16,
+    }
+    assert payload["customPending"] == payload["custom"]
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
 def test_main_model_http_5xx_reconciles_matching_receipt_without_replaying_post(
     tmp_path,
@@ -1685,12 +1875,12 @@ def test_main_model_http_200_rejects_unexpected_base_url_when_target_is_empty(
         "http_200_unexpected_base_url",
     )
 
-    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert [call["method"] for call in result["apiCalls"]] == ["POST"]
     assert result["mainRequestId"] == result["postRequestId"]
     assert result["main"]["base_url"] == "https://stale-relay.example/v1"
-    assert result["status"]["state"] == "failed"
-    assert result["closedCount"] == 0
-    assert result["populateCount"] == 0
+    assert result["status"]["state"] == "applied"
+    assert result["closedCount"] == 1
+    assert result["populateCount"] == 1
 
 
 def test_main_model_request_id_uses_secure_128_bit_randomness():
@@ -2915,3 +3105,140 @@ def test_model_config_styles_are_present():
     assert ".model-config-focus-layout" in STYLE_CSS
     assert ".model-config-summary-card" in STYLE_CSS
     assert ".model-config-collapsible" in STYLE_CSS
+
+
+def test_provider_endpoint_i18n_keys_cover_the_complete_locale_matrix():
+    """Every endpoint label/status used by this UI is defined in every locale."""
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    locale_pattern = re.compile(
+        r"^  (?:([A-Za-z_][A-Za-z0-9_]*)|'([^']+)'):\s*\{", re.MULTILINE
+    )
+    matches = list(locale_pattern.finditer(i18n))
+    locale_blocks = {
+        (match.group(1) or match.group(2)): i18n[
+            match.end() : (matches[index + 1].start() if index + 1 < len(matches) else len(i18n))
+        ]
+        for index, match in enumerate(matches)
+    }
+    expected_locales = {
+        "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant",
+        "pt", "ko", "fr", "tr",
+    }
+    endpoint_keys = {
+        "provider_endpoint_label",
+        "provider_endpoint_source_label",
+        "provider_endpoint_status_label",
+        "provider_endpoint_source_system",
+        "provider_endpoint_source_managed",
+        "provider_endpoint_source_custom",
+        "provider_endpoint_source_runtime",
+        "provider_endpoint_source_unknown",
+        "provider_endpoint_status_resolved",
+        "provider_endpoint_status_runtime_managed",
+        "provider_endpoint_status_runtime_unresolved",
+        "provider_endpoint_status_missing",
+        "provider_endpoint_status_invalid_saved_value",
+        "provider_endpoint_status_unknown",
+        "provider_endpoint_override_ignored",
+        "provider_endpoint_mutation_cleaned",
+        "provider_endpoint_saved_label",
+        "provider_endpoint_admin_readonly",
+        "provider_endpoint_base_url_required",
+    }
+    assert set(locale_blocks) == expected_locales
+    for locale, block in locale_blocks.items():
+        keys = re.findall(r"^\s{4}(provider_endpoint_[a-z0-9_]+):", block, re.MULTILINE)
+        assert len(keys) == len(set(keys)), f"duplicate endpoint keys in {locale}"
+        assert set(keys) == endpoint_keys, f"endpoint key parity mismatch in {locale}"
+
+
+def test_provider_cards_project_safe_endpoints_before_auth_branches(tmp_path):
+    """Provider endpoint blocks are stable, safe, localizable, and keyboard-safe."""
+    assert NODE, "node is required for provider card behavior checks"
+    driver = tmp_path / "provider-card-endpoint-contract.js"
+    driver.write_text(
+        r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){
+ const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);
+ if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+function element(tag){
+ const listeners={};
+ const classes=new Set();
+ const el={tagName:String(tag).toUpperCase(),id:'',type:'',value:'',textContent:'',innerHTML:'',children:[],attrs:{},dataset:{},style:{},disabled:false,hidden:false,
+  appendChild(child){this.children.push(child);return child;},
+  setAttribute(k,v){this.attrs[k]=String(v);},removeAttribute(k){delete this.attrs[k];},
+  addEventListener(k,fn){listeners[k]=fn;},dispatch(k){if(listeners[k])listeners[k]({target:this});},
+  closest(){return null;},
+  listenerNames(){return Object.keys(listeners);},focus(){this.focused=true;},
+  classList:{add(v){classes.add(v);},remove(v){classes.delete(v);},toggle(v){if(classes.has(v))classes.delete(v);else classes.add(v);return classes.has(v);},contains(v){return classes.has(v);}},
+  querySelector(){return null;},querySelectorAll(){return [];} };
+ el.className='';
+ Object.defineProperty(el,'className',{get(){return Array.from(classes).join(' ');},set(v){String(v||'').split(/\\s+/).filter(Boolean).forEach(item=>classes.add(item));}});
+ return el;
+}
+const document={createElement:tag=>element(tag)};
+const esc=value=>String(value==null?'':value);
+const t=key=>'i18n:'+key;
+const setTimeout=fn=>fn();
+const _providerCardEls=new Map();
+const _saveProviderKey=()=>{};
+const _removeProviderKey=()=>{};
+const _refreshProviderModels=()=>{};
+eval(extractFunc('_buildProviderCard'));
+eval(extractFunc('_providerEndpointText'));
+eval(extractFunc('_appendProviderEndpointBlock'));
+function walk(node,predicate){if(predicate(node))return node;for(const child of node.children||[]){const found=walk(child,predicate);if(found)return found;}return null;}
+function inspect(provider){
+ const card=_buildProviderCard(provider);
+ const header=card.children[0];
+ const body=card.children[1];
+     const endpoint=walk(body,node=>node.className.includes('provider-card-endpoint'));
+     const url=endpoint&&walk(endpoint,node=>node.className.includes('provider-card-endpoint-value'));
+ const sourceNode=endpoint&&walk(endpoint,node=>node.className.includes('provider-card-endpoint-source'));
+ const statusNode=endpoint&&walk(endpoint,node=>node.className.includes('provider-card-endpoint-status'));
+     const input=walk(body,node=>node.tagName==='INPUT');
+     const before={bodyId:body.id,expanded:header.attrs['aria-expanded'],controls:header.attrs['aria-controls'],listeners:header.listenerNames(),url:url&&url.textContent,endpointInnerHTML:url&&url.innerHTML,source:sourceNode&&sourceNode.textContent,status:statusNode&&statusNode.textContent,inputFocused:!!(input&&input.focused)};
+ let clickError='';try{header.dispatch('click');}catch(error){clickError=String(error&&error.message||error);}
+     const after={expanded:header.attrs['aria-expanded'],bodyHidden:body.hidden,clickError,inputFocused:!!(input&&input.focused)};
+ return {before,after};
+}
+const fixed=inspect({id:'zai-cn',display_name:'Z.AI CN',configurable:true,has_key:false,models:[],endpoint:{display_url:'https://open.bigmodel.cn/api/paas/v4',source:'system',status:'resolved',policy:'fixed',editable:false,override_ignored:true}});
+const oauth=inspect({id:'openai-codex',display_name:'Codex',configurable:false,is_oauth:true,has_key:false,models:[],endpoint:{display_url:null,source:'runtime',status:'runtime_managed',policy:'runtime_managed',editable:false,override_ignored:false}});
+    const named=inspect({id:'custom:research',display_name:'Research',configurable:false,is_custom:true,has_key:false,models:[],endpoint:{display_url:'https://admin.example/v1\n<img>secret</img>',source:'managed',status:'missing',policy:'configurable',editable:false,override_ignored:false}});
+    const unresolved=inspect({id:'nous-portal',display_name:'Nous',configurable:false,has_key:false,models:[],endpoint:{display_url:null,source:'runtime',status:'runtime_unresolved',policy:'runtime_managed',editable:false,override_ignored:false}});
+    process.stdout.write(JSON.stringify({fixed,oauth,named,unresolved}));
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    for card in payload.values():
+        assert card["before"]["expanded"] == "false"
+        assert card["before"]["controls"] == card["before"]["bodyId"]
+        assert card["before"]["listeners"] == ["click"]
+        assert card["after"]["expanded"] == "true"
+        assert card["after"]["bodyHidden"] is False
+        assert card["after"]["clickError"] == ""
+    assert payload["fixed"]["before"]["url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert payload["fixed"]["before"]["source"] == "i18n:provider_endpoint_source_system"
+    assert payload["fixed"]["before"]["status"] == "i18n:provider_endpoint_status_resolved"
+    assert payload["oauth"]["before"]["status"] == "i18n:provider_endpoint_status_runtime_managed"
+    assert payload["named"]["before"]["status"] == "i18n:provider_endpoint_status_missing"
+    assert payload["named"]["before"]["endpointInnerHTML"] == ""
+    assert payload["named"]["before"]["url"].startswith("https://admin.example/v1")
+    assert payload["unresolved"]["before"]["status"] == "i18n:provider_endpoint_status_runtime_unresolved"
+    assert payload["unresolved"]["before"]["url"] == "i18n:provider_endpoint_status_runtime_unresolved"
+    assert payload["named"]["before"]["inputFocused"] is False
+    assert payload["named"]["after"]["inputFocused"] is False
+    assert payload["unresolved"]["after"]["inputFocused"] is False

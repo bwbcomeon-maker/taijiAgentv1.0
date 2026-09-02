@@ -1513,6 +1513,26 @@ def _write_profile_runtime_config(
     )
 
 
+def _normalize_cloned_profile_endpoint(profile_dir: Path) -> None:
+    """Remove fixed-provider endpoint residue from a cloned target only."""
+    config_path = Path(profile_dir) / "config.yaml"
+    if not config_path.exists():
+        return
+    from agent.provider_credentials import mutate_config_env_strict
+    from hermes_cli.providers import normalize_model_endpoint_fields
+
+    def update_config(config_data: dict) -> None:
+        model_section = config_data.get("model")
+        if isinstance(model_section, dict):
+            normalize_model_endpoint_fields(model_section)
+
+    mutate_config_env_strict(
+        update_config,
+        {},
+        config_path=config_path,
+    )
+
+
 def _mint_profile_incarnation(profile_dir: Path) -> str:
     """Bind a newly created profile directory to a non-reusable identity."""
     from agent.image_gen_verification import (
@@ -1586,7 +1606,21 @@ def create_profile_api(name: str, clone_from: str = None,
             break
 
     profile_path.mkdir(parents=True, exist_ok=True)
-    _mint_profile_incarnation(profile_path)
+    try:
+        if clone_from is not None:
+            _normalize_cloned_profile_endpoint(profile_path)
+        _mint_profile_incarnation(profile_path)
+    except Exception:
+        if clone_from is not None:
+            # The clone target is newly created in this request.  On a
+            # normalization/incarnation failure, remove both credential
+            # leaves so config and .env cannot be left as a partial clone.
+            for filename in ("config.yaml", ".env"):
+                try:
+                    (profile_path / filename).unlink()
+                except FileNotFoundError:
+                    pass
+        raise
 
     # Seed bundled skills for non-cloned profiles (#2305).
     # Cloned profiles should preserve the clone-source behaviour and must not

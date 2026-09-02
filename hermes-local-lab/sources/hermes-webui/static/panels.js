@@ -7715,6 +7715,49 @@ function _buildProviderQuotaCard(status){
   return card;
 }
 
+function _providerEndpointText(kind,value){
+ const normalized=String(value||'').trim();
+ const key=kind==='source'?'provider_endpoint_source_':'provider_endpoint_status_';
+ return t(key+(normalized||'unknown'))||normalized||'—';
+}
+
+function _appendProviderEndpointBlock(body,endpoint){
+ const data=endpoint&&typeof endpoint==='object'?endpoint:{};
+ const block=document.createElement('div');
+ block.className='provider-card-endpoint';
+ const label=document.createElement('div');
+ label.className='provider-card-endpoint-label';
+ label.id='provider-endpoint-label-'+String(body.id||'endpoint');
+ label.textContent=t('provider_endpoint_label');
+ const value=document.createElement('output');
+ value.className='provider-card-endpoint-value';
+ value.setAttribute('aria-labelledby',label.id);
+ value.textContent=String(data.display_url||'').trim()||_providerEndpointText('status',data.status||'missing');
+ value.title=value.textContent;
+ const meta=document.createElement('div');
+ meta.className='provider-card-endpoint-meta';
+ const source=document.createElement('span');
+ source.className='provider-card-endpoint-source';
+ source.textContent=_providerEndpointText('source',data.source||'managed');
+ const status=document.createElement('span');
+ status.className='provider-card-endpoint-status';
+ status.textContent=_providerEndpointText('status',data.status||'missing');
+ meta.appendChild(source);
+ meta.appendChild(status);
+ block.appendChild(label);
+ block.appendChild(value);
+ block.appendChild(meta);
+ if(data.override_ignored===true){
+  const notice=document.createElement('p');
+  notice.className='provider-card-endpoint-notice';
+  notice.setAttribute('role','status');
+  notice.textContent=t('provider_endpoint_override_ignored');
+  block.appendChild(notice);
+ }
+ body.appendChild(block);
+ return block;
+}
+
 function _buildProviderCard(p){
   const card=document.createElement('div');
   card.className='provider-card';
@@ -7743,6 +7786,10 @@ function _buildProviderCard(p){
   const header=document.createElement('button');
   header.type='button';
   header.className='provider-card-header';
+  const cardSlug=String(p.id||'provider').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'')||'provider';
+  const bodyId='provider-card-body-'+cardSlug;
+  header.setAttribute('aria-expanded','false');
+  header.setAttribute('aria-controls',bodyId);
   header.innerHTML=`
     <div class="provider-card-info">
       <div class="provider-card-name">${esc(p.display_name)}</div>
@@ -7755,6 +7802,15 @@ function _buildProviderCard(p){
 
   const body=document.createElement('div');
   body.className='provider-card-body';
+  body.id=bodyId;
+  _appendProviderEndpointBlock(body,p.endpoint);
+
+  let input=null;
+  const toggleCard=()=>{
+    const open=card.classList.toggle('open');
+    header.setAttribute('aria-expanded',open?'true':'false');
+    if(open&&input) setTimeout(()=>{if(input&&typeof input.focus==='function')input.focus();},0);
+  };
 
   if(isOauth){
     const hint=document.createElement('div');
@@ -7772,11 +7828,10 @@ function _buildProviderCard(p){
     }
     body.appendChild(hint);
     card.appendChild(body);
-    header.addEventListener('click',()=>card.classList.toggle('open'));
+    header.addEventListener('click',toggleCard);
     return card;
   }
 
-  let input=null;
   let saveBtn=null;
   if(p.configurable){
     const field=document.createElement('div');
@@ -7889,8 +7944,7 @@ function _buildProviderCard(p){
   header.addEventListener('click',e=>{
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;
-    card.classList.toggle('open');
-    if(card.classList.contains('open')) setTimeout(()=>input.focus(),0);
+    toggleCard();
   });
   return card;
 }
@@ -9684,6 +9738,7 @@ function _renderModelConfigFocusSummary(data){
  _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
  _setModelConfigText('modelConfigModelSummary',mainModel);
  _setModelConfigText('modelConfigKeySummary',mainKeyLabel);
+ if(typeof _renderMainModelEndpoint==='function') _renderMainModelEndpoint(main,data);
  _setModelConfigStatusBadge('modelConfigMainEffective',stateMeta.effective,stateMeta.tone);
  _setModelConfigStatusBadge('modelConfigMainStatusBadge',stateMeta.badge,stateMeta.tone);
  _renderVisionConfigSummary(data);
@@ -9706,6 +9761,19 @@ function _renderModelConfigFocusSummary(data){
  const pasteAction=$('modelConfigImagePasteAction');
  if(pasteAction) pasteAction.style.display=(managedAuth||policyBlocked||namedCredential)?'none':'';
  _renderImageGenConfigSummary(data);
+}
+
+function _renderMainModelEndpoint(main,data){
+ const endpoint=main&&main.endpoint&&typeof main.endpoint==='object'?main.endpoint:{};
+ const display=String(endpoint.display_url||'').trim()||_providerEndpointText('status',endpoint.status||'missing');
+ _setModelConfigText('modelConfigMainEndpointValue',display);
+ _setModelConfigText('modelConfigMainEndpointSource',_providerEndpointText('source',endpoint.source||'managed'));
+ _setModelConfigText('modelConfigMainEndpointState',_providerEndpointText('status',endpoint.status||'missing'));
+ _setModelConfigText('modelConfigMainEndpointStatus',_providerEndpointText('status',endpoint.status||'missing'));
+ let notice='';
+ if(endpoint.override_ignored===true) notice=t('provider_endpoint_override_ignored');
+ if(data&&data.endpoint_mutation&&data.endpoint_mutation.code==='fixed_override_cleaned') notice=t('provider_endpoint_mutation_cleaned');
+ _setModelConfigText('modelConfigMainEndpointNotice',notice);
 }
 
 function toggleModelConfigSection(sectionId,forceOpen){
@@ -10399,7 +10467,9 @@ function _syncMainModelConfigControls(){
  const providerId=providerSel.value||'';
  const provider=_modelConfigProviderById(providerId);
  const isCustom=providerId==='custom';
+ const isNamedCustom=providerId.startsWith('custom:');
  const isOauth=!!(provider&&provider.is_oauth);
+ const authReadOnly=!!(provider&&provider.configurable===false)||isOauth||isNamedCustom;
  const models=(provider&&Array.isArray(provider.models))?provider.models:[];
  const previousProvider=String(providerSel.dataset.lastProvider||'');
  if(previousProvider&&previousProvider!==providerId){
@@ -10410,12 +10480,21 @@ function _syncMainModelConfigControls(){
   if(keyInput) keyInput.value='';
  }
  providerSel.dataset.lastProvider=providerId;
+ if(typeof _renderMainModelEditEndpoint==='function') _renderMainModelEditEndpoint(providerId,provider);
  if(baseRow) baseRow.style.display=isCustom?'':'none';
- if(keyRow) keyRow.style.display=isOauth?'none':'';
+ if(keyRow) keyRow.style.display=authReadOnly?'none':'';
+ if(keyInput){
+  keyInput.disabled=authReadOnly;
+  if(authReadOnly) keyInput.placeholder=String(provider&&provider.auth_message||'当前认证方式无需或不支持在此编辑。');
+ }
+ const pasteBtn=keyRow?keyRow.querySelector('.model-config-paste-btn'):null;
+ if(pasteBtn) pasteBtn.disabled=authReadOnly;
  _setDatalistOptions('modelConfigModelOptions',models);
  if(hint){
   if(isOauth){
    hint.textContent='此提供商使用 OAuth 认证。请完成管理员认证后回到这里刷新状态。';
+  }else if(isNamedCustom){
+   hint.textContent=t('provider_endpoint_admin_readonly');
   }else if(isCustom){
    hint.textContent='自定义端点密钥会保存到本机凭据区，管理员配置仅保存引用关系。';
   }else if(providerId==='zai-cn'){
@@ -10424,6 +10503,25 @@ function _syncMainModelConfigControls(){
    hint.textContent='留空保留现有密钥；填写后会保存到本机凭据区。';
   }
  }
+ const updateKey=$('modelConfigMainUpdateKey');
+ if(updateKey) updateKey.hidden=authReadOnly;
+}
+
+function _renderMainModelEditEndpoint(providerId,provider){
+ const preview=$('modelConfigEditEndpointPreview');
+ const output=$('modelConfigEditEndpointValue');
+ if(!output) return;
+ const isCustom=providerId==='custom';
+ if(preview){
+  preview.hidden=isCustom;
+  preview.style.display=isCustom?'none':'';
+ }
+ const endpoint=provider&&provider.endpoint&&typeof provider.endpoint==='object'?provider.endpoint:{};
+ const value=isCustom
+  ?String((($('modelConfigBaseUrl')||{}).value)||'').trim()
+  :String(endpoint.display_url||'').trim();
+ output.textContent=value||_providerEndpointText('status',endpoint.status||'missing');
+ output.title=output.textContent;
 }
 
 function _syncVisionConfigControls(){
@@ -10556,6 +10654,10 @@ function _renderModelConfigPanel(data){
  if(modelInput) modelInput.value=main.model||'';
  const baseInput=$('modelConfigBaseUrl');
  if(baseInput) baseInput.value=main.base_url||'';
+ if(baseInput&&!baseInput.dataset.endpointPreviewBound){
+  baseInput.dataset.endpointPreviewBound='1';
+  baseInput.addEventListener('input',()=>_renderMainModelEditEndpoint('custom',_modelConfigProviderById('custom')));
+ }
  const keyInput=$('modelConfigApiKey');
  if(keyInput) keyInput.value='';
  _syncMainModelConfigControls();
@@ -11110,9 +11212,10 @@ function _bindTaijiLicenseControls(){
 function _modelConfigMainHasUnsavedChanges(){
  if(!_modelConfigData) return false;
  const saved=_modelConfigData.main||{};
- return String((($('modelConfigProvider')||{}).value)||'').trim()!==String(saved.provider||'').trim()
+ const selectedProvider=String((($('modelConfigProvider')||{}).value)||'').trim();
+ return selectedProvider!==String(saved.provider||'').trim()
   || String((($('modelConfigModel')||{}).value)||'').trim()!==String(saved.model||'').trim()
-  || String((($('modelConfigBaseUrl')||{}).value)||'').trim().replace(/\/$/,'')!==String(saved.base_url||'').trim().replace(/\/$/,'')
+  || (selectedProvider==='custom'&&String((($('modelConfigBaseUrl')||{}).value)||'').trim().replace(/\/$/,'')!==String(saved.base_url||'').trim().replace(/\/$/,''))
   || !!String((($('modelConfigApiKey')||{}).value)||'').trim();
 }
 
@@ -11278,6 +11381,8 @@ function _applyAuthoritativeMainModelConfig(data){
  if(!_modelConfigData) _modelConfigData={};
  if(data.profile) _modelConfigData.profile=data.profile;
  _modelConfigData.main_request_id=String(data.main_request_id||'');
+ if(Object.prototype.hasOwnProperty.call(data,'endpoint_mutation')) _modelConfigData.endpoint_mutation=data.endpoint_mutation;
+ else delete _modelConfigData.endpoint_mutation;
  const main=Object.assign({},data.main,{key_status:Object.assign({},data.main.key_status||{})});
  main.runtime_refresh_pending=!!(data.runtime_state==='refresh_pending'||data.refresh_pending===true||main.runtime_refresh_pending===true);
  _modelConfigData.main=main;
@@ -11301,9 +11406,11 @@ function _mainModelConfigMatchesExpected(main,expected){
  const model=String(current.model||'').trim();
  const targetModel=String(target.model||'').trim();
  if(provider!==targetProvider||model!==targetModel||!(current.key_status&&current.key_status.configured)) return false;
- const base=String(current.base_url||'').trim().replace(/\/+$/,'');
- const targetBase=String(target.base_url||'').trim().replace(/\/+$/,'');
- if(base!==targetBase) return false;
+ if(targetProvider==='custom'){
+  const base=String(current.base_url||'').trim().replace(/\/+$/,'');
+  const targetBase=String(target.base_url||'').trim().replace(/\/+$/,'');
+  if(base!==targetBase) return false;
+ }
  return true;
 }
 
@@ -11317,9 +11424,11 @@ function _rememberPendingMainModelConfigReconciliation(expected){
  _pendingMainModelConfigReconciliation={
   provider:String(expected&&expected.provider||''),
   model:String(expected&&expected.model||''),
-  base_url:String(expected&&expected.base_url||''),
   request_id:String(expected&&expected.request_id||''),
  };
+ if(Object.prototype.hasOwnProperty.call(expected||{},'base_url')){
+  _pendingMainModelConfigReconciliation.base_url=String(expected.base_url||'');
+ }
 }
 
 function _clearPendingMainModelConfigReconciliation(expected){
@@ -11477,13 +11586,22 @@ async function saveMainModelConfig(){
  const model=(($('modelConfigModel')||{}).value||'').trim();
  const baseUrl=(($('modelConfigBaseUrl')||{}).value||'').trim();
  const apiKey=(($('modelConfigApiKey')||{}).value||'').trim();
- const expected={provider,model,base_url:baseUrl,request_id:''};
+ const expected={provider,model,request_id:''};
+ if(provider==='custom') expected.base_url=baseUrl;
+ if(typeof _setFieldError==='function') _setFieldError('modelConfigBaseUrlError','',['modelConfigBaseUrl']);
+ if(provider==='custom'&&!baseUrl){
+  if(typeof _setFieldError==='function') _setFieldError('modelConfigBaseUrlError',t('provider_endpoint_base_url_required'),['modelConfigBaseUrl']);
+  const baseInput=$('modelConfigBaseUrl');
+  if(baseInput) baseInput.focus();
+  return;
+ }
  if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
  _setMainModelConfigSaveState('saving');
  try{
   expected.request_id=_newMainModelConfigRequestId();
   _rememberPendingMainModelConfigReconciliation(expected);
-  const payload={provider,model,base_url:baseUrl,request_id:expected.request_id};
+  const payload={provider,model,request_id:expected.request_id};
+  if(provider==='custom') payload.base_url=baseUrl;
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload),timeoutToast:false,retryNetworkErrors:false});
   const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'主模型配置',statusId:'modelConfigDraftStatus'});
@@ -11510,8 +11628,17 @@ async function saveMainModelConfig(){
    _clearModelConfigSecrets('main');
    _setMainModelConfigSaveState('reconciling');
    await _reconcileMainModelConfigSave(expected);
-  }else{
-   _clearPendingMainModelConfigReconciliation(expected);
+ }else{
+  _clearPendingMainModelConfigReconciliation(expected);
+   const invalidBase=e&&e.payload&&e.payload.error_code==='invalid_base_url';
+   if(invalidBase){
+    const message=String(e.payload.error||t('provider_endpoint_base_url_required'));
+    if(typeof _setFieldError==='function') _setFieldError('modelConfigBaseUrlError',message,['modelConfigBaseUrl']);
+    const baseInput=$('modelConfigBaseUrl');
+    if(baseInput) baseInput.focus();
+    _setMainModelConfigSaveState('failed',message);
+    return;
+   }
    const message='主模型配置保存失败：'+(e.message||e);
    _setMainModelConfigSaveState('failed',message);
    if(typeof showToast==='function') showToast(message,5000,'error');

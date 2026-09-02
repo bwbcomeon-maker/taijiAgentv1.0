@@ -15650,10 +15650,20 @@ def handle_post(handler, parsed) -> bool:
             return _configuration_mutation_error_response(handler, e)
 
     if parsed.path == "/api/model-config/main":
-        from api.model_config import set_main_model_config
+        from api.model_config import InvalidBaseUrlError, set_main_model_config
 
         try:
             return j(handler, set_main_model_config(body))
+        except InvalidBaseUrlError as exc:
+            return j(
+                handler,
+                {
+                    "error": str(exc),
+                    "error_code": exc.code,
+                    "field": exc.field,
+                },
+                status=400,
+            )
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:

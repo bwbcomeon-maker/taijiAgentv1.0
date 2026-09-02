@@ -133,6 +133,78 @@ class TestGetProviders:
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
 
+    def test_provider_rows_project_active_endpoint_without_cross_provider_leak(
+        self, monkeypatch, tmp_path
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        cfg = {
+            "model": {
+                "provider": "zai-cn",
+                "default": "glm-5",
+                "base_url": "https://api.deepseek.com/v1",
+            },
+            "providers": {"deepseek": {"base_url": "https://api.deepseek.com/v1"}},
+        }
+        monkeypatch.setattr("api.providers.get_config", lambda: cfg)
+        monkeypatch.setattr("api.providers._provider_has_key", lambda _pid: False)
+
+        from api.providers import get_providers
+
+        result = get_providers()
+        rows = {row["id"]: row for row in result["providers"]}
+        assert rows["zai-cn"]["endpoint"] == {
+            "display_url": "https://open.bigmodel.cn/api/paas/v4",
+            "policy": "fixed",
+            "source": "system",
+            "editable": False,
+            "status": "resolved",
+            "override_ignored": True,
+        }
+        assert rows["deepseek"]["endpoint"] == {
+            "display_url": "https://api.deepseek.com/v1",
+            "policy": "configurable",
+            "source": "managed",
+            "editable": False,
+            "status": "resolved",
+            "override_ignored": False,
+        }
+
+    def test_provider_endpoint_projection_states_and_custom_visibility(
+        self, monkeypatch, tmp_path
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        cfg = {
+            "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+            "custom_providers": [
+                {
+                    "name": "Research Gateway",
+                    "base_url": "https://u:p@gateway.example/v1?token=secret#frag",
+                    "model": "research-model",
+                }
+            ],
+        }
+        monkeypatch.setattr("api.providers.get_config", lambda: cfg)
+        monkeypatch.setattr("api.providers._provider_has_key", lambda _pid: False)
+
+        from api.providers import get_providers
+
+        rows = {row["id"]: row for row in get_providers()["providers"]}
+        assert rows["openai-codex"]["endpoint"] == {
+            "display_url": None,
+            "policy": "runtime_managed",
+            "source": "runtime",
+            "editable": False,
+            "status": "runtime_managed",
+            "override_ignored": False,
+        }
+        named = rows["custom:research-gateway"]["endpoint"]
+        assert named["display_url"] == "https://gateway.example/v1"
+        assert named["editable"] is False
+        assert named["status"] == "invalid_saved_value"
+        assert "custom" not in rows
+
     def test_oauth_providers_not_configurable(self, monkeypatch, tmp_path):
         """OAuth providers (copilot, nous, openai-codex) should not be configurable."""
         _install_fake_hermes_cli(monkeypatch)

@@ -1770,7 +1770,30 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def resolve_model_provider(model_id: str) -> tuple:
+def _resolve_public_endpoint_candidate(
+    provider_id: object,
+    *,
+    configured_url: object = "",
+    runtime_url: object = "",
+    candidate_source: str = "managed",
+    runtime_selector_unresolved: bool = False,
+) -> dict[str, object]:
+    """Describe an already-loaded endpoint candidate for public projection.
+
+    This sibling view intentionally performs no config, credential, catalog,
+    network, or runtime probing.  Callers may pass its result to the leaf
+    ``api.provider_endpoints.public_endpoint`` helper.
+    """
+    return {
+        "provider": str(provider_id or "").strip(),
+        "configured_url": str(configured_url or "").strip().rstrip("/"),
+        "runtime_url": str(runtime_url or "").strip().rstrip("/"),
+        "candidate_source": str(candidate_source or "managed").strip().lower(),
+        "runtime_selector_unresolved": bool(runtime_selector_unresolved),
+    }
+
+
+def _resolve_model_provider_candidate(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -1993,6 +2016,26 @@ def resolve_model_provider(model_id: str) -> tuple:
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
+
+
+def resolve_model_provider(model_id: str) -> tuple:
+    """Resolve model/provider and arbitrate its endpoint at the WebUI boundary.
+
+    The historical three-value return contract is intentionally preserved;
+    endpoint policy is applied only to the returned candidate URL.
+    """
+    resolved_model, provider, candidate_url = _resolve_model_provider_candidate(model_id)
+    provider_id = str(provider or "").strip()
+    if not provider_id:
+        return resolved_model, provider, candidate_url
+    from hermes_cli.providers import resolve_provider_endpoint
+
+    resolution = resolve_provider_endpoint(
+        provider_id,
+        configured_url=str(candidate_url or ""),
+        candidate_override_present=bool(candidate_url),
+    )
+    return resolved_model, provider, resolution.effective_url or None
 
 
 def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
@@ -2473,6 +2516,8 @@ def set_reasoning_effort(effort: str) -> dict:
 @_active_config_transaction_locked
 def set_hermes_default_model(model_id: str) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
+    from hermes_cli.providers import normalize_model_endpoint_fields
+
     selected_model = str(model_id or "").strip()
     if not selected_model:
         raise ValueError("model is required")
@@ -2522,6 +2567,9 @@ def set_hermes_default_model(model_id: str) -> dict:
             elif not persisted_provider.startswith("custom:"):
                 model_cfg.pop("base_url", None)
 
+        # Keep this legacy WebUI writer on the same strict fixed-provider
+        # boundary as the newer model-config transaction.
+        normalize_model_endpoint_fields(model_cfg)
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.

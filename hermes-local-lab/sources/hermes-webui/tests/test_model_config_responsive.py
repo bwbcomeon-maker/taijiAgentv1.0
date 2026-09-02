@@ -59,3 +59,17 @@ def test_model_config_uses_its_real_content_width_for_compact_layout():
     assert "#settingsPaneModels .model-config-license-facts" in compact
     assert "grid-template-columns:1fr" in compact_no_space
     assert "grid-template-columns:repeat(2,minmax(0,1fr))" in compact_no_space
+
+
+def test_endpoint_projection_values_are_safe_and_wrap_at_task9_viewports():
+    assert ".model-config-endpoint-value" in STYLE_CSS
+    assert ".provider-card-endpoint-value" in STYLE_CSS
+    endpoint = _balanced_block(STYLE_CSS, r"\.model-config-endpoint-value\s*")
+    provider = _balanced_block(STYLE_CSS, r"\.provider-card-endpoint-value\s*")
+    for block in (endpoint, provider):
+        compact = block.replace(" ", "")
+        assert "overflow-wrap:anywhere" in compact
+        assert "word-break:break-word" in compact
+        assert "user-select:text" in compact
+    assert "flex-wrap:wrap" in STYLE_CSS
+    # Real 1280/768/390 browser layout and screenshots are deliberately handed to Task9.

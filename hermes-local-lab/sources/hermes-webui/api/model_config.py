@@ -92,7 +92,9 @@ from api.config import (
     invalidate_models_cache,
     reload_config,
     STATE_DIR,
+    _resolve_public_endpoint_candidate,
 )
+from api.provider_endpoints import public_endpoint
 from api.providers import (
     _OAUTH_PROVIDERS,
     _PROVIDER_DISPLAY,
@@ -122,6 +124,13 @@ class ImageCapabilityCredentialError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+class InvalidBaseUrlError(ValueError):
+    """A stable field error for an unsafe generic Custom endpoint."""
+
+    code = "invalid_base_url"
+    field = "base_url"
 
 
 @dataclass(frozen=True)
@@ -6771,20 +6780,44 @@ def _public_main_model_verification(verification: dict[str, Any]) -> dict[str, A
 
 def _main_model_material(config_data: dict[str, Any]) -> dict[str, Any]:
     from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.providers import resolve_provider_endpoint
 
     model_cfg = _safe_model_cfg(config_data)
     provider = str(model_cfg.get("provider") or "").strip().lower()
     model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+    raw_model_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
     registry_id = "openai-api" if provider == "openai" else provider
     registry = PROVIDER_REGISTRY.get(registry_id)
-    base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-    if not base_url and registry is not None:
-        base_url = str(registry.inference_base_url or "").strip().rstrip("/")
-    if not base_url:
-        base_url = {
+    configured_base_url = raw_model_url
+    if not configured_base_url and provider.startswith("custom:"):
+        from api.config import _custom_provider_slug_from_name
+
+        custom_entries = config_data.get("custom_providers", [])
+        if isinstance(custom_entries, list):
+            for entry in custom_entries:
+                if not isinstance(entry, dict) or not entry.get("name"):
+                    continue
+                if (
+                    "custom:" + _custom_provider_slug_from_name(str(entry["name"]))
+                    == provider
+                ):
+                    configured_base_url = str(entry.get("base_url") or "").strip().rstrip("/")
+                    break
+    if not configured_base_url and registry is not None:
+        configured_base_url = str(registry.inference_base_url or "").strip().rstrip("/")
+    if not configured_base_url:
+        configured_base_url = {
             "ollama": "http://127.0.0.1:11434",
             "lmstudio": "http://127.0.0.1:1234/v1",
         }.get(provider, "")
+    endpoint = resolve_provider_endpoint(
+        provider,
+        configured_url=configured_base_url,
+        candidate_override_present=bool(
+            str(model_cfg.get("base_url") or "").strip()
+        ),
+    )
+    base_url = endpoint.effective_url
     api_key = ""
     config_path = _get_config_path()
     try:
@@ -6820,6 +6853,29 @@ def _main_model_material(config_data: dict[str, Any]) -> dict[str, Any]:
                     )
     except (OSError, ValueError, RuntimeError):
         api_key = ""
+    if provider == "zai" and not raw_model_url:
+        # Reuse the Agent's read-only status resolver.  It checks the active
+        # profile's explicit URL and key-bound approved cache, and never probes
+        # or writes during a GET/material construction.
+        try:
+            from hermes_cli.auth import _resolve_zai_status_endpoint
+            from hermes_cli.config import get_env_value
+
+            env_override = str(get_env_value("GLM_BASE_URL") or "").strip()
+            status_url, _status_source, endpoint_status = _resolve_zai_status_endpoint(
+                api_key,
+                str(getattr(PROVIDER_REGISTRY.get("zai"), "inference_base_url", "") or ""),
+                env_override,
+            )
+            if endpoint_status == "resolved":
+                base_url = str(status_url or "").strip().rstrip("/")
+            else:
+                base_url = ""
+        except (OSError, ValueError, RuntimeError, ImportError):
+            # An unavailable local cache reader must fail closed for a keyed
+            # runtime selector rather than displaying the registry default.
+            if api_key:
+                base_url = ""
     return {
         "profile": _active_profile_name(),
         "provider": provider,
@@ -6830,6 +6886,80 @@ def _main_model_material(config_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _main_model_endpoint(config_data: dict[str, Any], material: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Project the active main-model endpoint without leaking saved secrets."""
+    model_cfg = _safe_model_cfg(config_data)
+    provider = str(model_cfg.get("provider") or "").strip().lower()
+    material = material if isinstance(material, dict) else _main_model_material(config_data)
+    raw_url = str(model_cfg.get("base_url") or "").strip()
+    has_key = bool(str(material.get("api_key") or "").strip())
+    # Z.AI's next regional endpoint is selected at runtime.  A bare registry
+    # default is not an actual route while a key exists and no explicit/cache
+    # endpoint is available.
+    unresolved = provider == "zai" and has_key and not raw_url
+    runtime_url = ""
+    candidate_source = "managed"
+    if provider == "zai" and not raw_url and has_key:
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY, _resolve_zai_status_endpoint
+            from hermes_cli.config import get_env_value
+
+            pconfig = PROVIDER_REGISTRY.get("zai")
+            env_override = str(get_env_value("GLM_BASE_URL") or "").strip()
+            cached_url, endpoint_source, endpoint_status = _resolve_zai_status_endpoint(
+                str(material.get("api_key") or ""),
+                str(getattr(pconfig, "inference_base_url", "") or ""),
+                env_override,
+            )
+            if endpoint_status == "resolved":
+                unresolved = False
+                if endpoint_source == "runtime":
+                    runtime_url = cached_url
+                    candidate_source = "runtime"
+                else:
+                    raw_url = cached_url
+        except (OSError, ValueError, RuntimeError, ImportError):
+            pass
+    candidate = _resolve_public_endpoint_candidate(
+        provider,
+        configured_url=raw_url or str(material.get("base_url") or ""),
+        runtime_url=runtime_url,
+        candidate_source=candidate_source,
+        runtime_selector_unresolved=unresolved,
+    )
+    return public_endpoint(
+        candidate["provider"],
+        configured_url=candidate["configured_url"],
+        runtime_url=candidate["runtime_url"],
+        candidate_source=candidate["candidate_source"],
+        runtime_selector_unresolved=bool(candidate["runtime_selector_unresolved"]),
+        stored_main_override_present=bool(raw_url),
+    )
+
+
+def _validate_custom_base_url(value: object) -> str:
+    """Validate and normalize a generic Custom endpoint before persistence."""
+    from urllib.parse import urlsplit
+
+    raw = str(value or "").strip()
+    if not raw or any(char in raw for char in ("\x00", "\r", "\n")):
+        raise InvalidBaseUrlError("base_url must be a safe HTTP(S) URL")
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise InvalidBaseUrlError("base_url must be a safe HTTP(S) URL") from None
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise InvalidBaseUrlError("base_url must be a safe HTTP(S) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise InvalidBaseUrlError("base_url must be a safe HTTP(S) URL")
+    # Accessing parsed.port above validates malformed ports while retaining the
+    # original path and explicit port for the configured endpoint.
+    del port
+    return raw.rstrip("/")
+
+
 def check_main_model_connection() -> dict[str, Any]:
     from api.main_model_verification import check_connection
 
@@ -6837,6 +6967,30 @@ def check_main_model_connection() -> dict[str, Any]:
     with credential_transaction(config_path):
         config_data = load_credential_config(config_path)
         material = _main_model_material(config_data)
+    if (
+        str(material.get("provider") or "").strip().lower() == "zai"
+        and str(material.get("api_key") or "").strip()
+        and not str(material.get("base_url") or "").strip()
+    ):
+        # GET/status uses the read-only status resolver above.  An explicit
+        # connection check may use the existing full resolver, which probes
+        # and updates the Agent's approved key-bound cache.
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY, _resolve_zai_runtime_endpoint
+            from hermes_cli.config import get_env_value
+
+            pconfig = PROVIDER_REGISTRY.get("zai")
+            env_override = str(get_env_value("GLM_BASE_URL") or "").strip()
+            resolved_url, _endpoint_source = _resolve_zai_runtime_endpoint(
+                str(material.get("api_key") or ""),
+                str(getattr(pconfig, "inference_base_url", "") or ""),
+                env_override,
+            )
+            if resolved_url:
+                material = dict(material)
+                material["base_url"] = str(resolved_url).strip().rstrip("/")
+        except (ImportError, OSError, RuntimeError, ValueError):
+            pass
     verification = check_connection(
         material,
         _main_model_verification_path(),
@@ -6918,9 +7072,11 @@ def _get_model_config_unlocked(
     provider_credentials = get_provider_credentials_config().get("credentials", [])
     from api.main_model_verification import verification_for_material
 
+    main_material = _main_model_material(config_data)
+    main_endpoint = _main_model_endpoint(config_data, main_material)
     verification = _public_main_model_verification(
         verification_for_material(
-            _main_model_material(config_data),
+            main_material,
             _main_model_verification_path(),
         )
     )
@@ -6938,7 +7094,12 @@ def _get_model_config_unlocked(
         "main": {
             "provider": provider,
             "model": model,
-            "base_url": str(model_cfg.get("base_url") or "").strip(),
+            "base_url": (
+                str(main_endpoint.get("display_url") or "")
+                if main_endpoint.get("editable")
+                else ""
+            ),
+            "endpoint": main_endpoint,
             "key_env": key_env,
             "key_status": _key_status_for_env(key_env) if key_env else _provider_key_status(provider),
             "verification": verification,
@@ -6964,6 +7125,7 @@ def _get_model_config_unlocked(
 def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
     provider_id = str(body.get("provider") or "").strip().lower()
     model_id = str(body.get("model") or "").strip()
+    base_url_provided = "base_url" in body
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = body.get("api_key")
     if not provider_id:
@@ -6984,11 +7146,21 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
         label = _PROVIDER_DISPLAY.get(provider_id, provider_id)
         raise ValueError(f"{label} 使用网页登录授权，请在太极智能体中完成授权。")
 
+    from hermes_cli.providers import endpoint_policy_for
+
+    fixed_override_candidate = bool(
+        base_url_provided
+        and base_url
+        and provider_id != "custom"
+        and endpoint_policy_for(provider_id) == "fixed"
+    )
+
     env_updates: dict[str, str | None] = {}
     secret_value = str(api_key or "").strip()
     if provider_id == "custom":
         if not base_url:
-            raise ValueError("base_url is required for custom provider")
+            raise InvalidBaseUrlError("base_url must be a safe HTTP(S) URL")
+        base_url = _validate_custom_base_url(base_url)
         if secret_value:
             env_updates[_CUSTOM_MODEL_KEY_ENV] = secret_value
     elif secret_value:
@@ -7040,6 +7212,7 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
                     )
             model_cfg["provider"] = provider_id
             model_cfg["default"] = model_id
+            fixed_override_cleaned = False
             if provider_changed:
                 model_cfg.pop("api_mode", None)
             if provider_id == "custom":
@@ -7047,17 +7220,24 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
                 model_cfg["key_env"] = _CUSTOM_MODEL_KEY_ENV
                 model_cfg.pop("api_key", None)
             else:
+                from hermes_cli.providers import normalize_model_endpoint_fields
+
+                policy = endpoint_policy_for(provider_id)
                 stale_base_url = bool(
-                    provider_changed
-                    and base_url
-                    and base_url == previous_base_url
+                    provider_changed and base_url and base_url == previous_base_url
                 )
-                if base_url and not stale_base_url:
+                if policy == "fixed":
+                    fixed_override_cleaned = bool(
+                        previous_base_url or fixed_override_candidate
+                    )
+                    model_cfg.pop("base_url", None)
+                elif base_url_provided and base_url and not stale_base_url:
                     model_cfg["base_url"] = base_url
-                elif provider_changed or provider_id != "openai":
+                elif base_url_provided or provider_changed:
                     model_cfg.pop("base_url", None)
                 model_cfg.pop("key_env", None)
                 model_cfg.pop("api_key_env", None)
+                normalize_model_endpoint_fields(model_cfg)
             config_data["model"] = model_cfg
             config_data[_MAIN_MODEL_REQUEST_ID_KEY] = request_id
             receipt_env = (
@@ -7127,4 +7307,8 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
     result["runtime_state"] = (
         "refresh_pending" if result.get("refresh_pending") is True else "applied"
     )
+    if fixed_override_cleaned:
+        result["endpoint_mutation"] = {
+            "code": "fixed_override_cleaned",
+        }
     return result

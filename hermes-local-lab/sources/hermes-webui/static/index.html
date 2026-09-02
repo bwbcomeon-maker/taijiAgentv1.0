@@ -1525,9 +1525,21 @@
                     <span><b>模型 ID</b><em id="modelConfigModelSummary">—</em></span>
                     <span><b>API 密钥</b><em id="modelConfigKeySummary">—</em></span>
                   </div>
+                  <div class="model-config-endpoint-block" id="modelConfigMainEndpointBlock" aria-live="polite">
+                    <div class="model-config-endpoint-head">
+                      <b id="modelConfigMainEndpointLabel" data-i18n="provider_endpoint_label">实际模型请求地址</b>
+                      <span class="model-config-endpoint-status" id="modelConfigMainEndpointStatus">—</span>
+                    </div>
+                    <output class="model-config-endpoint-value" id="modelConfigMainEndpointValue" aria-labelledby="modelConfigMainEndpointLabel">—</output>
+                    <div class="model-config-endpoint-meta">
+                      <span><b data-i18n="provider_endpoint_source_label">地址来源</b><em id="modelConfigMainEndpointSource">—</em></span>
+                      <span><b data-i18n="provider_endpoint_status_label">地址状态</b><em id="modelConfigMainEndpointState">—</em></span>
+                    </div>
+                    <p class="model-config-endpoint-notice" id="modelConfigMainEndpointNotice" role="status" aria-live="polite"></p>
+                  </div>
                   <div class="model-config-actions">
                     <button class="sm-btn" type="button" data-model-config-toggle="modelConfigMainEdit" onclick="toggleModelConfigSection('modelConfigMainEdit')">修改主模型配置</button>
-                    <button class="btn-tiny" type="button" onclick="openModelConfigSecretEditor('modelConfigMainEdit','modelConfigApiKey')">更新密钥</button>
+                    <button class="btn-tiny" id="modelConfigMainUpdateKey" type="button" onclick="openModelConfigSecretEditor('modelConfigMainEdit','modelConfigApiKey')">更新密钥</button>
                   </div>
                   <div class="model-config-collapsible" id="modelConfigMainEdit" hidden>
                     <label for="modelConfigProvider">Provider</label>
@@ -1535,9 +1547,14 @@
                     <label for="modelConfigModel">模型 ID</label>
                     <input id="modelConfigModel" list="modelConfigModelOptions" placeholder="deepseek-chat" autocomplete="off">
                     <datalist id="modelConfigModelOptions"></datalist>
+                    <div class="model-config-endpoint-preview" id="modelConfigEditEndpointPreview" aria-labelledby="modelConfigEditEndpointLabel">
+                      <b id="modelConfigEditEndpointLabel" data-i18n="provider_endpoint_saved_label">保存后将使用的地址</b>
+                      <output id="modelConfigEditEndpointValue" aria-live="polite">—</output>
+                    </div>
                     <div id="modelConfigBaseUrlRow">
                       <label for="modelConfigBaseUrl">Base URL</label>
-                      <input id="modelConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+                      <input id="modelConfigBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" aria-describedby="modelConfigBaseUrlError">
+                      <p class="model-config-field-error" id="modelConfigBaseUrlError" role="alert" aria-live="assertive"></p>
                     </div>
                     <div id="modelConfigApiKeyRow">
                       <label for="modelConfigApiKey">API 密钥</label>
@@ -1545,8 +1562,8 @@
                         <input id="modelConfigApiKey" type="password" placeholder="留空保留现有密钥" autocomplete="off" data-secret-field="true">
                         <button class="model-config-paste-btn" type="button" onclick="pasteSecretToInput('modelConfigApiKey')">粘贴</button>
                       </div>
-                      <div class="model-config-hint" id="modelConfigProviderHint">—</div>
                     </div>
+                    <div class="model-config-hint" id="modelConfigProviderHint">—</div>
                     <button class="sm-btn" id="btnSaveMainModel" type="button" onclick="saveMainModelConfig()">保存主模型配置</button>
                   </div>
                 </section>

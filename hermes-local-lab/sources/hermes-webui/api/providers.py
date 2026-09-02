@@ -42,6 +42,7 @@ from api.config import (
     invalidate_models_cache,
     reload_config,
 )
+from api.provider_endpoints import public_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -1684,6 +1685,51 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+def _provider_endpoint_projection(
+    provider_id: str,
+    config_data: dict[str, Any],
+    *,
+    active_provider: str | None,
+) -> dict[str, Any]:
+    """Project one provider row from the same loaded endpoint candidates."""
+    pid = str(provider_id or "").strip().lower()
+    model_cfg = config_data.get("model") if isinstance(config_data, dict) else {}
+    model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+    if pid == str(active_provider or "").strip().lower():
+        try:
+            # The model-config projection is the canonical active-provider
+            # view.  Material is assembled from the current profile only; it
+            # does not probe a provider or refresh a catalog.
+            from api.model_config import _main_model_endpoint, _main_model_material
+
+            material = _main_model_material(config_data)
+            return _main_model_endpoint(config_data, material)
+        except (ImportError, OSError, RuntimeError, ValueError):
+            logger.debug("Failed to reuse active endpoint projection", exc_info=True)
+
+    providers_cfg = config_data.get("providers", {}) if isinstance(config_data, dict) else {}
+    provider_cfg = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
+    configured_url = provider_cfg.get("base_url") if isinstance(provider_cfg, dict) else ""
+    if not configured_url:
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY
+
+            registry_id = "openai-api" if pid == "openai" else pid
+            registry = PROVIDER_REGISTRY.get(registry_id)
+            configured_url = getattr(registry, "inference_base_url", "") if registry else ""
+        except (ImportError, AttributeError, TypeError):
+            configured_url = ""
+    return public_endpoint(
+        pid,
+        configured_url=configured_url,
+        candidate_override_present=bool(str(configured_url or "").strip()),
+        stored_main_override_present=(
+            pid == str(active_provider or "").strip().lower()
+            and bool(str(model_cfg.get("base_url") or "").strip())
+        ),
+    )
+
+
 def get_providers() -> dict[str, Any]:
     """Return a list of all known providers with their configuration status.
 
@@ -1699,13 +1745,21 @@ def get_providers() -> dict[str, Any]:
     providers = []
 
     # Collect all known provider IDs from multiple sources
-    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
+    known_ids = (set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())) - {
+        "custom"
+    }
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
     providers_cfg = cfg.get("providers", {})
+    model_cfg = cfg.get("model", {})
+    active_provider = (
+        str(model_cfg.get("provider") or "").strip().lower()
+        if isinstance(model_cfg, dict)
+        else ""
+    )
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        known_ids.update(pid for pid in providers_cfg.keys() if pid != "custom")
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
@@ -1887,6 +1941,12 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
+        model_cfg = cfg.get("model", {})
+        active_provider = (
+            str(model_cfg.get("provider") or "").strip().lower()
+            if isinstance(model_cfg, dict)
+            else ""
+        )
         providers.append({
             "id": pid,
             "display_name": display_name,
@@ -1904,6 +1964,11 @@ def get_providers() -> dict[str, Any]:
             # command. For providers that don't trim, models_total ==
             # len(models) and the frontend behaves identically to before.
             "models_total": models_total,
+            "endpoint": _provider_endpoint_projection(
+                pid,
+                cfg,
+                active_provider=active_provider,
+            ),
         })
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
@@ -1933,6 +1998,19 @@ def get_providers() -> dict[str, Any]:
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(os.getenv(env_var, "").strip())
+            custom_endpoint = (
+                _provider_endpoint_projection(
+                    cp_id,
+                    cfg,
+                    active_provider=active_provider,
+                )
+                if cp_id == active_provider
+                else public_endpoint(
+                    cp_id,
+                    configured_url=cp.get("base_url") or "",
+                    candidate_override_present=bool(cp.get("base_url")),
+                )
+            )
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
@@ -1942,6 +2020,7 @@ def get_providers() -> dict[str, Any]:
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
                 "models_total": len(cp_models),
+                "endpoint": custom_endpoint,
             })
 
     # Determine active provider

@@ -59,7 +59,7 @@ def test_profile_model_config_writer_preserves_existing_model_settings(tmp_path)
     profile_dir = tmp_path / "profiles" / "research"
     profile_dir.mkdir(parents=True)
     (profile_dir / "config.yaml").write_text(
-        "model:\n  base_url: https://gateway.example/v1\n",
+        "model:\n  provider: openai-codex\n  base_url: https://gateway.example/v1\n",
         encoding="utf-8",
     )
 

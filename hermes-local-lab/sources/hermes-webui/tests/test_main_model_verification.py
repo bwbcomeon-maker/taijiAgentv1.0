@@ -3,6 +3,8 @@ import json
 import urllib.error
 from types import SimpleNamespace
 
+import pytest
+
 from api.main_model_verification import (
     check_connection,
     configuration_fingerprint,
@@ -76,6 +78,132 @@ def test_main_model_material_resolves_legacy_provider_key_from_profile_env(monke
 
     assert result["api_key"] == "FAKE-profile-key"
     assert verification_for_material(result, tmp_path / "state.json")["state"] == "configured_unverified"
+
+
+def test_main_model_material_uses_key_bound_zai_cache_without_probe(monkeypatch, tmp_path):
+    from api import model_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  provider: zai\n  default: glm-5\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("GLM_API_KEY=profile-zai-key\n", encoding="utf-8")
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        "hermes_cli.auth._resolve_zai_status_endpoint",
+        lambda *_args, **_kwargs: (
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "runtime",
+            "resolved",
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.get_env_value",
+        lambda _name: "",
+    )
+
+    result = model_config._main_model_material(
+        {"model": {"provider": "zai", "default": "glm-5"}}
+    )
+
+    assert result["base_url"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+
+
+def test_main_model_material_does_not_show_zai_registry_default_without_cache(
+    monkeypatch,
+    tmp_path,
+):
+    from api import model_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("GLM_API_KEY=profile-zai-key\n", encoding="utf-8")
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        "hermes_cli.auth._resolve_zai_status_endpoint",
+        lambda *_args, **_kwargs: ("", "runtime", "runtime_unresolved"),
+    )
+    monkeypatch.setattr("hermes_cli.config.get_env_value", lambda _name: "")
+
+    result = model_config._main_model_material(
+        {"model": {"provider": "zai", "default": "glm-5"}}
+    )
+
+    assert result["base_url"] == ""
+
+
+def test_main_model_endpoint_consumes_sibling_candidate_view(monkeypatch):
+    from api import model_config
+
+    seen = {}
+
+    def candidate_view(provider, **kwargs):
+        seen.update(provider=provider, **kwargs)
+        return {
+            "provider": provider,
+            "configured_url": "https://open.bigmodel.cn/api/paas/v4",
+            "runtime_url": "",
+            "candidate_source": "managed",
+            "runtime_selector_unresolved": False,
+        }
+
+    monkeypatch.setattr(model_config, "_resolve_public_endpoint_candidate", candidate_view)
+    endpoint = model_config._main_model_endpoint(
+        {"model": {"provider": "zai-cn", "default": "glm-5"}},
+        {"provider": "zai-cn", "model": "glm-5", "base_url": "https://open.bigmodel.cn/api/paas/v4", "api_key": ""},
+    )
+
+    assert seen["provider"] == "zai-cn"
+    assert endpoint["display_url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert endpoint["policy"] == "fixed"
+
+
+@pytest.mark.parametrize(
+    ("api_key", "status_result", "expected_url", "expected_status", "expected_source"),
+    [
+        (
+            "profile-zai-key",
+            ("https://open.bigmodel.cn/api/coding/paas/v4", "runtime", "resolved"),
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "resolved",
+            "runtime",
+        ),
+        ("profile-zai-key", ("", "runtime", "runtime_unresolved"), None, "runtime_unresolved", "runtime"),
+        (
+            "",
+            ("https://api.z.ai/api/paas/v4", "managed", "resolved"),
+            "https://api.z.ai/api/paas/v4",
+            "resolved",
+            "managed",
+        ),
+    ],
+)
+def test_main_model_endpoint_uses_zai_status_cache_without_network(
+    monkeypatch,
+    api_key,
+    status_result,
+    expected_url,
+    expected_status,
+    expected_source,
+):
+    from api import model_config
+
+    monkeypatch.setattr(
+        "hermes_cli.auth._resolve_zai_status_endpoint",
+        lambda *_args, **_kwargs: status_result,
+    )
+    monkeypatch.setattr("hermes_cli.config.get_env_value", lambda _name: "")
+    endpoint = model_config._main_model_endpoint(
+        {"model": {"provider": "zai", "default": "glm-5"}},
+        {"provider": "zai", "model": "glm-5", "base_url": status_result[0], "api_key": api_key},
+    )
+
+    assert endpoint["display_url"] == expected_url
+    assert endpoint["status"] == expected_status
+    assert endpoint["source"] == expected_source
 
 
 def test_strict_connection_check_uses_models_get_and_never_completion(tmp_path):
