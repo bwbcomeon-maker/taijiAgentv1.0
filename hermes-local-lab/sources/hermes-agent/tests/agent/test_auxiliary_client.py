@@ -29,7 +29,840 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
     _resolve_task_provider_model,
+    _resolve_api_key_provider,
 )
+
+
+class TestZaiCnAuxiliaryEndpointAuthority:
+    """RED contracts for fixed zai-cn auxiliary routing.
+
+    These tests deliberately capture the real OpenAI/Anthropic constructor
+    arguments while leaving endpoint arbitration and provider routing intact.
+    """
+
+    _CANONICAL_URL = "https://open.bigmodel.cn/api/paas/v4"
+    _DIRTY_URL = "https://api.deepseek.com/v1"
+
+    @staticmethod
+    def _zai_cn_registry(monkeypatch):
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.PROVIDER_REGISTRY",
+            {"zai-cn": PROVIDER_REGISTRY["zai-cn"]},
+        )
+
+    def test_zai_cn_pool_endpoint_is_finalized_before_openai_constructor(
+        self, monkeypatch
+    ):
+        self._zai_cn_registry(monkeypatch)
+        entry = SimpleNamespace(
+            runtime_api_key="pool-zai-key",
+            runtime_base_url=self._DIRTY_URL,
+        )
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="zai-cn-pool-client")
+
+        with (
+            patch(
+                "agent.auxiliary_client._select_pool_entry",
+                return_value=(True, entry),
+            ),
+            patch(
+                "agent.auxiliary_client._get_aux_model_for_provider",
+                return_value="glm-5",
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, model = _resolve_api_key_provider()
+
+        assert client is not None
+        assert model == "glm-5"
+        assert captured["base_url"] == self._CANONICAL_URL
+
+    def test_zai_cn_credential_env_endpoint_is_finalized_before_openai_constructor(
+        self, monkeypatch
+    ):
+        self._zai_cn_registry(monkeypatch)
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="zai-cn-credential-client")
+
+        with (
+            patch(
+                "agent.auxiliary_client._select_pool_entry",
+                return_value=(False, None),
+            ),
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "TEST_ONLY_ZAI_KEY",
+                    "base_url": self._DIRTY_URL,
+                },
+            ),
+            patch(
+                "agent.auxiliary_client._get_aux_model_for_provider",
+                return_value="glm-5",
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, model = _resolve_api_key_provider()
+
+        assert client is not None
+        assert model == "glm-5"
+        assert captured["base_url"] == self._CANONICAL_URL
+
+    def test_zai_cn_fully_explicit_endpoint_is_finalized_before_constructor(
+        self
+    ):
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="zai-cn-explicit-client")
+
+        with patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai):
+            client, model = resolve_provider_client(
+                "zai-cn",
+                "glm-5",
+                explicit_base_url=self._DIRTY_URL,
+                explicit_api_key="TEST_ONLY_EXPLICIT_ZAI_KEY",
+            )
+
+        assert client is not None
+        assert model == "glm-5"
+        assert captured["base_url"] == self._CANONICAL_URL
+
+    def test_zai_cn_partial_explicit_endpoint_uses_credential_key_and_is_finalized(
+        self, monkeypatch
+    ):
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="zai-cn-partial-client")
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "TEST_ONLY_ZAI_KEY",
+                    "base_url": "https://configured.example/v1",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, model = resolve_provider_client(
+                "zai-cn",
+                "glm-5",
+                explicit_base_url=self._DIRTY_URL,
+            )
+
+        assert client is not None
+        assert model == "glm-5"
+        assert captured["api_key"] == "TEST_ONLY_ZAI_KEY"
+        assert captured["base_url"] == self._CANONICAL_URL
+
+    def test_bare_custom_endpoint_remains_unchanged(self):
+        custom_url = "https://custom.example/v1"
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="bare-custom-client")
+
+        with patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai):
+            client, _ = resolve_provider_client(
+                "custom",
+                "custom-model",
+                explicit_base_url=custom_url,
+                explicit_api_key="custom-key",
+            )
+
+        assert client is not None
+        assert captured["base_url"] == custom_url
+
+    def test_named_custom_endpoint_remains_unchanged(self):
+        named_url = "https://named-custom.example/v1"
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="named-custom-client")
+
+        with (
+            patch(
+                "hermes_cli.runtime_provider._get_named_custom_provider",
+                return_value={
+                    "name": "named-relay",
+                    "base_url": named_url,
+                    "api_key": "named-key",
+                    "api_mode": "chat_completions",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, _ = resolve_provider_client("named-relay", "custom-model")
+
+        assert client is not None
+        assert captured["base_url"] == named_url
+
+    def test_minimax_endpoint_remains_openai_v1(self):
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="minimax-client")
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "minimax-key",
+                    "base_url": "https://api.minimax.io/anthropic",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, _ = resolve_provider_client(
+                "minimax",
+                "MiniMax-M2.7",
+                api_mode="chat_completions",
+            )
+
+        assert client is not None
+        assert captured["base_url"] == "https://api.minimax.io/v1"
+
+    def test_anthropic_proxy_endpoint_remains_unchanged(self):
+        proxy_url = "https://proxy.example/v1"
+        with patch(
+            "agent.anthropic_adapter.build_anthropic_client",
+            return_value=MagicMock(name="anthropic-proxy-client"),
+        ) as build_client:
+            client, _ = resolve_provider_client(
+                "custom",
+                "claude-model",
+                explicit_base_url=proxy_url,
+                explicit_api_key="proxy-key",
+                api_mode="anthropic_messages",
+            )
+
+        assert client is not None
+        build_client.assert_called_once()
+        assert build_client.call_args.args[:2] == ("proxy-key", proxy_url)
+
+    def test_zai_cn_dirty_urls_share_one_canonical_cache_entry(self):
+        import hashlib
+        import agent.auxiliary_client as aux
+
+        clients = []
+
+        def capture_openai(*args, **kwargs):
+            client = MagicMock(name="cached-zai-cn-client")
+            clients.append(client)
+            return client
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+            ):
+                first, _ = aux._get_cached_client(
+                    "zai-cn",
+                    "glm-5",
+                    base_url="https://api.deepseek.com/v1",
+                    api_key="zai-key",
+                )
+                second, _ = aux._get_cached_client(
+                    "zai-cn",
+                    "glm-5",
+                    base_url="https://another.invalid/v1",
+                    api_key="zai-key",
+                )
+
+            assert first is second
+            assert len(clients) == 1
+            assert len(aux._client_cache) == 1
+            cache_key = next(iter(aux._client_cache))
+            assert cache_key[2] == hashlib.sha256(
+                self._CANONICAL_URL.encode("utf-8")
+            ).hexdigest()
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_zai_cn_stale_codex_mode_is_chat_completions_before_cache_and_client(
+        self
+    ):
+        import agent.auxiliary_client as aux
+
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="zai-cn-chat-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+            ):
+                client, _ = aux._get_cached_client(
+                    "zai-cn",
+                    "glm-5",
+                    base_url=self._DIRTY_URL,
+                    api_key="zai-key",
+                    api_mode="codex_responses",
+                )
+
+            from agent.auxiliary_client import CodexAuxiliaryClient
+
+            assert client is not None
+            assert not isinstance(client, CodexAuxiliaryClient)
+            assert captured["base_url"] == self._CANONICAL_URL
+            assert next(iter(aux._client_cache))[4] == "chat_completions"
+        finally:
+            aux.shutdown_cached_clients()
+
+
+class TestAuxiliaryEndpointAuthorityPublicPaths:
+    """RED contracts for public and cache-backed auxiliary routing paths."""
+
+    def test_task3_configurable_partial_explicit_uses_explicit_minimax_url_and_credential_key(
+        self
+    ):
+        captured = {}
+        explicit_url = "https://api.minimax.io/anthropic"
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="partial-minimax-client")
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "TEST_ONLY_MINIMAX_KEY",
+                    "base_url": "https://credentials.example/v1",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, model = resolve_provider_client(
+                "minimax",
+                "MiniMax-M2.7",
+                explicit_base_url=explicit_url,
+                api_mode="chat_completions",
+            )
+
+        assert client is not None
+        assert model == "MiniMax-M2.7"
+        assert captured["api_key"] == "TEST_ONLY_MINIMAX_KEY"
+        assert captured["base_url"] == "https://api.minimax.io/v1"
+
+    def test_task3_named_custom_cache_path_uses_named_configuration(self):
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named-openrouter.example/v1"
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="named-cache-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "openrouter",
+                        "base_url": named_url,
+                        "api_key": "named-cache-key",
+                        "api_mode": "chat_completions",
+                    },
+                ),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+            ):
+                client, model = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="https://stale-cache.example/v1",
+                    api_key="stale-cache-key",
+                )
+
+            assert client is not None
+            assert model == "named-model"
+            assert captured["base_url"] == named_url
+            assert captured["api_key"] == "named-cache-key"
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_cache_identity_uses_named_configuration(self):
+        """Named Custom cache identity must match its actual constructor inputs."""
+        import hashlib
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named-openrouter.example/v1"
+        named_key = "named-openrouter-key"
+        constructed = []
+
+        def capture_openai(*args, **kwargs):
+            constructed.append(kwargs)
+            return MagicMock(name="named-cache-identity-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "openrouter",
+                        "base_url": named_url,
+                        "api_key": named_key,
+                        "api_mode": "chat_completions",
+                    },
+                ),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+            ):
+                first, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="https://stale-one.example/v1",
+                    api_key="stale-key-one",
+                    api_mode="chat_completions",
+                )
+                second, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="https://stale-two.example/v1",
+                    api_key="stale-key-two",
+                    api_mode="chat_completions",
+                )
+
+            assert first is second
+            assert len(constructed) == 1
+            assert constructed[0]["base_url"] == named_url
+            assert constructed[0]["api_key"] == named_key
+            assert len(aux._client_cache) == 1
+            cache_key = next(iter(aux._client_cache))
+            assert cache_key[2] == hashlib.sha256(named_url.encode()).hexdigest()
+            assert cache_key[3] == hashlib.sha256(named_key.encode()).hexdigest()
+            assert cache_key[4] == "chat_completions"
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_anthropic_messages_cache_identity_is_canonical(self):
+        import hashlib
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named.example/anthropic/?region=cn"
+        named_key = "named-anthropic-key"
+        anthropic_client = MagicMock(name="named-anthropic-real-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "anthropic-relay",
+                        "base_url": named_url,
+                        "api_key": named_key,
+                        "api_mode": "anthropic_messages",
+                    },
+                ),
+                patch(
+                    "agent.anthropic_adapter.build_anthropic_client",
+                    return_value=anthropic_client,
+                ) as build_client,
+            ):
+                client, _ = aux._get_cached_client(
+                    "custom:anthropic-relay",
+                    "named-model",
+                    base_url="https://stale.example/v1",
+                    api_key="stale-key",
+                    api_mode="anthropic_messages",
+                )
+
+            assert client is not None
+            build_client.assert_called_once_with(named_key, named_url)
+            assert len(aux._client_cache) == 1
+            cache_key = next(iter(aux._client_cache))
+            canonical_url = "https://named.example/v1?region=cn"
+            assert cache_key[2] == hashlib.sha256(canonical_url.encode()).hexdigest()
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_cache_identity_matches_openai_wire_url_and_query(self):
+        import hashlib
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named.example/anthropic?region=cn"
+        named_key = "named-openrouter-key"
+        constructed = []
+
+        def capture_openai(*args, **kwargs):
+            constructed.append(kwargs)
+            return MagicMock(name="named-wire-cache-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "openrouter",
+                        "base_url": named_url,
+                        "api_key": named_key,
+                        "api_mode": "chat_completions",
+                    },
+                ),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+            ):
+                first, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="https://stale-one.example/v1",
+                    api_key="stale-key-one",
+                    api_mode="chat_completions",
+                )
+                second, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="https://stale-two.example/v1",
+                    api_key="stale-key-two",
+                    api_mode="chat_completions",
+                )
+
+            assert first is second
+            assert len(constructed) == 1
+            assert constructed[0]["base_url"] == "https://named.example/v1"
+            assert constructed[0]["default_query"] == {"region": "cn"}
+            assert len(aux._client_cache) == 1
+            cache_key = next(iter(aux._client_cache))
+            canonical_url = "https://named.example/v1?region=cn"
+            assert cache_key[2] == hashlib.sha256(canonical_url.encode()).hexdigest()
+            assert cache_key[3] == hashlib.sha256(named_key.encode()).hexdigest()
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_cache_reads_one_stable_configuration(self):
+        import hashlib
+        import agent.auxiliary_client as aux
+
+        entry_a = {
+            "name": "openrouter",
+            "base_url": "https://named-a.example/v1",
+            "api_key": "named-key-a",
+            "api_mode": "chat_completions",
+        }
+        entry_b = {
+            "name": "openrouter",
+            "base_url": "https://named-b.example/v1",
+            "api_key": "named-key-b",
+            "api_mode": "chat_completions",
+        }
+        lookup = MagicMock(side_effect=[entry_a, entry_b])
+        constructed = []
+
+        def capture_openai(*args, **kwargs):
+            constructed.append(kwargs)
+            return MagicMock(name="named-stable-cache-client")
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    new=lookup,
+                ),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+            ):
+                client, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="",
+                    api_key="",
+                    api_mode="chat_completions",
+                )
+
+            assert lookup.call_count == 1
+            assert len(aux._client_cache) == 1
+            cache_key = next(iter(aux._client_cache))
+            assert cache_key[2] == hashlib.sha256(
+                entry_a["base_url"].encode()
+            ).hexdigest()
+            assert cache_key[3] == hashlib.sha256(
+                entry_a["api_key"].encode()
+            ).hexdigest()
+            assert client is not None
+            assert constructed == [
+                {
+                    "api_key": entry_a["api_key"],
+                    "base_url": entry_a["base_url"],
+                }
+            ]
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_auto_wire_cache_separates_anthropic_and_openai(self):
+        import agent.auxiliary_client as aux
+        from agent.auxiliary_client import AnthropicAuxiliaryClient
+
+        named_key = "named-openrouter-key"
+        anthropic_real_client = MagicMock(name="named-anthropic-real-client")
+        openai_client = MagicMock(name="named-openai-client")
+        constructed = []
+
+        def capture_openai(*args, **kwargs):
+            constructed.append(kwargs)
+            return openai_client
+
+        named_anthropic = {
+            "name": "openrouter",
+            "base_url": "https://named.example/anthropic",
+            "api_key": named_key,
+            "api_mode": "",
+        }
+        named_openai = {
+            "name": "openrouter",
+            "base_url": "https://named.example/v1",
+            "api_key": named_key,
+            "api_mode": "",
+        }
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    side_effect=[named_anthropic, named_openai],
+                ),
+                patch("agent.auxiliary_client._peek_pool_entry", return_value=None),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+                patch(
+                    "agent.anthropic_adapter.build_anthropic_client",
+                    return_value=anthropic_real_client,
+                ),
+            ):
+                first, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="",
+                    api_key=named_key,
+                    api_mode="",
+                )
+                second, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="",
+                    api_key=named_key,
+                    api_mode="",
+                )
+
+            assert first is not second
+            assert isinstance(first, AnthropicAuxiliaryClient)
+            assert not isinstance(second, AnthropicAuxiliaryClient)
+            assert len(constructed) == 2
+            assert len(aux._client_cache) == 2
+            cache_keys = list(aux._client_cache)
+            assert cache_keys[0] != cache_keys[1]
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_anthropic_fallback_is_not_cached(self):
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named.example/anthropic?region=cn"
+        named_key = "named-openrouter-key"
+        fallback_client = MagicMock(name="named-openai-fallback-client")
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return fallback_client
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "openrouter",
+                        "base_url": named_url,
+                        "api_key": named_key,
+                        "api_mode": "chat_completions",
+                    },
+                ),
+                patch(
+                    "agent.anthropic_adapter.build_anthropic_client",
+                    side_effect=ImportError("fake missing anthropic SDK"),
+                ),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+            ):
+                client, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    base_url="",
+                    api_key="",
+                    api_mode="anthropic_messages",
+                )
+
+            assert client is fallback_client
+            assert captured == {
+                "api_key": named_key,
+                "base_url": "https://named.example/v1",
+                "default_query": {"region": "cn"},
+            }
+            assert len(aux._client_cache) == 0
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_named_custom_anthropic_async_fallback_is_not_cached(self):
+        import agent.auxiliary_client as aux
+
+        named_url = "https://named.example/anthropic?region=cn"
+        named_key = "named-openrouter-key"
+        async_fallback_client = MagicMock(name="named-async-openai-fallback-client")
+        sync_constructed = []
+        async_constructed = []
+
+        def capture_openai(*args, **kwargs):
+            sync_constructed.append(kwargs)
+            return SimpleNamespace(
+                api_key=kwargs["api_key"],
+                base_url=kwargs["base_url"],
+            )
+
+        def capture_async_openai(*args, **kwargs):
+            async_constructed.append(kwargs)
+            return async_fallback_client
+
+        aux.shutdown_cached_clients()
+        try:
+            with (
+                patch(
+                    "hermes_cli.runtime_provider._get_named_custom_provider",
+                    return_value={
+                        "name": "openrouter",
+                        "base_url": named_url,
+                        "api_key": named_key,
+                        "api_mode": "chat_completions",
+                    },
+                ),
+                patch(
+                    "agent.anthropic_adapter.build_anthropic_client",
+                    side_effect=ImportError("fake missing anthropic SDK"),
+                ),
+                patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+                patch("openai.AsyncOpenAI", side_effect=capture_async_openai),
+            ):
+                client, _ = aux._get_cached_client(
+                    "custom:openrouter",
+                    "named-model",
+                    async_mode=True,
+                    base_url="",
+                    api_key="",
+                    api_mode="anthropic_messages",
+                )
+
+            assert client is async_fallback_client
+            assert sync_constructed == [
+                {
+                    "api_key": named_key,
+                    "base_url": "https://named.example/v1",
+                    "default_query": {"region": "cn"},
+                }
+            ]
+            assert async_constructed == [
+                {
+                    "api_key": named_key,
+                    "base_url": "https://named.example/v1",
+                }
+            ]
+            assert len(aux._client_cache) == 0
+        finally:
+            aux.shutdown_cached_clients()
+
+    def test_task3_copilot_responses_model_keeps_codex_wrapper(self):
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="copilot-client")
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "api_key": "copilot-key",
+                    "base_url": "https://api.githubcopilot.com",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai),
+        ):
+            client, model = resolve_provider_client("copilot", "gpt-5.4")
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+
+        assert client is not None
+        assert model == "gpt-5.4"
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert captured["base_url"] == "https://api.githubcopilot.com"
+
+    def test_task3_fixed_glm_cn_alias_uses_canonical_bigmodel_endpoint(self):
+        captured = {}
+
+        def capture_openai(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="glm-cn-alias-client")
+
+        with patch("agent.auxiliary_client.OpenAI", side_effect=capture_openai):
+            client, model = resolve_provider_client(
+                "glm-cn",
+                "glm-5",
+                explicit_base_url="https://api.deepseek.com/v1",
+                explicit_api_key="glm-cn-key",
+            )
+
+        assert client is not None
+        assert model == "glm-5"
+        assert captured["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+
+    def test_task3_fixed_missing_static_url_fails_closed_before_openai(self, monkeypatch):
+        import agent.auxiliary_client as aux
+        from hermes_cli.providers import HermesOverlay
+
+        monkeypatch.setitem(
+            aux.HERMES_OVERLAYS,
+            "zai-cn",
+            HermesOverlay(
+                transport="openai_chat",
+                endpoint_policy="fixed",
+                base_url_override="",
+            ),
+        )
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            client, model = resolve_provider_client(
+                "zai-cn",
+                "glm-5",
+                explicit_base_url="https://api.deepseek.com/v1",
+                explicit_api_key="zai-cn-key",
+            )
+
+        assert client is None
+        assert model is None
+        mock_openai.assert_not_called()
 
 
 @pytest.fixture(autouse=True)
@@ -309,7 +1142,7 @@ class TestAnthropicOAuthFlag:
 
     def test_oauth_token_sets_flag(self, monkeypatch):
         """OAuth tokens (sk-ant-oat01-*) should create client with is_oauth=True."""
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-token")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat")
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
@@ -322,7 +1155,7 @@ class TestAnthropicOAuthFlag:
 
     def test_api_key_no_oauth_flag(self, monkeypatch):
         """Regular API keys (sk-ant-api-*) should create client with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey1234"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -607,7 +1440,7 @@ class TestExpiredCodexFallback:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         # Set up Anthropic as fallback
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-fallback")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat")
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _resolve_auto, AnthropicAuxiliaryClient
@@ -693,7 +1526,7 @@ class TestExpiredCodexFallback:
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):
         """OAuth-style tokens should get is_oauth=*** (token is not sk-ant-api-*)."""
         # Mock resolve_anthropic_token to return an OAuth-style token
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-oat-hermes-token"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-oat"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -748,7 +1581,7 @@ class TestExpiredCodexFallback:
 
     def test_claude_code_oauth_env_sets_flag(self, monkeypatch):
         """CLAUDE_CODE_OAUTH_TOKEN env var should get is_oauth=True."""
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-cc-test-token")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "cc-test")
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()

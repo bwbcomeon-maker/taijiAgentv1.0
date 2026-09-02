@@ -3712,6 +3712,13 @@ def mutate_config_strict(
             mutated = result
         if not isinstance(mutated, dict):
             raise ValueError("credential config mutation must produce a mapping")
+        from hermes_cli.providers import (
+            normalize_config_endpoint_fields,
+            normalize_config_endpoint_transitions,
+        )
+
+        normalize_config_endpoint_transitions(current, mutated)
+        normalize_config_endpoint_fields(mutated)
         _reconcile_taiji_main_model_credential_revision(
             current,
             mutated,
@@ -3931,6 +3938,13 @@ def mutate_config_env_strict(
             env_target,
             applied,
         )
+        from hermes_cli.providers import (
+            normalize_config_endpoint_fields,
+            normalize_config_endpoint_transitions,
+        )
+
+        normalize_config_endpoint_transitions(current_config, mutated_config)
+        normalize_config_endpoint_fields(mutated_config)
         _reconcile_taiji_main_model_credential_revision(
             current_config,
             mutated_config,

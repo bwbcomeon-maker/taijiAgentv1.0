@@ -331,6 +331,81 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("default") == "minimax-m2.5"
         assert model.get("api_mode") == "anthropic_messages"
 
+    @pytest.mark.parametrize(
+        ("previous_provider", "next_provider"),
+        [
+            ("deepseek", "zai"),
+            ("zai-cn", "deepseek"),
+            ("deepseek", "zai-cn"),
+        ],
+        ids=["configurable-to-configurable", "fixed-to-configurable", "configurable-to-fixed"],
+    )
+    def test_config_set_provider_switch_does_not_inherit_previous_endpoint(
+        self, config_home, previous_provider, next_provider
+    ):
+        """The canonical config writer must clean endpoint ownership on all switches."""
+        config_path = config_home / "config.yaml"
+        config_path.write_text(
+            "model:\n"
+            "  default: old-model\n"
+            f"  provider: {previous_provider}\n"
+            "  base_url: https://old.example.invalid/v1\n"
+            "  api_mode: chat_completions\n"
+            "  request_receipt:\n"
+            "    id: old-receipt\n",
+            encoding="utf-8",
+        )
+
+        from hermes_cli.config import set_config_value
+
+        set_config_value("model.provider", next_provider)
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert saved["model"]["provider"] == next_provider
+        assert saved["model"]["default"] == "old-model"
+        assert saved["model"]["request_receipt"] == {"id": "old-receipt"}
+        saved_fields = set(saved["model"])
+        assert "base_url" not in saved_fields, "provider switch retained old endpoint"
+        assert "api_mode" not in saved_fields, "provider switch retained old transport"
+
+    def test_zai_cn_picker_is_fixed_from_public_entrypoint(self, config_home, monkeypatch):
+        """The public picker saves identity without generic endpoint setup."""
+        import hermes_cli.main as main_mod
+        import hermes_cli.models as models_mod
+
+        config_home.joinpath("config.yaml").write_text(
+            "model:\n"
+            "  provider: deepseek\n"
+            "  default: old-model\n"
+            "  base_url: https://previous.example.invalid/v1\n"
+            "  api_mode: chat_completions\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(models_mod, "CANONICAL_PROVIDERS", [
+            models_mod.ProviderEntry("zai-cn", "fixed", "fixed provider"),
+        ])
+        monkeypatch.setattr(models_mod, "_PROVIDER_LABELS", {"zai-cn": "fixed"})
+        monkeypatch.setattr(main_mod, "_prompt_provider_choice", lambda labels, default=0: 0)
+
+        def fail_if_generic_input(prompt):
+            raise AssertionError("fixed picker must not prompt for generic endpoint or model")
+
+        with patch.object(main_mod, "_prompt_api_key", return_value=("fake-key", False)), \
+             patch("builtins.input", side_effect=fail_if_generic_input), \
+             patch("agent.models_dev.list_agentic_models", return_value=["glm-5"]), \
+             patch("hermes_cli.models.fetch_api_models", side_effect=AssertionError("fixed picker must not probe endpoint")), \
+             patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
+             patch("hermes_cli.auth._save_model_choice"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch.object(main_mod, "_clear_stale_openai_base_url"):
+            main_mod.select_provider_and_model()
+
+        saved = yaml.safe_load(config_home.joinpath("config.yaml").read_text(encoding="utf-8"))
+        assert saved["model"]["provider"] == "zai-cn"
+        assert saved["model"]["default"] == "glm-5"
+        assert "base_url" not in set(saved["model"])
+        assert "api_mode" not in set(saved["model"])
+
 
 
 class TestBaseUrlValidation:

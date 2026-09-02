@@ -10,6 +10,7 @@ from pathlib import Path
 
 import agent.provider_credentials as credentials
 import pytest
+import yaml
 from agent.provider_credentials import (
     CredentialRecoveryError,
     CredentialSnapshot,
@@ -21,6 +22,131 @@ from agent.provider_credentials import (
     replace_config_env_payload_strict,
     seed_config_payload_strict,
 )
+
+
+def test_strict_writer_import_smoke_isolated_subprocess(tmp_path):
+    """Strict writer imports must remain cycle-safe in a fresh interpreter."""
+    script = r'''
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from agent.provider_credentials import mutate_config_strict
+import hermes_cli.providers
+
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "config.yaml"
+    path.write_text("model:\n  provider: deepseek\n  default: model\n", encoding="utf-8")
+    mutate_config_strict(
+        lambda config: config["model"].update({"provider": "zai-cn"}),
+        config_path=path,
+    )
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr[-500:]
+
+
+def test_mutate_config_strict_normalizes_fixed_endpoint_fields_before_write(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: old-model\n"
+        "  base_url: https://legacy.example.invalid/v1\n"
+        "  api_mode: chat_completions\n"
+        "  request_receipt:\n    id: keep\n",
+        encoding="utf-8",
+    )
+
+    original_reconcile = credentials._reconcile_taiji_main_model_credential_revision
+    observed = []
+
+    def reconcile_wrapper(current, mutated, changed_env_keys, *args, **kwargs):
+        observed.append(True)
+        assert mutated["model"]["provider"] == "zai-cn"
+        assert "base_url" not in set(mutated["model"])
+        assert "api_mode" not in set(mutated["model"])
+        return original_reconcile(current, mutated, changed_env_keys, *args, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        credentials,
+        "_reconcile_taiji_main_model_credential_revision",
+        reconcile_wrapper,
+    )
+
+    def switch_provider(config):
+        config["model"]["provider"] = "zai-cn"
+
+    try:
+        mutate_config_strict(switch_provider, config_path=config_path)
+    finally:
+        monkeypatch.undo()
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert observed == [True]
+    assert written["model"]["provider"] == "zai-cn"
+    assert written["model"]["default"] == "old-model"
+    assert written["model"]["request_receipt"] == {"id": "keep"}
+    written_fields = set(written["model"])
+    assert "base_url" not in written_fields, "strict writer retained old endpoint"
+    assert "api_mode" not in written_fields, "strict writer retained old transport"
+
+
+def test_mutate_config_env_strict_normalizes_fixed_endpoint_fields_before_reconcile(
+    tmp_path, monkeypatch,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: old-model\n"
+        "  base_url: https://legacy.example.invalid/v1\n"
+        "  api_mode: chat_completions\n"
+        "  request_receipt:\n    id: keep\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("TAIJI_SECURITY_PROFILE=local_controlled\n", encoding="utf-8")
+
+    def switch_provider(config):
+        config["model"]["provider"] = "zai-cn"
+
+    original_reconcile = credentials._reconcile_taiji_main_model_credential_revision
+    observed = []
+
+    def reconcile_wrapper(current, mutated, changed_env_keys, *args, **kwargs):
+        observed.append(True)
+        assert mutated["model"]["provider"] == "zai-cn"
+        assert "base_url" not in set(mutated["model"])
+        assert "api_mode" not in set(mutated["model"])
+        return original_reconcile(current, mutated, changed_env_keys, *args, **kwargs)
+
+    monkeypatch.setattr(
+        credentials,
+        "_reconcile_taiji_main_model_credential_revision",
+        reconcile_wrapper,
+    )
+
+    mutate_config_env_strict(
+        switch_provider,
+        {"TAIJI_SECURITY_PROFILE": "strict"},
+        config_path=config_path,
+    )
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert observed == [True]
+    assert written["model"]["provider"] == "zai-cn"
+    assert written["model"]["default"] == "old-model"
+    assert written["model"]["request_receipt"] == {"id": "keep"}
+    written_fields = set(written["model"])
+    assert "base_url" not in written_fields, "strict config/env writer retained old endpoint"
+    assert "api_mode" not in written_fields, "strict config/env writer retained old transport"
 
 
 def test_snapshot_reads_exact_disk_state_without_exposing_secret(

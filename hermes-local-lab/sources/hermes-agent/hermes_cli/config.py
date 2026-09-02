@@ -716,7 +716,7 @@ from hermes_constants import (  # noqa: E402
     get_env_path as _canonical_env_path,
     get_hermes_home,  # noqa: F811
 )
-from utils import atomic_replace
+from utils import atomic_replace, atomic_yaml_write
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -2356,7 +2356,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 24,
+    "_config_version": 25,
 }
 
 # =============================================================================
@@ -4145,7 +4145,25 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
 
     # Check config version
     current_ver, latest_ver = check_config_version()
-    
+
+    # ── Version 24 → 25: remove fixed-provider endpoint residue ────────
+    # This migration intentionally starts from the raw YAML tree.  Loading
+    # the merged config here would materialize defaults into a user file.
+    if current_ver == 24 and latest_ver >= 25:
+        with _credential_files_transaction():
+            raw_config = read_raw_config()
+            raw_version = raw_config.get("_config_version", 0)
+            if raw_version < 25:
+                from hermes_cli.providers import (
+                    normalize_config_endpoint_fields,
+                )
+                migrated_config = copy.deepcopy(raw_config)
+                normalize_config_endpoint_fields(migrated_config)
+                migrated_config["_config_version"] = 25
+                atomic_yaml_write(get_config_path(), migrated_config)
+                _secure_file(get_config_path())
+        current_ver = 25
+
     # ── Version 3 → 4: migrate tool progress from .env to config.yaml ──
     if current_ver < 4:
         with _credential_files_transaction():
@@ -6167,6 +6185,16 @@ def save_config(
                     else _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path))
                 ),
             )
+        from hermes_cli.providers import (
+            normalize_config_endpoint_fields,
+            normalize_config_endpoint_transitions,
+        )
+
+        if raw_existing:
+            normalize_config_endpoint_transitions(raw_existing, normalized)
+            normalize_config_endpoint_transitions(raw_existing, normalized_runtime)
+        normalize_config_endpoint_fields(normalized)
+        normalize_config_endpoint_fields(normalized_runtime)
         reconcile_capability_config_epochs(raw_existing, normalized)
 
         # Build optional commented-out sections for features that are off by
@@ -6190,6 +6218,12 @@ def save_config(
             extra_content="".join(parts) if parts else None,
         )
         _secure_file(config_path)
+        if not isinstance(config, _LoadedConfigSnapshot):
+            # Plain-dict callers retain ownership of their object.  Sync only
+            # endpoint ownership, and only after the durable write succeeds.
+            if raw_existing:
+                normalize_config_endpoint_transitions(raw_existing, config)
+            normalize_config_endpoint_fields(config)
         _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(
             normalized_runtime
         )

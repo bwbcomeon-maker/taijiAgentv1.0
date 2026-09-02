@@ -683,39 +683,44 @@ def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str
     return None
 
 
-def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> str:
-    """Return the correct Z.AI base URL by probing endpoints.
-
-    If the user has explicitly set GLM_BASE_URL, that always wins.
-    Otherwise, probe the candidate endpoints to find one that accepts the
-    key.  The detected endpoint is cached in provider state (auth.json) keyed
-    on a hash of the API key so subsequent starts skip the probe.
-    """
-    if env_override:
-        return env_override
-
-    # No API key set → don't probe (would fire N×M HTTPS requests with an
-    # empty Bearer token, all returning 401).  This path is hit during
-    # auxiliary-client auto-detection when the user has no Z.AI credentials
-    # at all — the caller discards the result immediately, so the probe is
-    # pure latency for every AIAgent construction.
+def _zai_cached_endpoint_for_key(api_key: str) -> str:
+    """Return a key-bound cached endpoint only when it is registry-approved."""
     if not api_key:
-        return default_url
-
-    # Check provider-state cache for a previously-detected endpoint.
+        return ""
     auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, "zai") or {}
     cached = state.get("detected_endpoint")
-    if isinstance(cached, dict) and cached.get("base_url"):
-        key_hash = cached.get("key_hash", "")
-        if key_hash == hashlib.sha256(api_key.encode()).hexdigest()[:16]:
-            logger.debug("Z.AI: using cached endpoint %s", cached["base_url"])
-            return cached["base_url"]
+    if not isinstance(cached, dict):
+        return ""
+    cached_url = str(cached.get("base_url") or "").strip().rstrip("/")
+    allowed = {
+        str(base_url).strip().rstrip("/")
+        for _ep_id, base_url, _models, _label in ZAI_ENDPOINTS
+    }
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+    if cached_url in allowed and cached.get("key_hash") == key_hash:
+        return cached_url
+    return ""
 
-    # Probe — may take up to ~8s per endpoint.
+
+def _resolve_zai_runtime_endpoint(
+    api_key: str, default_url: str, env_override: str
+) -> tuple[str, str]:
+    """Resolve Z.AI runtime URL and independent endpoint provenance."""
+    if env_override:
+        return env_override.rstrip("/"), "managed"
+    if not api_key:
+        return default_url, "managed"
+
+    cached_url = _zai_cached_endpoint_for_key(api_key)
+    if cached_url:
+        logger.debug("Z.AI: using cached endpoint %s", cached_url)
+        return cached_url, "runtime"
+
     detected = detect_zai_endpoint(api_key)
     if detected and detected.get("base_url"):
-        # Persist the detection result keyed on the API key hash.
+        auth_store = _load_auth_store()
+        state = _load_provider_state(auth_store, "zai") or {}
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
         state["detected_endpoint"] = {
             "base_url": detected["base_url"],
@@ -726,10 +731,63 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
         }
         _save_provider_state(auth_store, "zai", state)
         logger.info("Z.AI: auto-detected endpoint %s (%s)", detected["label"], detected["base_url"])
-        return detected["base_url"]
+        return str(detected["base_url"]).rstrip("/"), "runtime"
 
     logger.debug("Z.AI: probe failed, falling back to default %s", default_url)
-    return default_url
+    return default_url, "managed"
+
+
+def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> str:
+    """Return the correct Z.AI base URL by probing endpoints.
+
+    If the user has explicitly set GLM_BASE_URL, that always wins.
+    Otherwise, probe the candidate endpoints to find one that accepts the
+    key.  The detected endpoint is cached in provider state (auth.json) keyed
+    on a hash of the API key so subsequent starts skip the probe.
+    """
+    return _resolve_zai_runtime_endpoint(api_key, default_url, env_override)[0]
+
+
+def _resolve_zai_runtime_credentials() -> Dict[str, Any]:
+    """Resolve Z.AI runtime credentials with private endpoint provenance."""
+    pconfig = PROVIDER_REGISTRY["zai"]
+    api_key, key_source = _resolve_api_key_provider_secret("zai", pconfig)
+    if pconfig.base_url_env_var:
+        from hermes_cli.config import get_env_value
+
+        env_url = (get_env_value(pconfig.base_url_env_var) or "").strip()
+    else:
+        env_url = ""
+    base_url, endpoint_source = _resolve_zai_runtime_endpoint(
+        api_key, pconfig.inference_base_url, env_url
+    )
+    return {
+        "provider": "zai",
+        "api_key": api_key,
+        "base_url": base_url.rstrip("/"),
+        "source": key_source or "default",
+        "_endpoint_candidate_source": endpoint_source,
+    }
+
+
+def _resolve_zai_status_endpoint(
+    api_key: str, default_url: str, env_override: str
+) -> tuple[str, str, str]:
+    """Resolve Z.AI status without triggering endpoint discovery.
+
+    Returns ``(base_url, endpoint_source, endpoint_status)``.  A configured
+    key is only considered resolved when an explicit URL or a cache entry
+    bound to that key is available; status reads must never probe the network.
+    """
+    if env_override:
+        return env_override.rstrip("/"), "managed", "resolved"
+    if not api_key:
+        return default_url.rstrip("/"), "managed", "resolved"
+
+    cached_url = _zai_cached_endpoint_for_key(api_key)
+    if cached_url:
+        return cached_url, "runtime", "resolved"
+    return "", "runtime", "runtime_unresolved"
 
 
 # =============================================================================
@@ -5977,8 +6035,14 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
 
         env_url = (get_env_value(pconfig.base_url_env_var) or "").strip()
 
+    endpoint_status = "resolved"
+    endpoint_source = "managed"
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
+    elif provider_id == "zai":
+        base_url, endpoint_source, endpoint_status = _resolve_zai_status_endpoint(
+            api_key, pconfig.inference_base_url, env_url
+        )
     elif env_url:
         base_url = env_url
     else:
@@ -5991,6 +6055,8 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
         "key_source": key_source,
         "base_url": base_url,
         "logged_in": bool(api_key),  # compat with OAuth status shape
+        "endpoint_status": endpoint_status,
+        "endpoint_source": endpoint_source,
     }
 
 
@@ -6164,7 +6230,12 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        if provider_id == "zai":
+            from hermes_cli.config import get_env_value
+
+            env_url = (get_env_value(pconfig.base_url_env_var) or "").strip()
+        else:
+            env_url = os.getenv(pconfig.base_url_env_var, "").strip()
 
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -6175,12 +6246,13 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     else:
         base_url = pconfig.inference_base_url
 
-    return {
+    result = {
         "provider": provider_id,
         "api_key": api_key,
         "base_url": base_url.rstrip("/"),
         "source": key_source or "default",
     }
+    return result
 
 
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:

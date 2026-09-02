@@ -787,6 +787,14 @@ def create_profile(
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
 
+    # Normalize only the newly-created profile after its config copy is
+    # complete. The source profile remains untouched.
+    cloned_config = profile_dir / "config.yaml"
+    if cloned_config.exists() and source_dir is not None:
+        from agent.provider_credentials import mutate_config_strict
+
+        mutate_config_strict(lambda config: config, config_path=cloned_config)
+
     # Seed a default SOUL.md so the user has a file to customize immediately.
     # Skipped when the profile already has one (from --clone / --clone-all).
     soul_path = profile_dir / "SOUL.md"

@@ -1,5 +1,6 @@
 """Tests for hermes_cli configuration management."""
 
+import copy
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ from hermes_cli.config import (
     load_env,
     load_raw_config_snapshot,
     migrate_config,
+    read_raw_config,
     remove_env_value,
     save_config,
     save_anthropic_api_key,
@@ -34,6 +36,11 @@ from hermes_cli.config import (
     _sanitize_env_lines,
 )
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, LEGACY_DEFAULT_SOUL_MD
+
+
+def _write_raw_config(path: Path, config: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 class TestGetHermesHome:
@@ -1122,10 +1129,10 @@ class TestSanitizeEnvLines:
 
     def test_splits_concatenated_keys(self):
         """Two KEY=VALUE pairs jammed on one line get split."""
-        lines = ["ANTHROPIC_API_KEY=sk-ant-xxxOPENAI_BASE_URL=https://api.openai.com/v1\n"]
+        lines = ["ANTHROPIC_API_KEY=abcOPENAI_BASE_URL=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert result == [
-            "ANTHROPIC_API_KEY=sk-ant-xxx\n",
+            "ANTHROPIC_API_KEY=abc\n",
             "OPENAI_BASE_URL=https://api.openai.com/v1\n",
         ]
 
@@ -1176,7 +1183,7 @@ class TestSanitizeEnvLines:
 
     def test_value_ending_with_digits_still_splits(self):
         """Concatenation is detected even when value ends with digits."""
-        lines = ["OPENROUTER_API_KEY=sk-or-v1-abc123OPENAI_BASE_URL=https://api.openai.com/v1\n"]
+        lines = ["OPENROUTER_API_KEY=abc123OPENAI_BASE_URL=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert len(result) == 2
         assert result[0].startswith("OPENROUTER_API_KEY=")
@@ -1809,3 +1816,294 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
+
+
+def test_save_config_normalizes_fixed_endpoint_fields_before_persisting(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    config_path = home / "config.yaml"
+    raw = {
+        "model": {
+            "provider": "zai-cn",
+            "default": "glm-5",
+            "base_url": "https://legacy.example.invalid/v1",
+            "api_mode": "codex_responses",
+            "request_receipt": {"id": "keep"},
+        }
+    }
+    _write_raw_config(config_path, raw)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    save_config(raw)
+    saved = read_raw_config(config_path)
+
+    saved_fields = set(saved["model"])
+    assert saved["model"]["provider"] == "zai-cn"
+    assert saved["model"]["default"] == "glm-5"
+    assert "base_url" not in saved_fields, "fixed endpoint base_url survived save"
+    assert "api_mode" not in saved_fields, "fixed endpoint api_mode survived save"
+    assert saved["model"]["request_receipt"] == {"id": "keep"}
+
+
+def test_save_config_plain_dict_endpoint_stays_canonical_across_provider_switch(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "hermes"
+    config_path = home / "config.yaml"
+    config = {
+        "model": {
+            "provider": "zai-cn",
+            "default": "glm-5",
+            "base_url": "https://legacy.example.invalid/v1",
+            "api_mode": "chat_completions",
+            "request_receipt": {"id": "plain-receipt"},
+        }
+    }
+    _write_raw_config(config_path, config)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    save_config(config)
+    assert "base_url" not in config["model"]
+    assert "api_mode" not in config["model"]
+    assert "base_url" not in read_raw_config(config_path)["model"]
+    assert "api_mode" not in read_raw_config(config_path)["model"]
+
+    config["model"]["provider"] = "deepseek"
+    save_config(config)
+    saved = read_raw_config(config_path)
+    assert saved["model"]["provider"] == "deepseek"
+    assert saved["model"]["request_receipt"] == {"id": "plain-receipt"}
+    assert "base_url" not in saved["model"]
+    assert "api_mode" not in saved["model"]
+
+
+def test_save_config_loaded_snapshot_endpoint_stays_canonical_across_provider_switch(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "hermes"
+    config_path = home / "config.yaml"
+    _write_raw_config(
+        config_path,
+        {
+            "model": {
+                "provider": "zai-cn",
+                "default": "glm-5",
+                "base_url": "https://legacy.example.invalid/v1",
+                "api_mode": "chat_completions",
+                "request_receipt": {"id": "snapshot-receipt"},
+            }
+        },
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    config = load_config()
+    save_config(config)
+    assert "base_url" not in config["model"]
+    assert "api_mode" not in config["model"]
+
+    config["model"]["provider"] = "deepseek"
+    save_config(config)
+    saved = read_raw_config(config_path)
+    assert saved["model"]["provider"] == "deepseek"
+    assert saved["model"]["request_receipt"] == {"id": "snapshot-receipt"}
+    assert "base_url" not in saved["model"]
+    assert "api_mode" not in saved["model"]
+
+
+def test_save_config_transition_keeps_explicit_new_configurable_endpoint(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "hermes"
+    config_path = home / "config.yaml"
+    previous = {
+        "model": {
+            "provider": "deepseek",
+            "default": "old-model",
+            "base_url": "https://previous.example.invalid/v1",
+            "api_mode": "chat_completions",
+            "request_receipt": {"id": "keep"},
+        }
+    }
+    _write_raw_config(config_path, previous)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    next_config = {
+        "model": {
+            "provider": "zai",
+            "default": "new-model",
+            "base_url": "https://new.example.test/v1",
+            "api_mode": "anthropic_messages",
+            "request_receipt": {"id": "keep"},
+        }
+    }
+    save_config(next_config)
+    saved = read_raw_config(config_path)
+
+    assert saved["model"]["provider"] == "zai"
+    assert saved["model"]["default"] == "new-model"
+    assert saved["model"]["base_url"] == "https://new.example.test/v1"
+    assert saved["model"]["api_mode"] == "anthropic_messages"
+    assert saved["model"]["request_receipt"] == {"id": "keep"}
+
+
+def test_v24_to_v25_migration_uses_raw_tree_is_idempotent_and_does_not_materialize_defaults(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "hermes"
+    config_path = home / "config.yaml"
+    raw = {
+        "_config_version": 24,
+        "model": {
+            "provider": "zai-cn",
+            "default": "glm-5",
+            "base_url": "https://legacy.example.invalid/v1",
+            "api_mode": "codex_responses",
+            "credential_ref": "cred-main",
+            "request_receipt": {"id": "receipt-main"},
+        },
+        "fallback_providers": [
+            {
+                "provider": "zai-cn",
+                "model": "glm-5",
+                "base_url": "https://legacy.example.invalid/fallback",
+                "api_mode": "codex_responses",
+                "credential_ref": "cred-fallback",
+                "request_receipt": {"id": "receipt-fallback"},
+            }
+        ],
+        "fallback_model": {
+            "provider": "zai-cn",
+            "model": "glm-5",
+            "base_url": "https://legacy.example.invalid/legacy",
+            "api_mode": "codex_responses",
+            "credential_ref": "cred-legacy",
+            "request_receipt": {"id": "receipt-legacy"},
+        },
+        "auxiliary": {
+            "compression": {
+                "provider": "zai-cn",
+                "model": "glm-5",
+                "base_url": "https://legacy.example.invalid/compression",
+                "api_mode": "codex_responses",
+                "credential_ref": "cred-compression",
+                "request_receipt": {"id": "receipt-compression"},
+                "fallback_chain": [
+                    {
+                        "provider": "zai-cn",
+                        "model": "glm-5",
+                        "base_url": "https://legacy.example.invalid/chain",
+                        "api_mode": "codex_responses",
+                        "credential_ref": "cred-chain",
+                        "request_receipt": {"id": "receipt-chain"},
+                    }
+                ],
+            }
+        },
+        "credential_pool_strategies": {
+            "zai-cn": {"strategy": "reuse-first", "pool": ["cred-main", "cred-fallback"]}
+        },
+        "providers": {
+            "zai-cn": {
+                "api": "https://named.example.test/v1",
+                "credential_ref": "cred-named",
+            }
+        },
+        "custom_providers": [
+            {
+                "name": "Custom preserved",
+                "base_url": "https://custom.example.test/v1",
+                "api_mode": "chat_completions",
+                "model": "custom-model",
+            }
+        ],
+        "vision": {
+            "provider": "zai-cn",
+            "model": "vision-model",
+            "base_url": "https://vision.example.test/v1",
+            "api_mode": "chat_completions",
+        },
+        "tts": {
+            "provider": "zai-cn",
+            "model": "voice-model",
+            "base_url": "https://voice.example.test/v1",
+            "api_mode": "chat_completions",
+        },
+        "voice": {
+            "auto_tts": True,
+            "provider": "zai-cn",
+            "base_url": "https://voice.example.test/voice",
+        },
+        "security": {"profile": "strict"},
+        "sessions": {"active": "session-1"},
+        "unknown_field": {"preserve": True},
+    }
+    raw_before = copy.deepcopy(raw)
+    _write_raw_config(config_path, raw)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    migrate_config(interactive=False, quiet=True)
+    first_bytes = config_path.read_bytes()
+    first_mtime = config_path.stat().st_mtime_ns
+    migrated = read_raw_config(config_path)
+
+    assert migrated["_config_version"] == 25
+    model_fields = set(migrated["model"])
+    fallback_fields = set(migrated["fallback_providers"][0])
+    legacy_fields = set(migrated["fallback_model"])
+    compression_fields = set(migrated["auxiliary"]["compression"])
+    chain_fields = set(migrated["auxiliary"]["compression"]["fallback_chain"][0])
+    assert set(migrated) == set(raw_before)
+    assert "base_url" not in model_fields, "fixed model base_url survived migration"
+    assert "api_mode" not in model_fields, "fixed model api_mode survived migration"
+    assert "base_url" not in fallback_fields, "fixed fallback base_url survived migration"
+    assert "base_url" not in legacy_fields, "legacy fallback base_url survived migration"
+    assert "base_url" not in compression_fields, "fixed auxiliary base_url survived migration"
+    assert "api_mode" not in compression_fields, "fixed auxiliary api_mode survived migration"
+    assert "base_url" not in chain_fields, "fixed auxiliary chain base_url survived migration"
+    assert "api_mode" not in chain_fields, "fixed auxiliary chain api_mode survived migration"
+    for section in ("provider", "default", "credential_ref", "request_receipt"):
+        assert migrated["model"][section] == raw_before["model"][section]
+    for path in (
+        migrated["fallback_providers"][0],
+        migrated["fallback_model"],
+        migrated["auxiliary"]["compression"],
+        migrated["auxiliary"]["compression"]["fallback_chain"][0],
+    ):
+        original = next(
+            item for item in (
+                raw_before["fallback_providers"]
+                + [raw_before["fallback_model"], raw_before["auxiliary"]["compression"]]
+                + raw_before["auxiliary"]["compression"]["fallback_chain"]
+            )
+            if item.get("credential_ref") == path.get("credential_ref")
+        )
+        for field in ("provider", "model", "credential_ref", "request_receipt"):
+            assert path[field] == original[field]
+    assert migrated["credential_pool_strategies"] == raw_before["credential_pool_strategies"]
+    assert migrated["providers"] == raw_before["providers"]
+    assert migrated["custom_providers"] == raw_before["custom_providers"]
+    assert migrated["vision"] == raw_before["vision"]
+    assert migrated["tts"] == raw_before["tts"]
+    assert migrated["voice"] == raw_before["voice"]
+    assert migrated["security"] == raw_before["security"]
+    assert migrated["sessions"] == raw_before["sessions"]
+    assert migrated["unknown_field"] == raw_before["unknown_field"]
+    expected_root = copy.deepcopy(raw_before)
+    expected_root["_config_version"] = 25
+    for entry in (
+        expected_root["model"],
+        expected_root["fallback_providers"][0],
+        expected_root["fallback_model"],
+        expected_root["auxiliary"]["compression"],
+        expected_root["auxiliary"]["compression"]["fallback_chain"][0],
+    ):
+        entry.pop("base_url", None)
+        entry.pop("api_mode", None)
+    assert migrated == expected_root
+
+    with patch(
+        "hermes_cli.config.atomic_yaml_write",
+        side_effect=AssertionError("idempotent migration attempted a second atomic write"),
+    ):
+        migrate_config(interactive=False, quiet=True)
+    assert config_path.read_bytes() == first_bytes
+    assert config_path.stat().st_mtime_ns == first_mtime

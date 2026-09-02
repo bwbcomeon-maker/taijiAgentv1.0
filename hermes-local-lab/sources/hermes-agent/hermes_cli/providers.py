@@ -21,11 +21,25 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, MutableMapping, Optional, Tuple
 
 from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
+
+EndpointPolicy = Literal["fixed", "configurable", "runtime_managed"]
+
+@dataclass(frozen=True)
+class EndpointResolution:
+    """Static endpoint resolution contract returned by policy arbitration."""
+
+    provider: str
+    policy: EndpointPolicy
+    effective_url: str
+    source: str
+    editable: bool
+    requires_endpoint: bool
+    candidate_ignored: bool
 
 
 # -- Hermes overlay ----------------------------------------------------------
@@ -41,6 +55,8 @@ class HermesOverlay:
     extra_env_vars: Tuple[str, ...] = ()  # env vars models.dev doesn't list
     base_url_override: str = ""           # override if models.dev URL is wrong/missing
     base_url_env_var: str = ""            # env var for user-custom base URL
+    endpoint_policy: EndpointPolicy = "configurable"
+    requires_endpoint: bool = False
 
 
 HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
@@ -54,11 +70,13 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         auth_type="oauth_device_code",
         base_url_override="https://inference-api.nousresearch.com/v1",
+        endpoint_policy="runtime_managed",
     ),
     "openai-codex": HermesOverlay(
         transport="codex_responses",
         auth_type="oauth_external",
         base_url_override="https://chatgpt.com/backend-api/codex",
+        endpoint_policy="runtime_managed",
     ),
     "openai-api": HermesOverlay(
         transport="codex_responses",
@@ -70,17 +88,20 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="oauth_external",
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
+        endpoint_policy="runtime_managed",
     ),
     "qwen-oauth": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
         base_url_override="https://portal.qwen.ai/v1",
         base_url_env_var="HERMES_QWEN_BASE_URL",
+        endpoint_policy="runtime_managed",
     ),
     "google-gemini-cli": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
         base_url_override="cloudcode-pa://google",
+        endpoint_policy="runtime_managed",
     ),
     "lmstudio": HermesOverlay(
         transport="openai_chat",
@@ -94,6 +115,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="external_process",
         base_url_override="acp://copilot",
         base_url_env_var="COPILOT_ACP_BASE_URL",
+        endpoint_policy="runtime_managed",
     ),
     "github-copilot": HermesOverlay(
         transport="openai_chat",
@@ -112,6 +134,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         extra_env_vars=("GLM_CN_API_KEY",),
         base_url_override="https://open.bigmodel.cn/api/paas/v4",
+        endpoint_policy="fixed",
     ),
     "kimi-for-coding": HermesOverlay(
         transport="openai_chat",
@@ -131,6 +154,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="anthropic_messages",
         auth_type="oauth_external",
         base_url_override="https://api.minimax.io/anthropic",
+        endpoint_policy="runtime_managed",
     ),
     "minimax-cn": HermesOverlay(
         transport="anthropic_messages",
@@ -212,10 +236,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "azure-foundry": HermesOverlay(
         transport="openai_chat",  # default; overridden by api_mode in config
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+        requires_endpoint=True,
     ),
     "bedrock": HermesOverlay(
         transport="bedrock_converse",
         auth_type="aws_sdk",
+        endpoint_policy="runtime_managed",
     ),
 }
 
@@ -237,6 +263,8 @@ class ProviderDef:
     auth_type: str = "api_key"
     doc: str = ""
     source: str = ""                      # "models.dev", "hermes", "user-config"
+    endpoint_policy: EndpointPolicy = "configurable"
+    requires_endpoint: bool = False
 
 
 # -- Aliases ------------------------------------------------------------------
@@ -443,6 +471,12 @@ def get_provider(name: str) -> Optional[ProviderDef]:
         auth = overlay.auth_type if overlay else "api_key"
         base_url_env = overlay.base_url_env_var if overlay else ""
         base_url_override = overlay.base_url_override if overlay else ""
+        endpoint_policy, _ = _endpoint_metadata_for_provider(canonical)
+        requires_endpoint = _requires_endpoint_for_provider(
+            canonical,
+            endpoint_policy,
+            default_url=base_url_override or mdev_info.api,
+        )
 
         # Combine env vars: models.dev env + hermes extra
         env_vars = list(mdev_info.env)
@@ -460,12 +494,19 @@ def get_provider(name: str) -> Optional[ProviderDef]:
             base_url_env_var=base_url_env,
             is_aggregator=is_agg,
             auth_type=auth,
+            endpoint_policy=endpoint_policy,
+            requires_endpoint=requires_endpoint,
             doc=mdev_info.doc,
             source="models.dev",
         )
 
     if overlay is not None:
         # Hermes-only provider (not in models.dev)
+        requires_endpoint = _requires_endpoint_for_provider(
+            canonical,
+            overlay.endpoint_policy,
+            default_url=overlay.base_url_override,
+        )
         return ProviderDef(
             id=canonical,
             name=_LABEL_OVERRIDES.get(canonical, canonical),
@@ -475,6 +516,8 @@ def get_provider(name: str) -> Optional[ProviderDef]:
             base_url_env_var=overlay.base_url_env_var,
             is_aggregator=overlay.is_aggregator,
             auth_type=overlay.auth_type,
+            endpoint_policy=overlay.endpoint_policy,
+            requires_endpoint=requires_endpoint,
             source="hermes",
         )
 
@@ -497,6 +540,311 @@ def get_label(provider_id: str) -> str:
     return canonical
 
 
+
+
+def _normalize_endpoint_url(url: str) -> str:
+    """Return a canonical endpoint URL used by endpoint arbitration."""
+    return (url or "").strip().rstrip("/")
+
+
+def _normalize_endpoint_source(value: str) -> str:
+    source = (value or "").strip().lower()
+    if source in {"system", "managed", "custom", "runtime"}:
+        return source
+    return "managed"
+
+
+def _endpoint_metadata_for_provider(canonical_provider: str) -> Tuple[EndpointPolicy, bool]:
+    """Return endpoint-policy metadata for static resolution."""
+    overlay = HERMES_OVERLAYS.get(canonical_provider)
+    if overlay is not None:
+        return overlay.endpoint_policy, overlay.requires_endpoint
+
+    return "configurable", False
+
+
+def _requires_endpoint_for_provider(
+    canonical_provider: str,
+    policy: EndpointPolicy,
+    *,
+    default_url: Optional[str] = None,
+) -> bool:
+    """Return whether the provider requires a caller-provided endpoint."""
+    if policy == "fixed":
+        fixed_overlay = HERMES_OVERLAYS.get(canonical_provider)
+        fixed_url = _normalize_endpoint_url(
+            fixed_overlay.base_url_override if fixed_overlay else ""
+        )
+        return not bool(fixed_url)
+
+    if policy == "runtime_managed":
+        return False
+
+    if canonical_provider == "custom":
+        return True
+
+    if canonical_provider.startswith("custom:"):
+        return True
+
+    if canonical_provider == "local":
+        return True
+
+    overlay = HERMES_OVERLAYS.get(canonical_provider)
+    if overlay is not None:
+        if overlay.requires_endpoint:
+            return True
+
+    if default_url is not None:
+        return not bool(_normalize_endpoint_url(default_url))
+
+    if overlay is not None:
+        return False
+
+    if canonical_provider not in ALIASES.values() and canonical_provider not in HERMES_OVERLAYS:
+        return True
+
+    return False
+
+
+def endpoint_policy_for(provider_id: str) -> EndpointPolicy:
+    """Pure endpoint-policy lookup for a provider identifier."""
+    raw_provider = str(provider_id or "").strip().lower()
+    if not raw_provider:
+        return "configurable"
+    canonical = normalize_provider(raw_provider)
+    if not canonical:
+        return "configurable"
+    return _endpoint_metadata_for_provider(canonical)[0]
+
+
+def normalize_model_endpoint_fields(model_cfg: MutableMapping[str, Any]) -> bool:
+    """Remove durable endpoint fields owned by fixed providers.
+
+    This helper is deliberately pure: callers provide an already parsed model
+    mapping and own persistence, locking, and receipt reconciliation.
+    """
+    if not isinstance(model_cfg, MutableMapping):
+        return False
+    if endpoint_policy_for(str(model_cfg.get("provider") or "")) != "fixed":
+        return False
+    changed = False
+    for key in ("base_url", "api_mode"):
+        if key in model_cfg:
+            model_cfg.pop(key, None)
+            changed = True
+    return changed
+
+
+def _known_endpoint_entries(config: MutableMapping[str, Any]):
+    """Yield only the bounded, endpoint-owning config shapes."""
+    model = config.get("model")
+    if isinstance(model, MutableMapping):
+        yield model
+
+    fallback_providers = config.get("fallback_providers")
+    if isinstance(fallback_providers, list):
+        for entry in fallback_providers:
+            if isinstance(entry, MutableMapping):
+                yield entry
+
+    legacy = config.get("fallback_model")
+    if isinstance(legacy, MutableMapping):
+        yield legacy
+    elif isinstance(legacy, list):
+        for entry in legacy:
+            if isinstance(entry, MutableMapping):
+                yield entry
+
+    auxiliary = config.get("auxiliary")
+    if isinstance(auxiliary, MutableMapping):
+        for task, task_cfg in auxiliary.items():
+            if task in {"vision", "image", "tts", "stt", "voice"}:
+                continue
+            if not isinstance(task_cfg, MutableMapping):
+                continue
+            yield task_cfg
+            chain = task_cfg.get("fallback_chain")
+            if isinstance(chain, list):
+                for entry in chain:
+                    if isinstance(entry, MutableMapping):
+                        yield entry
+
+
+def normalize_config_endpoint_fields(config: MutableMapping[str, Any]) -> bool:
+    """Normalize fixed entries in the known endpoint-owning config paths."""
+    if not isinstance(config, MutableMapping):
+        return False
+    changed = False
+    for entry in _known_endpoint_entries(config):
+        changed = normalize_model_endpoint_fields(entry) or changed
+    return changed
+
+
+def normalize_model_endpoint_transition(
+    previous_model: MutableMapping[str, Any],
+    next_model: MutableMapping[str, Any],
+) -> bool:
+    """Clean copied endpoint ownership while preserving explicit new values."""
+    if not isinstance(previous_model, MutableMapping) or not isinstance(next_model, MutableMapping):
+        return False
+    previous_provider = normalize_provider(str(previous_model.get("provider") or ""))
+    next_provider = normalize_provider(str(next_model.get("provider") or ""))
+    changed = False
+    if previous_provider != next_provider:
+        for key in ("base_url", "api_mode"):
+            if key in next_model and next_model.get(key) == previous_model.get(key):
+                next_model.pop(key, None)
+                changed = True
+    changed = normalize_model_endpoint_fields(next_model) or changed
+    return changed
+
+
+def _pair_transition(previous, next_value) -> bool:
+    if isinstance(previous, MutableMapping) and isinstance(next_value, MutableMapping):
+        return normalize_model_endpoint_transition(previous, next_value)
+    if isinstance(previous, list) and isinstance(next_value, list):
+        changed = False
+        for index, next_entry in enumerate(next_value):
+            if index < len(previous):
+                changed = _pair_transition(previous[index], next_entry) or changed
+            elif isinstance(next_entry, MutableMapping):
+                changed = normalize_model_endpoint_fields(next_entry) or changed
+        return changed
+    if isinstance(next_value, MutableMapping):
+        return normalize_model_endpoint_fields(next_value)
+    return False
+
+
+def normalize_config_endpoint_transitions(
+    previous_config: MutableMapping[str, Any],
+    next_config: MutableMapping[str, Any],
+) -> bool:
+    """Apply bounded before/after cleanup to known config paths."""
+    if not isinstance(previous_config, MutableMapping) or not isinstance(next_config, MutableMapping):
+        return False
+    changed = False
+    changed = _pair_transition(previous_config.get("model"), next_config.get("model")) or changed
+    changed = _pair_transition(
+        previous_config.get("fallback_providers"),
+        next_config.get("fallback_providers"),
+    ) or changed
+    changed = _pair_transition(
+        previous_config.get("fallback_model"),
+        next_config.get("fallback_model"),
+    ) or changed
+
+    previous_aux = previous_config.get("auxiliary")
+    next_aux = next_config.get("auxiliary")
+    if isinstance(previous_aux, MutableMapping) and isinstance(next_aux, MutableMapping):
+        for task, next_task in next_aux.items():
+            if task in {"vision", "image", "tts", "stt", "voice"}:
+                continue
+            previous_task = previous_aux.get(task)
+            if not isinstance(next_task, MutableMapping):
+                continue
+            changed = _pair_transition(previous_task, next_task) or changed
+            changed = _pair_transition(
+                previous_task.get("fallback_chain") if isinstance(previous_task, MutableMapping) else None,
+                next_task.get("fallback_chain"),
+            ) or changed
+    return changed
+
+
+def resolve_provider_endpoint(
+    provider_id: str,
+    *,
+    configured_url: str = "",
+    runtime_url: str = "",
+    candidate_source: str = "managed",
+    candidate_override_present: bool = False,
+) -> EndpointResolution:
+    """Pure endpoint arbitration for UI/API endpoint views."""
+    raw_provider = str(provider_id or "").strip().lower()
+    if not raw_provider:
+        return EndpointResolution(
+            provider="",
+            policy="configurable",
+            effective_url="",
+            source="",
+            editable=False,
+            requires_endpoint=False,
+            candidate_ignored=False,
+        )
+
+    canonical = normalize_provider(raw_provider)
+    policy, requires_endpoint = _endpoint_metadata_for_provider(canonical)
+    requires_endpoint = _requires_endpoint_for_provider(canonical, policy)
+
+    effective_configured_url = _normalize_endpoint_url(configured_url)
+    effective_runtime_url = _normalize_endpoint_url(runtime_url)
+    normalized_source = _normalize_endpoint_source(candidate_source)
+
+    if policy == "fixed":
+        fixed_overlay = HERMES_OVERLAYS.get(canonical)
+        fixed_url = (fixed_overlay.base_url_override if fixed_overlay else "").strip()
+        if not fixed_url:
+            return EndpointResolution(
+                provider=canonical,
+                policy="fixed",
+                effective_url="",
+                source="system",
+                editable=False,
+                requires_endpoint=requires_endpoint,
+                candidate_ignored=bool(candidate_override_present),
+            )
+
+        return EndpointResolution(
+            provider=canonical,
+            policy="fixed",
+            effective_url=fixed_url.rstrip("/"),
+            source="system",
+            editable=False,
+            requires_endpoint=requires_endpoint,
+            candidate_ignored=bool(candidate_override_present),
+        )
+
+    if policy == "runtime_managed":
+        if effective_runtime_url:
+            return EndpointResolution(
+                provider=canonical,
+                policy="runtime_managed",
+                effective_url=effective_runtime_url,
+                source="runtime",
+                editable=False,
+                requires_endpoint=requires_endpoint,
+                candidate_ignored=False,
+            )
+
+        return EndpointResolution(
+            provider=canonical,
+            policy="runtime_managed",
+            effective_url="",
+            source="runtime",
+            editable=False,
+            requires_endpoint=requires_endpoint,
+            candidate_ignored=False,
+        )
+
+    if effective_runtime_url:
+        return EndpointResolution(
+            provider=canonical,
+            policy="configurable",
+            effective_url=effective_runtime_url,
+            source="runtime",
+            editable=(raw_provider == "custom"),
+            requires_endpoint=requires_endpoint,
+            candidate_ignored=False,
+        )
+
+    return EndpointResolution(
+        provider=canonical,
+        policy="configurable",
+        effective_url=effective_configured_url,
+        source=normalized_source,
+        editable=(raw_provider == "custom"),
+        requires_endpoint=requires_endpoint,
+        candidate_ignored=False,
+    )
 
 
 def is_aggregator(provider: str) -> bool:
@@ -584,6 +932,8 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
         base_url=api_url,
         is_aggregator=False,
         auth_type="api_key",
+        endpoint_policy="configurable",
+        requires_endpoint=True,
         source="user-config",
     )
 
@@ -646,6 +996,8 @@ def resolve_custom_provider(
             base_url=api_url,
             is_aggregator=False,
             auth_type="api_key",
+            endpoint_policy="configurable",
+            requires_endpoint=True,
             source="user-config",
         )
 
@@ -661,6 +1013,8 @@ def resolve_custom_provider(
             base_url=aurl,
             is_aggregator=False,
             auth_type="api_key",
+            endpoint_policy="configurable",
+            requires_endpoint=True,
             source="user-config",
         )
 
@@ -718,6 +1072,12 @@ def resolve_provider_full(
                 transport="openai_chat",
                 api_key_env_vars=mdev_info.env,
                 base_url=mdev_info.api,
+                endpoint_policy="configurable",
+                requires_endpoint=_requires_endpoint_for_provider(
+                    canonical,
+                    "configurable",
+                    default_url=mdev_info.api,
+                ),
                 source="models.dev",
             )
     except Exception:

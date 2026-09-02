@@ -61,6 +61,208 @@ def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkey
     assert resolved["base_url"] == "https://proxy.example.com/anthropic"
 
 
+def test_anthropic_pool_config_proxy_owns_endpoint_provenance(monkeypatch):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://api.anthropic.com"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_anthropic_selected_nondefault_pool_endpoint_owns_provenance(monkeypatch):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://pool.example.com/anthropic"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["base_url"] == "https://pool.example.com/anthropic"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+def test_azure_foundry_selected_nondefault_pool_endpoint_owns_provenance(
+    monkeypatch,
+):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://pool.example.com/openai/v1"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "azure-foundry")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "azure-foundry",
+            "default": "gpt-4.1",
+            "base_url": "https://configured.example.com/openai/v1",
+            "api_mode": "chat_completions",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "pool-token")
+
+    resolved = rp.resolve_runtime_provider(requested="azure-foundry")
+
+    assert resolved["base_url"] == "https://pool.example.com/openai/v1"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+def test_minimax_pool_config_proxy_owns_endpoint_provenance(monkeypatch):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://api.minimax.io/anthropic"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "minimax")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "minimax",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="minimax")
+
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_minimax_selected_nondefault_pool_endpoint_owns_provenance(monkeypatch):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://pool.example.com/anthropic"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "minimax")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "minimax",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="minimax")
+
+    assert resolved["base_url"] == "https://pool.example.com/anthropic"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+def test_azure_foundry_pool_without_endpoint_uses_config_endpoint_provenance(
+    monkeypatch,
+):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = ""
+        runtime_base_url = ""
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "azure-foundry")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "azure-foundry",
+            "default": "gpt-4.1",
+            "base_url": "https://configured.example.com/openai/v1",
+            "api_mode": "chat_completions",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="azure-foundry")
+
+    assert resolved["base_url"] == "https://configured.example.com/openai/v1"
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
 def test_resolve_runtime_provider_anthropic_explicit_override_skips_pool(monkeypatch):
     def _unexpected_pool(provider):
         raise AssertionError(f"load_pool should not be called for {provider}")
@@ -191,6 +393,9 @@ def test_codex_app_server_short_circuits_all_http_credential_resolution(
         "source": "local-codex-app-server",
         "credential_pool": None,
         "requested_provider": requested,
+        "endpoint_policy": "runtime_managed",
+        "endpoint_source": "runtime",
+        "endpoint_candidate_ignored": False,
     }
 
 
@@ -254,6 +459,9 @@ def test_codex_app_server_flag_never_short_circuits_non_openai_provider(
         "api_key": "anthropic-token",
         "source": "explicit",
         "requested_provider": "anthropic",
+        "endpoint_policy": "configurable",
+        "endpoint_source": "managed",
+        "endpoint_candidate_ignored": False,
     }
     explicit = MagicMock(return_value=expected)
     monkeypatch.setattr(rp, "_resolve_explicit_runtime", explicit)
@@ -1154,13 +1362,14 @@ def test_model_config_api_mode_ignored_when_provider_differs(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        rp,
-        "resolve_api_key_provider_credentials",
-        lambda provider: {
-            "provider": provider,
+        rp.auth_mod,
+        "_resolve_zai_runtime_credentials",
+        lambda: {
+            "provider": "zai",
             "api_key": "test-key",
             "base_url": "https://api.z.ai/api/paas/v4",
             "source": "env",
+            "_endpoint_candidate_source": "managed",
         },
     )
 
@@ -2818,3 +3027,361 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# =============================================================================
+# Provider endpoint authority: Task 2 runtime finalizer contracts
+# =============================================================================
+
+def _install_zai_cn_runtime_seams(monkeypatch, model_cfg, raw_config=None):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai-cn")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: dict(model_cfg))
+    monkeypatch.setattr(
+        rp,
+        "_read_runtime_raw_config",
+        lambda: dict(raw_config if raw_config is not None else {"model": model_cfg}),
+        raising=False,
+    )
+    monkeypatch.setenv("GLM_CN_API_KEY", "task2-test-key")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: None)
+
+
+def test_zai_cn_dirty_same_provider_config_is_finalized(monkeypatch):
+    dirty_model = {
+        "provider": "zai-cn",
+        "default": "glm-5",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_mode": "codex_responses",
+    }
+    _install_zai_cn_runtime_seams(monkeypatch, dirty_model)
+
+    resolved = rp.resolve_runtime_provider(requested="zai-cn")
+
+    assert resolved["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["endpoint_policy"] == "fixed"
+    assert resolved["endpoint_source"] == "system"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+def test_zai_cn_explicit_endpoint_is_finalized(monkeypatch):
+    _install_zai_cn_runtime_seams(monkeypatch, {"provider": "zai-cn", "default": "glm-5"})
+
+    resolved = rp.resolve_runtime_provider(
+        requested="zai-cn",
+        explicit_api_key="TEST_ONLY_EXPLICIT_TASK2_KEY",
+        explicit_base_url="https://api.deepseek.com/v1",
+    )
+
+    assert resolved["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+def test_zai_cn_pool_endpoint_is_finalized(monkeypatch):
+    class _Entry:
+        access_token = "pool-task2-key"
+        source = "pool:test"
+        base_url = "https://api.deepseek.com/v1"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    _install_zai_cn_runtime_seams(monkeypatch, {"provider": "zai-cn", "default": "glm-5"})
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="zai-cn")
+
+    assert resolved["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["endpoint_candidate_ignored"] is True
+
+
+@pytest.mark.parametrize(
+    "raw_config, explicit_base_url, expected_ignored",
+    [
+        ({"model": {"provider": "zai-cn", "default": "glm-5"}}, None, False),
+        ({"model": {"provider": "zai-cn", "default": "glm-5", "base_url": "https://api.deepseek.com/v1"}}, None, True),
+        ({"model": {"provider": "zai-cn", "default": "glm-5"}, "providers": {"zai-cn": {"base_url": "https://proxy.invalid/v1"}}}, None, True),
+        ({"model": {"provider": "zai-cn", "default": "glm-5"}}, "https://proxy.invalid/v1", True),
+        ({"model": {"provider": "zai-cn", "default": "glm-5", "base_url": "https://open.bigmodel.cn/api/paas/v4"}}, None, True),
+    ],
+    ids=["registry-default", "raw-model", "raw-provider", "explicit", "raw-canonical"],
+)
+def test_zai_cn_endpoint_override_presence_uses_source_matrix(
+    monkeypatch, raw_config, explicit_base_url, expected_ignored
+):
+    _install_zai_cn_runtime_seams(monkeypatch, raw_config["model"], raw_config)
+    resolved = rp.resolve_runtime_provider(
+        requested="zai-cn", explicit_base_url=explicit_base_url
+    )
+    assert resolved["endpoint_candidate_ignored"] is expected_ignored
+
+
+def test_runtime_wrapper_calls_candidate_and_finalizer_once(monkeypatch):
+    calls = {"candidate": 0, "finalizer": 0}
+    candidate_result = {
+        "provider": "zai-cn",
+        "api_mode": "codex_responses",
+        "base_url": "https://stale.invalid/v1",
+        "api_key": "task2-key",
+        "_endpoint_candidate_source": "runtime",
+        "_endpoint_candidate_override_present": True,
+    }
+
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "zai-cn"})
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {}, raising=False)
+
+    def candidate(**kwargs):
+        calls["candidate"] += 1
+        assert kwargs["_model_cfg"] == {"provider": "zai-cn"}
+        return dict(candidate_result)
+
+    def finalizer(candidate, **kwargs):
+        calls["finalizer"] += 1
+        assert "_endpoint_candidate_source" not in candidate
+        assert "_endpoint_candidate_override_present" not in candidate
+        return {**candidate, "endpoint_policy": "fixed"}
+
+    monkeypatch.setattr(rp, "_resolve_runtime_provider_candidate", candidate, raising=False)
+    monkeypatch.setattr(rp, "finalize_runtime_endpoint", finalizer, raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="zai-cn")
+
+    assert calls == {"candidate": 1, "finalizer": 1}
+    assert resolved["endpoint_policy"] == "fixed"
+
+
+def test_runtime_wrapper_preserves_string_model_and_alias_seams(monkeypatch):
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"default": "string-model"})
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {}, raising=False)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai-cn")
+    monkeypatch.setenv("GLM_CN_API_KEY", "task2-string-model-key")
+    resolved = rp.resolve_runtime_provider(requested="zai-cn", target_model="alias-model")
+    assert resolved["provider"] == "zai-cn"
+    assert resolved["api_key"] == "task2-string-model-key"
+
+
+def test_candidate_branches_carry_explicit_endpoint_provenance(monkeypatch):
+    model_cfg = {"provider": "zai-cn", "default": "glm-5"}
+    _install_zai_cn_runtime_seams(monkeypatch, model_cfg, {"model": model_cfg})
+    candidate = rp._resolve_runtime_provider_candidate(
+        requested="zai-cn",
+        explicit_api_key="candidate-key",
+        explicit_base_url="https://proxy.invalid/v1",
+        _model_cfg=model_cfg,
+    )
+    assert candidate["_endpoint_candidate_source"] == "runtime"
+    assert candidate["_endpoint_candidate_override_present"] is True
+
+
+def test_pool_with_key_but_without_endpoint_uses_managed_registry_candidate(monkeypatch):
+    class _Entry:
+        access_token = "pool-key-only"
+        source = "pool:test"
+        base_url = ""
+        runtime_base_url = ""
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    model_cfg = {"provider": "zai", "default": "glm-5"}
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: dict(model_cfg))
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {"model": model_cfg}, raising=False)
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+    resolved = rp.resolve_runtime_provider(requested="zai")
+    assert resolved["base_url"] == "https://api.z.ai/api/paas/v4"
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_runtime_reads_model_config_once_through_openrouter_branch(monkeypatch):
+    calls = {"count": 0}
+
+    def read_model_cfg():
+        calls["count"] += 1
+        return {"provider": "openrouter", "default": "test-model"}
+
+    monkeypatch.setattr(rp, "_get_model_config", read_model_cfg)
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {}, raising=False)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-task2-key")
+
+    rp.resolve_runtime_provider(requested="openrouter")
+
+    assert calls["count"] == 1
+
+
+def test_fixed_missing_overlay_url_does_not_preserve_stale_api_mode(monkeypatch):
+    from hermes_cli.providers import HermesOverlay
+
+    model_cfg = {"provider": "zai-cn", "default": "glm-5", "api_mode": "codex_responses"}
+    _install_zai_cn_runtime_seams(monkeypatch, model_cfg, {"model": model_cfg})
+    monkeypatch.setitem(
+        rp.HERMES_OVERLAYS,
+        "zai-cn",
+        HermesOverlay(transport="openai_chat", endpoint_policy="fixed"),
+    )
+    resolved = rp.resolve_runtime_provider(requested="zai-cn")
+    assert resolved["base_url"] == ""
+    assert resolved["api_mode"] == "chat_completions"
+
+
+def test_exact_custom_key_only_pool_keeps_custom_endpoint_provenance(monkeypatch):
+    class _Entry:
+        access_token = "custom-pool-key"
+        base_url = ""
+        runtime_base_url = ""
+        source = "pool:custom"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {
+        "provider": "custom", "base_url": "http://127.0.0.1:9400/v1"
+    })
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+    monkeypatch.setattr(rp, "get_custom_provider_pool_key", lambda *a, **k: "custom:test")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "http://127.0.0.1:9400/v1"
+    assert resolved["endpoint_source"] == "custom"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_exact_custom_pool_endpoint_owns_endpoint_provenance(monkeypatch):
+    class _Entry:
+        access_token = "custom-pool-key"
+        base_url = "https://pool.example.com/v1"
+        source = "pool:custom"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "_get_named_custom_provider", lambda _name: None)
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:9400/v1",
+        },
+    )
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "https://pool.example.com/v1"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_named_custom_key_only_pool_keeps_managed_endpoint_provenance(monkeypatch):
+    class _Entry:
+        access_token = "named-pool-key"
+        base_url = ""
+        runtime_base_url = ""
+        source = "pool:custom:named"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "_get_named_custom_provider", lambda _name: {
+        "name": "named", "base_url": "http://127.0.0.1:9500/v1"
+    })
+    monkeypatch.setattr(rp, "get_custom_provider_pool_key", lambda *a, **k: "custom:named")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+
+    resolved = rp.resolve_runtime_provider(requested="custom:named")
+
+    assert resolved["base_url"] == "http://127.0.0.1:9500/v1"
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_custom_pool_endpoint_provenance_uses_selected_pool_url(monkeypatch):
+    class _Entry:
+        access_token = "custom-pool-key"
+        base_url = "https://pool.invalid/v1"
+        runtime_base_url = "https://runtime-pool.invalid/v1"
+        source = "pool:custom"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "_get_named_custom_provider", lambda _name: {
+        "name": "named", "base_url": "http://127.0.0.1:9500/v1"
+    })
+    monkeypatch.setattr(rp, "get_custom_provider_pool_key", lambda *a, **k: "custom:named")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+
+    resolved = rp.resolve_runtime_provider(requested="custom:named")
+
+    assert resolved["base_url"] == "https://runtime-pool.invalid/v1"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+@pytest.mark.parametrize(
+    "provider, key, expected_base",
+    [
+        ("openai-codex", "codex-explicit-key", "https://chatgpt.com/backend-api/codex"),
+        ("nous", "nous-explicit-key", "https://inference-api.nousresearch.com/v1"),
+    ],
+)
+def test_runtime_managed_explicit_key_only_keeps_auth_endpoint(
+    monkeypatch, provider, key, expected_base
+):
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {})
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: provider)
+    monkeypatch.setattr(
+        rp, "load_pool", lambda _provider: type("P", (), {
+            "has_credentials": lambda self: False,
+        })(),
+    )
+    if provider == "nous":
+        monkeypatch.setattr(rp.auth_mod, "get_provider_auth_state", lambda _provider: {})
+
+    resolved = rp.resolve_runtime_provider(requested=provider, explicit_api_key=key)
+
+    assert resolved["base_url"] == expected_base
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["endpoint_candidate_ignored"] is False

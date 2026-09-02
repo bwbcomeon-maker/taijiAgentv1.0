@@ -2456,6 +2456,8 @@ def select_provider_and_model(args=None):
         _model_flow_bedrock(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
+    elif selected_provider == "zai-cn":
+        _model_flow_fixed_provider(config, selected_provider, current_model)
     elif selected_provider in {
         "openai-api",
         "gemini",
@@ -5588,6 +5590,62 @@ def _model_flow_bedrock(config, current_model=""):
         print(f"  Default model set to: {selected} (via AWS Bedrock, {region})")
     else:
         print("  No change.")
+
+
+def _model_flow_fixed_provider(config, provider_id, current_model=""):
+    """Configure a fixed-endpoint API-key provider without endpoint input."""
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        _prompt_model_selection,
+        deactivate_provider,
+    )
+    from hermes_cli.config import get_env_value, load_config, save_config
+    from hermes_cli.models import _PROVIDER_MODELS
+    from hermes_cli.providers import endpoint_policy_for
+
+    if endpoint_policy_for(provider_id) != "fixed":
+        return
+    pconfig = PROVIDER_REGISTRY[provider_id]
+    existing_key = ""
+    for env_var in pconfig.api_key_env_vars:
+        existing_key = get_env_value(env_var) or os.getenv(env_var, "")
+        if existing_key:
+            break
+    existing_key, abort = _prompt_api_key(
+        pconfig, existing_key, provider_id=provider_id
+    )
+    if abort:
+        return
+
+    model_list = []
+    try:
+        from agent.models_dev import list_agentic_models
+
+        model_list = list_agentic_models(provider_id) or []
+    except Exception:
+        pass
+    if not model_list:
+        model_list = list(_PROVIDER_MODELS.get(provider_id, []))
+    if not model_list:
+        print("No fixed-provider models available.")
+        return
+    selected = _prompt_model_selection(model_list, current_model=current_model)
+    if not selected:
+        print("No change.")
+        return
+
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = provider_id
+    model["default"] = selected
+    model.pop("base_url", None)
+    model.pop("api_mode", None)
+    save_config(cfg)
+    deactivate_provider()
+    print(f"Default model set to: {selected} (via {pconfig.name})")
 
 
 def _model_flow_api_key_provider(config, provider_id, current_model=""):

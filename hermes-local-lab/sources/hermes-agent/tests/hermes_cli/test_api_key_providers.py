@@ -342,7 +342,9 @@ class TestApiKeyProviderStatus:
         assert status["configured"] is True
         assert status["logged_in"] is True
         assert status["key_source"] == "GLM_API_KEY"
-        assert "z.ai" in status["base_url"].lower() or "api.z.ai" in status["base_url"]
+        assert status["endpoint_status"] == "runtime_unresolved"
+        assert status["endpoint_source"] == "runtime"
+        assert status["base_url"] == ""
 
     def test_fallback_env_var(self, monkeypatch):
         """ZAI_API_KEY should work when GLM_API_KEY is not set."""
@@ -1013,6 +1015,259 @@ class TestZaiEndpointAutoDetect:
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")
         assert creds["api_key"] == ""
+
+
+# =============================================================================
+# Task 2: Z.AI status/cache authority boundary (read-only, no real probing)
+# =============================================================================
+
+def _patch_zai_status_secret(monkeypatch, key="zai-task2-key"):
+    monkeypatch.setattr(
+        "hermes_cli.auth._resolve_api_key_provider_secret",
+        lambda provider_id, pconfig: (key, "GLM_API_KEY") if key else ("", ""),
+    )
+    return key
+
+
+def test_zai_dotenv_endpoint_source_is_shared_between_status_and_runtime(
+    monkeypatch,
+):
+    import hermes_cli.config as config_mod
+    import hermes_cli.runtime_provider as runtime_provider
+
+    proxy_url = "https://dotenv-proxy.example/v1"
+    _patch_zai_status_secret(monkeypatch, key="zai-dotenv-key")
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        config_mod,
+        "get_env_value",
+        lambda name: proxy_url if name == "GLM_BASE_URL" else None,
+    )
+    probe_calls = []
+
+    def _probe_must_not_run(*_args, **_kwargs):
+        probe_calls.append(True)
+        return None
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint", _probe_must_not_run
+    )
+
+    status = get_api_key_provider_status("zai")
+    credentials = resolve_api_key_provider_credentials("zai")
+
+    model_cfg = {"provider": "zai", "default": "glm-5"}
+    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: dict(model_cfg))
+    monkeypatch.setattr(
+        runtime_provider, "_read_runtime_raw_config", lambda: {"model": model_cfg}
+    )
+    monkeypatch.setattr(
+        runtime_provider, "resolve_provider", lambda *a, **k: "zai"
+    )
+    monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
+
+    resolved = runtime_provider.resolve_runtime_provider(requested="zai")
+
+    assert status["base_url"] == proxy_url
+    assert status["endpoint_source"] == "managed"
+    assert status["endpoint_status"] == "resolved"
+    assert {
+        "credentials_url": credentials["base_url"],
+        "runtime_url": resolved["base_url"],
+        "probe_calls": probe_calls,
+    } == {
+        "credentials_url": proxy_url,
+        "runtime_url": proxy_url,
+        "probe_calls": [],
+    }
+    assert credentials["source"] == "GLM_API_KEY"
+    assert set(credentials) == {"provider", "api_key", "base_url", "source"}
+    assert resolved["endpoint_source"] == "managed"
+    assert resolved["endpoint_candidate_ignored"] is False
+
+
+def test_zai_status_explicit_endpoint_is_resolved_without_probe(monkeypatch):
+    _patch_zai_status_secret(monkeypatch)
+    monkeypatch.setenv("GLM_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("status must not probe")),
+    )
+
+    status = get_api_key_provider_status("zai")
+
+    assert status["endpoint_status"] == "resolved"
+    assert status["endpoint_source"] == "managed"
+    assert status["base_url"] == "https://api.z.ai/api/coding/paas/v4"
+    assert status["configured"] is True
+    assert status["logged_in"] is True
+
+
+def test_zai_status_uses_matching_cached_endpoint_without_probe(monkeypatch):
+    import hashlib
+
+    key = _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth._load_auth_store",
+        lambda: {
+            "providers": {
+                "zai": {
+                    "detected_endpoint": {
+                        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                        "key_hash": hashlib.sha256(key.encode()).hexdigest()[:16],
+                    }
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("status must not probe")),
+    )
+
+    status = get_api_key_provider_status("zai")
+
+    assert status["endpoint_status"] == "resolved"
+    assert status["endpoint_source"] == "runtime"
+    assert status["base_url"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+
+
+def test_zai_status_with_key_without_matching_cache_is_runtime_unresolved(monkeypatch):
+    _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr("hermes_cli.auth._load_auth_store", lambda: {"providers": {"zai": {}}})
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("status must not probe")),
+    )
+
+    status = get_api_key_provider_status("zai")
+
+    assert status["endpoint_status"] == "runtime_unresolved"
+    assert status["endpoint_source"] == "runtime"
+    assert status["base_url"] == ""
+    assert status["configured"] is True
+    assert status["logged_in"] is True
+
+
+def test_zai_status_without_key_can_show_registry_default_but_is_unconfigured(monkeypatch):
+    _patch_zai_status_secret(monkeypatch, key="")
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("status must not probe")),
+    )
+
+    status = get_api_key_provider_status("zai")
+
+    assert status["endpoint_status"] == "resolved"
+    assert status["endpoint_source"] == "managed"
+    assert status["base_url"] == "https://api.z.ai/api/paas/v4"
+    assert status["configured"] is False
+    assert status["logged_in"] is False
+
+
+def test_zai_credentials_use_matching_cached_coding_endpoint(monkeypatch):
+    import hashlib
+
+    key = _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth._load_auth_store",
+        lambda: {
+            "providers": {
+                "zai": {
+                    "detected_endpoint": {
+                        "base_url": "https://api.z.ai/api/coding/paas/v4",
+                        "key_hash": hashlib.sha256(key.encode()).hexdigest()[:16],
+                    }
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("matching cache must not probe")),
+    )
+
+    creds = resolve_api_key_provider_credentials("zai")
+
+    assert creds["base_url"] == "https://api.z.ai/api/coding/paas/v4"
+    assert creds["source"] == "GLM_API_KEY"
+
+
+def test_zai_public_credentials_do_not_expose_endpoint_provenance(monkeypatch):
+    _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *_a, **_kw: None)
+
+    creds = resolve_api_key_provider_credentials("zai")
+
+    assert set(creds) == {"provider", "api_key", "base_url", "source"}
+
+
+def test_zai_status_rejects_hash_matching_arbitrary_cached_url_without_probe(monkeypatch):
+    import hashlib
+
+    key = _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth._load_auth_store",
+        lambda: {
+            "providers": {
+                "zai": {
+                    "detected_endpoint": {
+                        "base_url": "https://proxy.invalid/v1",
+                        "key_hash": hashlib.sha256(key.encode()).hexdigest()[:16],
+                    }
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.detect_zai_endpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("status must not probe")),
+    )
+
+    status = get_api_key_provider_status("zai")
+
+    assert status["endpoint_status"] == "runtime_unresolved"
+    assert status["endpoint_source"] == "runtime"
+    assert status["base_url"] == ""
+
+
+def test_zai_cached_endpoint_is_runtime_candidate_without_changing_key_source(monkeypatch):
+    import hashlib
+
+    import hermes_cli.runtime_provider as rp
+
+    key = _patch_zai_status_secret(monkeypatch)
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth._load_auth_store",
+        lambda: {
+            "providers": {
+                "zai": {
+                    "detected_endpoint": {
+                        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                        "key_hash": hashlib.sha256(key.encode()).hexdigest()[:16],
+                    }
+                }
+            }
+        },
+    )
+    model_cfg = {"provider": "zai", "default": "glm-5"}
+    monkeypatch.setattr(rp, "_get_model_config", lambda: dict(model_cfg))
+    monkeypatch.setattr(rp, "_read_runtime_raw_config", lambda: {"model": model_cfg})
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: None)
+
+    resolved = rp.resolve_runtime_provider(requested="zai")
+
+    assert resolved["base_url"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+    assert resolved["endpoint_source"] == "runtime"
+    assert resolved["source"] == "GLM_API_KEY"
 
 
 # =============================================================================

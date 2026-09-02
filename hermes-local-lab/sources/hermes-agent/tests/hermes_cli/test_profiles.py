@@ -1322,6 +1322,35 @@ class TestEdgeCases:
         assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert (target_dir / ".env").read_text() == "SECRET=yes"
 
+    def test_clone_config_normalizes_endpoint_fields_only_in_new_profile(self, profile_env):
+        source_dir = create_profile("source", no_alias=True)
+        source_config = source_dir / "config.yaml"
+        source_config.write_text(
+            "model:\n"
+            "  provider: zai-cn\n"
+            "  default: glm-5\n"
+            "  base_url: https://legacy.example.invalid/v1\n"
+            "  api_mode: codex_responses\n"
+            "  request_receipt:\n    id: source-receipt\n",
+            encoding="utf-8",
+        )
+        source_bytes = source_config.read_bytes()
+
+        target_dir = create_profile(
+            "target", clone_from="source", clone_config=True, no_alias=True
+        )
+        target = yaml.safe_load((target_dir / "config.yaml").read_text(encoding="utf-8"))
+        source = yaml.safe_load(source_config.read_text(encoding="utf-8"))
+
+        target_fields = set(target["model"])
+        assert target["model"]["provider"] == "zai-cn"
+        assert target["model"]["default"] == "glm-5"
+        assert target["model"]["request_receipt"] == {"id": "source-receipt"}
+        assert "base_url" not in target_fields, "cloned profile retained old endpoint"
+        assert "api_mode" not in target_fields, "cloned profile retained old transport"
+        assert source_config.read_bytes() == source_bytes
+        assert bool(source["model"].get("base_url"))
+
     def test_delete_clears_active_profile(self, profile_env):
         """Deleting the active profile resets active to default."""
         tmp_path = profile_env

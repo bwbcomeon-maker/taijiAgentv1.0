@@ -2875,14 +2875,23 @@ def _save_config_updates(
             reconcile_capability_config_epochs,
         )
         from agent.provider_credentials import credential_transaction
+        from hermes_cli.providers import (
+            normalize_config_endpoint_fields,
+            normalize_config_endpoint_transitions,
+        )
         from utils import atomic_roundtrip_yaml_update
+
+        def _reconcile_config(previous, next_config):
+            normalize_config_endpoint_transitions(previous, next_config)
+            normalize_config_endpoint_fields(next_config)
+            reconcile_capability_config_epochs(previous, next_config)
 
         with credential_transaction(config_path):
             if batch:
                 atomic_roundtrip_yaml_update(
                     config_path,
                     updates,
-                    config_reconciler=reconcile_capability_config_epochs,
+                    config_reconciler=_reconcile_config,
                 )
             else:
                 key_path, value = next(iter(updates.items()))
@@ -2890,7 +2899,7 @@ def _save_config_updates(
                     config_path,
                     key_path,
                     value,
-                    config_reconciler=reconcile_capability_config_epochs,
+                    config_reconciler=_reconcile_config,
                 )
 
         _secure_file(config_path, credential_target=True)

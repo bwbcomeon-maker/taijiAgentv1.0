@@ -53,7 +53,7 @@ from functools import wraps
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
-from urllib.parse import urlparse, parse_qs, urlunparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 
 _transient_named_vision_clients: ContextVar[Optional[list[Any]]] = ContextVar(
@@ -481,6 +481,7 @@ from agent.safe_outbound_http import (
     normalize_network_scope,
 )
 from hermes_cli.config import get_hermes_home
+from hermes_cli.providers import HERMES_OVERLAYS, TRANSPORT_TO_API_MODE, resolve_provider_endpoint
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
 
@@ -519,6 +520,8 @@ _PROVIDER_ALIASES = {
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
+    "glm-cn": "zai-cn",
+    "zhipu-cn": "zai-cn",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
     "kimi-cn": "kimi-coding-cn",
@@ -561,6 +564,140 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
         else:
             return "custom"
     return _PROVIDER_ALIASES.get(normalized, normalized)
+
+
+def _finalize_auxiliary_endpoint(
+    provider: str,
+    base_url: Optional[str] = None,
+    api_mode: Optional[str] = None,
+    *,
+    candidate_source: str = "managed",
+    candidate_override_present: bool = False,
+) -> Tuple[str, str, Optional[str], str]:
+    """Apply the shared endpoint authority before auxiliary client use."""
+    raw_provider = str(provider or "auto").strip().lower()
+    named_custom = raw_provider.startswith("custom:")
+    canonical_provider = raw_provider if named_custom else _normalize_aux_provider(raw_provider)
+    candidate_url = str(base_url or "").strip().rstrip("/")
+    runtime_url = candidate_url if candidate_source == "runtime" else ""
+    configured_url = "" if runtime_url else candidate_url
+    resolution = resolve_provider_endpoint(
+        canonical_provider,
+        configured_url=configured_url,
+        runtime_url=runtime_url,
+        candidate_source=candidate_source,
+        candidate_override_present=candidate_override_present,
+    )
+    finalized_mode = api_mode
+    if resolution.policy == "fixed":
+        overlay = HERMES_OVERLAYS.get(resolution.provider)
+        finalized_mode = TRANSPORT_TO_API_MODE.get(
+            overlay.transport if overlay is not None else "openai_chat",
+            "chat_completions",
+        )
+    # Keep configurable/runtime-managed routing identities intact.  In
+    # particular, ``custom:<name>`` must reach the named-custom branch and
+    # ``copilot`` must retain its local Responses-wrapper dispatch.  Fixed
+    # providers, however, use the resolver's canonical ID for routing/cache.
+    route_provider = (
+        resolution.provider
+        if resolution.policy == "fixed"
+        else (raw_provider if named_custom else _normalize_aux_provider(raw_provider))
+    )
+    return route_provider, resolution.effective_url, finalized_mode, resolution.policy
+
+
+@dataclass(frozen=True)
+class _NamedCustomMaterial:
+    """Stable named Custom inputs shared by cache identity and construction."""
+
+    raw_base_url: str
+    base_url: str
+    cache_url: str
+    api_key: str = field(repr=False)
+    api_mode: str = ""
+    model: str = ""
+    name: str = ""
+    default_query: Optional[Dict[str, str]] = None
+
+
+def _named_custom_cache_material(
+    provider: str,
+    api_mode: Optional[str],
+) -> Optional[_NamedCustomMaterial]:
+    """Resolve named Custom material before deriving the client cache key."""
+    raw_provider = str(provider or "").strip().lower()
+    if not raw_provider.startswith("custom:") or raw_provider == "custom:":
+        return None
+    try:
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+    except ImportError:
+        return None
+
+    custom_entry = _get_named_custom_provider(raw_provider)
+    if not custom_entry:
+        return None
+    custom_base = custom_entry.get("base_url", "").strip()
+    custom_key = custom_entry.get("api_key", "").strip()
+    custom_key_env = (
+        custom_entry.get("key_env")
+        or custom_entry.get("api_key_env")
+        or ""
+    ).strip()
+    if not custom_key and custom_key_env:
+        custom_key = os.getenv(custom_key_env, "").strip()
+    custom_key = custom_key or "no-key-required"
+    effective_api_mode = (api_mode or custom_entry.get("api_mode") or "").strip()
+    if effective_api_mode == "anthropic_messages":
+        clean_base, default_query = _extract_url_query_params(custom_base)
+        canonical_base = _to_openai_base_url(clean_base)
+        cache_url = canonical_base
+        if default_query:
+            cache_url = urlunparse(
+                urlparse(canonical_base)._replace(
+                    query=urlencode(sorted(default_query.items()))
+                )
+            )
+        return _NamedCustomMaterial(
+            raw_base_url=custom_base,
+            base_url=custom_base,
+            cache_url=cache_url,
+            api_key=custom_key,
+            api_mode=effective_api_mode,
+            model=str(custom_entry.get("model") or "").strip(),
+            name=str(custom_entry.get("name") or "").strip(),
+            default_query=default_query,
+        )
+
+    clean_base, default_query = _extract_url_query_params(custom_base)
+    canonical_base = _to_openai_base_url(clean_base)
+    # With auto transport selection, an /anthropic URL carries semantic
+    # information that is lost when it is canonicalized to /v1.  Keep that
+    # raw identity in the cache key so it cannot alias a genuinely OpenAI-
+    # wire /v1 entry, while construction still uses the canonical base and
+    # the wrapper still sees the raw endpoint for heuristic detection.
+    cache_url = (
+        custom_base
+        if not effective_api_mode
+        and _endpoint_speaks_anthropic_messages(clean_base)
+        else canonical_base
+    )
+    if default_query and cache_url == canonical_base:
+        cache_url = urlunparse(
+            urlparse(canonical_base)._replace(
+                query=urlencode(sorted(default_query.items()))
+            )
+        )
+    return _NamedCustomMaterial(
+        raw_base_url=custom_base,
+        base_url=canonical_base,
+        cache_url=cache_url,
+        api_key=custom_key,
+        api_mode=effective_api_mode,
+        model=str(custom_entry.get("model") or "").strip(),
+        name=str(custom_entry.get("name") or "").strip(),
+        default_query=default_query,
+    )
 
 
 # Sentinel: when returned by _fixed_temperature_for_model(), callers must
@@ -1814,6 +1951,18 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 continue
 
             raw_base_url = _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
+            provider_id, raw_base_url, _, endpoint_policy = _finalize_auxiliary_endpoint(
+                provider_id,
+                raw_base_url,
+                candidate_source="runtime",
+                candidate_override_present=True,
+            )
+            if endpoint_policy == "fixed" and not raw_base_url:
+                logger.warning(
+                    "Auxiliary api-key chain: fixed provider %s has no endpoint; skipping",
+                    provider_id,
+                )
+                continue
             base_url = _to_openai_base_url(raw_base_url)
             model = _get_aux_model_for_provider(provider_id) or None
             if model is None:
@@ -1851,6 +2000,17 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             continue
 
         raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        provider_id, raw_base_url, _, endpoint_policy = _finalize_auxiliary_endpoint(
+            provider_id,
+            raw_base_url,
+            candidate_source="managed",
+        )
+        if endpoint_policy == "fixed" and not raw_base_url:
+            logger.warning(
+                "Auxiliary api-key chain: fixed provider %s has no endpoint; skipping",
+                provider_id,
+            )
+            continue
         base_url = _to_openai_base_url(raw_base_url)
         model = _get_aux_model_for_provider(provider_id) or None
         if model is None:
@@ -3529,6 +3689,7 @@ def resolve_provider_client(
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
     follow_redirects: Optional[bool] = None,
+    _named_custom_material: Optional[_NamedCustomMaterial] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Central router: given a provider name and optional model, return a
     configured client with the correct auth, base URL, and API format.
@@ -3569,6 +3730,8 @@ def resolve_provider_client(
     original_provider = (provider or "").strip().lower()
     # Normalise aliases
     provider = _normalize_aux_provider(provider)
+    if original_provider.startswith("custom:") and original_provider != "custom:":
+        provider = original_provider
 
     # Universal model-resolution fallback chain.  Callers (notably title
     # generation, vision, session search, and other auxiliary tasks) can
@@ -3905,17 +4068,27 @@ def resolve_provider_client(
         # entries that coincidentally match a canonical provider (e.g. ``nous``)
         # still defer to the built-in per `_get_named_custom_provider`'s guard.
         custom_entry = None
-        if original_provider and original_provider != provider:
-            custom_entry = _get_named_custom_provider(original_provider)
-        if custom_entry is None:
-            custom_entry = _get_named_custom_provider(provider)
+        if _named_custom_material is not None:
+            custom_entry = {
+                "name": _named_custom_material.name,
+                "model": _named_custom_material.model,
+            }
+        else:
+            if original_provider and original_provider != provider:
+                custom_entry = _get_named_custom_provider(original_provider)
+            if custom_entry is None:
+                custom_entry = _get_named_custom_provider(provider)
         if custom_entry:
-            custom_base = custom_entry.get("base_url", "").strip()
-            custom_key = custom_entry.get("api_key", "").strip()
-            custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
-            if not custom_key and custom_key_env:
-                custom_key = os.getenv(custom_key_env, "").strip()
-            custom_key = custom_key or "no-key-required"
+            if _named_custom_material is not None:
+                custom_base = _named_custom_material.raw_base_url
+                custom_key = _named_custom_material.api_key
+            else:
+                custom_base = custom_entry.get("base_url", "").strip()
+                custom_key = custom_entry.get("api_key", "").strip()
+                custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
+                if not custom_key and custom_key_env:
+                    custom_key = os.getenv(custom_key_env, "").strip()
+                custom_key = custom_key or "no-key-required"
             if custom_key == "no-key-required":
                 logger.warning(
                     "resolve_provider_client: named custom provider %r has no resolvable "
@@ -3925,7 +4098,11 @@ def resolve_provider_client(
                 )
             # An explicit per-task api_mode override (from _resolve_task_provider_model)
             # wins; otherwise fall back to what the provider entry declared.
-            entry_api_mode = (api_mode or custom_entry.get("api_mode") or "").strip()
+            entry_api_mode = (
+                _named_custom_material.api_mode
+                if _named_custom_material is not None
+                else (api_mode or custom_entry.get("api_mode") or "").strip()
+            )
             if custom_base:
                 final_model = _normalize_resolved_model(
                     model
@@ -3939,13 +4116,23 @@ def resolve_provider_client(
                 # OpenAI-wire paths (chat_completions / codex_responses) need the
                 # /v1 equivalent.  Rewrite only on the OpenAI-wire path so the
                 # Anthropic fallback SDK still sees the original URL.
-                if entry_api_mode == "anthropic_messages":
+                _custom_query = None
+                if _named_custom_material is not None:
+                    openai_base = _named_custom_material.base_url
+                    raw_base_for_wrap = _named_custom_material.raw_base_url
+                    _clean_base2 = _named_custom_material.base_url
+                    _dq2 = _named_custom_material.default_query
+                elif entry_api_mode == "anthropic_messages":
                     openai_base = custom_base
                     raw_base_for_wrap = custom_base
                 else:
-                    openai_base = _to_openai_base_url(custom_base)
+                    _custom_clean_base, _custom_query = _extract_url_query_params(custom_base)
+                    openai_base = _to_openai_base_url(_custom_clean_base)
                     raw_base_for_wrap = custom_base
-                _clean_base2, _dq2 = _extract_url_query_params(openai_base)
+                if _named_custom_material is None:
+                    _clean_base2, _dq2 = _extract_url_query_params(openai_base)
+                    if _custom_query:
+                        _dq2 = _custom_query
                 _extra2 = {"default_query": _dq2} if _dq2 else {}
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
@@ -3966,12 +4153,25 @@ def resolve_provider_client(
                         )
                         # Fallback went OpenAI-wire after all — redo the query
                         # extraction against the rewritten /v1 URL.
-                        _fallback_base = _to_openai_base_url(custom_base)
+                        _fallback_clean, _fallback_query = _extract_url_query_params(custom_base)
+                        _fallback_base = _to_openai_base_url(_fallback_clean)
                         _fb_clean, _fb_dq = _extract_url_query_params(_fallback_base)
+                        if _fallback_query:
+                            _fb_dq = _fallback_query
                         _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
                         client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
-                        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                                else (client, final_model))
+                        setattr(client, "_taiji_uncached_auxiliary_fallback", True)
+                        if async_mode:
+                            async_client, _ = _to_async_client(
+                                client, final_model, is_vision=is_vision
+                            )
+                            setattr(
+                                async_client,
+                                "_taiji_uncached_auxiliary_fallback",
+                                True,
+                            )
+                            return async_client, final_model
+                        return client, final_model
                     sync_anthropic = AnthropicAuxiliaryClient(
                         real_client, final_model, custom_key, custom_base, is_oauth=False,
                     )
@@ -4083,18 +4283,28 @@ def resolve_provider_client(
 
         raw_base_url = (
             explicit_base_url.strip().rstrip("/")
-            if fully_explicit_runtime
+            if explicit_base_url
             else (
                 str(creds.get("base_url", "")).strip().rstrip("/")
                 or pconfig.inference_base_url
             )
         )
+        provider, raw_base_url, api_mode, endpoint_policy = _finalize_auxiliary_endpoint(
+            provider,
+            raw_base_url,
+            api_mode,
+            candidate_source=(
+                "runtime" if explicit_base_url else "managed"
+            ),
+                candidate_override_present=bool(explicit_base_url),
+        )
+        if endpoint_policy == "fixed" and not raw_base_url:
+            logger.warning(
+                "resolve_provider_client: fixed provider %s has no endpoint",
+                provider,
+            )
+            return None, None
         base_url = _to_openai_base_url(raw_base_url)
-        # Honour an explicit base_url override from the caller — used when a
-        # fallback_model entry (or custom_providers lookup) routes through a
-        # built-in provider name but targets a user-specified endpoint.
-        if explicit_base_url:
-            base_url = _to_openai_base_url(explicit_base_url.strip().rstrip("/"))
 
         default_model = None if model else _get_aux_model_for_provider(provider)
         final_model = _normalize_resolved_model(model or default_model, provider)
@@ -5068,11 +5278,33 @@ def _get_cached_client(
             current_loop = _aio.get_event_loop()
         except RuntimeError:
             pass
+    provider, base_url, api_mode, endpoint_policy = _finalize_auxiliary_endpoint(
+        provider,
+        base_url,
+        api_mode,
+        candidate_source=("runtime" if base_url else "managed"),
+        candidate_override_present=bool(base_url),
+    )
+    if endpoint_policy == "fixed" and not base_url:
+        logger.warning(
+            "_get_cached_client: fixed provider %s has no endpoint",
+            provider,
+        )
+        return None, None
+    named_material = _named_custom_cache_material(
+        provider, api_mode
+    )
+    cache_base_url = base_url
+    if named_material is not None:
+        cache_base_url = named_material.cache_url
+        base_url = named_material.base_url
+        api_key = named_material.api_key
+        api_mode = named_material.api_mode
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
         provider,
         async_mode=async_mode,
-        base_url=base_url,
+        base_url=cache_base_url,
         api_key=api_key,
         api_mode=api_mode,
         main_runtime=main_runtime,
@@ -5121,8 +5353,11 @@ def _get_cached_client(
         api_mode=api_mode,
         main_runtime=runtime,
         is_vision=is_vision,
+        _named_custom_material=named_material,
     )
-    if client is not None:
+    if client is not None and getattr(
+        client, "_taiji_uncached_auxiliary_fallback", False
+    ) is not True:
         # For async clients, remember which loop they were created on so we
         # can detect stale entries later.
         bound_loop = current_loop

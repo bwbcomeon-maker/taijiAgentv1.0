@@ -29,13 +29,40 @@ from hermes_cli.auth import (
     resolve_external_process_provider_credentials,
     has_usable_secret,
 )
-from hermes_cli.config import get_compatible_custom_providers, get_env_value, load_config
+from hermes_cli.config import (
+    get_compatible_custom_providers,
+    get_env_value,
+    load_config,
+    read_raw_config,
+)
+from hermes_cli.providers import (
+    HERMES_OVERLAYS,
+    TRANSPORT_TO_API_MODE,
+    endpoint_policy_for,
+    normalize_provider,
+    resolve_provider_endpoint,
+)
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname
 
 
 def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
+
+
+def _with_endpoint_candidate(
+    result: Optional[Dict[str, Any]],
+    *,
+    source: str,
+    override_present: bool,
+) -> Optional[Dict[str, Any]]:
+    """Attach endpoint provenance at the branch that knows its source."""
+    if not isinstance(result, dict):
+        return result
+    marked = dict(result)
+    marked["_endpoint_candidate_source"] = source
+    marked["_endpoint_candidate_override_present"] = bool(override_present)
+    return marked
 
 
 def _loopback_hostname(host: str) -> bool:
@@ -294,8 +321,10 @@ def _resolve_runtime_from_pool_entry(
     model_cfg: Optional[Dict[str, Any]] = None,
     pool: Optional[CredentialPool] = None,
     target_model: Optional[str] = None,
+    fallback_source: Optional[str] = None,
+    fallback_override_present: bool = False,
 ) -> Dict[str, Any]:
-    model_cfg = model_cfg or _get_model_config()
+    model_cfg = model_cfg if model_cfg is not None else _get_model_config()
     # When the caller is resolving for a specific target model (e.g. a /model
     # mid-session switch), prefer that over the persisted model.default. This
     # prevents api_mode being computed from a stale config default that no
@@ -303,8 +332,19 @@ def _resolve_runtime_from_pool_entry(
     # opencode-zen /v1 to be stripped for chat_completions requests when
     # config.default was still a Claude model.
     effective_model = (target_model or model_cfg.get("default") or "")
+    pool_endpoint_present = bool(
+        (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").strip()
+    )
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    config_endpoint_override = False
+    config_endpoint_ignored = False
     base_url = (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").rstrip("/")
     api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+    if not base_url:
+        pconfig = PROVIDER_REGISTRY.get(provider)
+        base_url = (pconfig.inference_base_url if pconfig else "").rstrip("/")
+    if not base_url and provider == "custom":
+        base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
     api_mode = "chat_completions"
     if provider == "openai-codex":
         api_mode = "codex_responses"
@@ -332,7 +372,18 @@ def _resolve_runtime_from_pool_entry(
         cfg_base_url = ""
         if cfg_provider == "anthropic":
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-        base_url = cfg_base_url or base_url or "https://api.anthropic.com"
+        pool_url_is_default = not pool_endpoint_present or (
+            pconfig
+            and pconfig.inference_base_url
+            and base_url == pconfig.inference_base_url.rstrip("/")
+        )
+        if cfg_base_url and pool_url_is_default:
+            base_url = cfg_base_url
+            config_endpoint_override = True
+        elif cfg_base_url:
+            config_endpoint_ignored = True
+        else:
+            base_url = base_url or "https://api.anthropic.com"
     elif provider == "openrouter":
         base_url = base_url or OPENROUTER_BASE_URL
     elif provider == "xai":
@@ -347,8 +398,16 @@ def _resolve_runtime_from_pool_entry(
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         if cfg_provider == "azure-foundry":
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-            if cfg_base_url:
+            pool_url_is_default = not pool_endpoint_present or (
+                pconfig
+                and pconfig.inference_base_url
+                and base_url == pconfig.inference_base_url.rstrip("/")
+            )
+            if cfg_base_url and pool_url_is_default:
                 base_url = cfg_base_url
+                config_endpoint_override = True
+            elif cfg_base_url:
+                config_endpoint_ignored = True
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
             if configured_mode:
                 api_mode = configured_mode
@@ -376,10 +435,13 @@ def _resolve_runtime_from_pool_entry(
         # fell back to the hardcoded default).  Env var overrides win (#6039).
         pconfig = PROVIDER_REGISTRY.get(provider)
         pool_url_is_default = pconfig and base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/")
-        if configured_provider == provider and pool_url_is_default:
+        if provider != "custom" and configured_provider == provider:
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
-            if cfg_base_url:
+            if cfg_base_url and pool_url_is_default:
                 base_url = cfg_base_url
+                config_endpoint_override = True
+            elif cfg_base_url:
+                config_endpoint_ignored = True
         configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
         if provider in {"opencode-zen", "opencode-go"}:
             # Re-derive api_mode from the effective model rather than the
@@ -412,7 +474,17 @@ def _resolve_runtime_from_pool_entry(
         provider=provider, api_mode=api_mode, model_cfg=model_cfg
     )
 
-    return {
+    candidate_source = "managed" if config_endpoint_override else (
+        "runtime"
+        if pool_endpoint_present
+        else fallback_source
+        or (
+            "runtime"
+            if endpoint_policy_for(provider) == "runtime_managed"
+            else "managed"
+        )
+    )
+    candidate = {
         "provider": provider,
         "api_mode": api_mode,
         "base_url": base_url,
@@ -421,6 +493,13 @@ def _resolve_runtime_from_pool_entry(
         "credential_pool": pool,
         "requested_provider": requested_provider,
     }
+    if config_endpoint_ignored:
+        candidate["_endpoint_candidate_ignored"] = True
+    return _with_endpoint_candidate(candidate, source=candidate_source, override_present=(
+        False
+        if config_endpoint_override
+        else pool_endpoint_present or fallback_override_present
+    ))
 
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
@@ -447,6 +526,8 @@ def _try_resolve_from_custom_pool(
     provider_label: str,
     api_mode_override: Optional[str] = None,
     provider_name: Optional[str] = None,
+    fallback_source: str = "managed",
+    fallback_override_present: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Check if a credential pool exists for a custom endpoint and return a runtime dict if so."""
     pool_key = get_custom_provider_pool_key(base_url, provider_name=provider_name)
@@ -462,14 +543,22 @@ def _try_resolve_from_custom_pool(
         pool_api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         if not pool_api_key:
             return None
-        return {
+        pool_base_url = (
+            getattr(entry, "runtime_base_url", None)
+            or getattr(entry, "base_url", None)
+            or ""
+        ).strip().rstrip("/")
+        endpoint_present = bool(pool_base_url)
+        selected_base_url = pool_base_url or base_url
+        return _with_endpoint_candidate({
             "provider": provider_label,
-            "api_mode": api_mode_override or _detect_api_mode_for_url(base_url) or "chat_completions",
-            "base_url": base_url,
+            "api_mode": api_mode_override or _detect_api_mode_for_url(selected_base_url) or "chat_completions",
+            "base_url": selected_base_url,
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
-        }
+        }, source="runtime" if endpoint_present else fallback_source,
+           override_present=endpoint_present or fallback_override_present)
     except Exception:
         return None
 
@@ -651,7 +740,13 @@ def _resolve_named_custom_runtime(
         # Check credential pool first — mirrors the named-custom-provider path
         # so bare `provider: custom` with a configured custom_providers entry
         # also gets its api_key from the pool instead of env var fallbacks.
-        pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
+        pool_result = _try_resolve_from_custom_pool(
+            base_url,
+            "custom",
+            None,
+            fallback_source="runtime",
+            fallback_override_present=True,
+        )
         if pool_result:
             pool_result["source"] = "direct-alias"
             return pool_result
@@ -671,14 +766,14 @@ def _resolve_named_custom_runtime(
             (c for c in api_key_candidates if has_usable_secret(c)),
             "",
         ) or "no-key-required"
-        return {
+        return _with_endpoint_candidate({
             "provider": "custom",
             "api_mode": _detect_api_mode_for_url(base_url) or "chat_completions",
             "base_url": base_url,
             "api_key": api_key,
             "source": "direct-alias",
             "requested_provider": requested_provider,
-        }
+        }, source="runtime", override_present=True)
 
     custom_provider = _get_named_custom_provider(requested_provider)
     if not custom_provider:
@@ -692,7 +787,14 @@ def _resolve_named_custom_runtime(
         return None
 
     # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"), provider_name=custom_provider.get("name"))
+    pool_result = _try_resolve_from_custom_pool(
+        base_url,
+        "custom",
+        custom_provider.get("api_mode"),
+        provider_name=custom_provider.get("name"),
+        fallback_source="runtime" if explicit_base_url else "managed",
+        fallback_override_present=bool(explicit_base_url),
+    )
     if pool_result:
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
@@ -739,7 +841,11 @@ def _resolve_named_custom_runtime(
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = request_overrides
-    return result
+    return _with_endpoint_candidate(
+        result,
+        source="runtime" if explicit_base_url else "managed",
+        override_present=bool(explicit_base_url),
+    )
 
 
 def _resolve_openrouter_runtime(
@@ -747,8 +853,9 @@ def _resolve_openrouter_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    model_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    model_cfg = _get_model_config()
+    model_cfg = model_cfg if model_cfg is not None else _get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
     cfg_provider = model_cfg.get("provider") if isinstance(model_cfg.get("provider"), str) else ""
     cfg_api_key = ""
@@ -872,6 +979,8 @@ def _resolve_openrouter_runtime(
         pool_result = _try_resolve_from_custom_pool(
             base_url, effective_provider, _parse_api_mode(model_cfg.get("api_mode")),
             provider_name=requested_provider if requested_norm != "custom" else None,
+            fallback_source="runtime" if explicit_base_url else ("custom" if requested_norm == "custom" else "managed"),
+            fallback_override_present=bool(explicit_base_url),
         )
         if pool_result:
             return pool_result
@@ -879,7 +988,7 @@ def _resolve_openrouter_runtime(
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
-    return {
+    return _with_endpoint_candidate({
         "provider": effective_provider,
         "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
         or _detect_api_mode_for_url(base_url)
@@ -887,7 +996,7 @@ def _resolve_openrouter_runtime(
         "base_url": base_url,
         "api_key": api_key,
         "source": source,
-    }
+    }, source="runtime" if explicit_base_url else ("custom" if effective_provider == "custom" and requested_norm == "custom" else "managed"), override_present=bool(explicit_base_url))
 
 
 def _resolve_azure_foundry_runtime(
@@ -1017,7 +1126,7 @@ def _resolve_azure_foundry_runtime(
             if configured_scope:
                 clean_entra["scope"] = configured_scope
 
-        return {
+        return _with_endpoint_candidate({
             "provider": "azure-foundry",
             "api_mode": cfg_api_mode,
             "base_url": base_url,
@@ -1026,7 +1135,7 @@ def _resolve_azure_foundry_runtime(
             "entra": clean_entra,
             "source": source,
             "requested_provider": requested_provider,
-        }
+        }, source="runtime" if explicit_base_url_clean else "managed", override_present=bool(explicit_base_url_clean))
 
     # ── Static API key (legacy / default) ──────────────────────────────
     api_key = explicit_api_key
@@ -1042,7 +1151,7 @@ def _resolve_azure_foundry_runtime(
         )
 
     source = "explicit" if (explicit_api_key or explicit_base_url) else "config"
-    return {
+    return _with_endpoint_candidate({
         "provider": "azure-foundry",
         "api_mode": cfg_api_mode,
         "base_url": base_url,
@@ -1050,7 +1159,7 @@ def _resolve_azure_foundry_runtime(
         "auth_mode": "api_key",
         "source": source,
         "requested_provider": requested_provider,
-    }
+    }, source="runtime" if explicit_base_url_clean else "managed", override_present=bool(explicit_base_url_clean))
 
 
 def _resolve_explicit_runtime(
@@ -1082,14 +1191,14 @@ def _resolve_explicit_runtime(
                     "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
                     "run 'claude setup-token', or authenticate with 'claude /login'."
                 )
-        return {
+        return _with_endpoint_candidate({
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
             "base_url": base_url,
             "api_key": api_key,
             "source": "explicit",
             "requested_provider": requested_provider,
-        }
+        }, source="runtime" if explicit_base_url else "managed", override_present=bool(explicit_base_url))
 
     if provider == "openai-codex":
         base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
@@ -1101,7 +1210,7 @@ def _resolve_explicit_runtime(
             last_refresh = creds.get("last_refresh")
             if not explicit_base_url:
                 base_url = creds.get("base_url", "").rstrip("/") or base_url
-        return {
+        return _with_endpoint_candidate({
             "provider": "openai-codex",
             "api_mode": "codex_responses",
             "base_url": base_url,
@@ -1109,7 +1218,7 @@ def _resolve_explicit_runtime(
             "source": "explicit",
             "last_refresh": last_refresh,
             "requested_provider": requested_provider,
-        }
+        }, source="runtime", override_present=bool(explicit_base_url))
 
     if provider == "nous":
         state = auth_mod.get_provider_auth_state("nous") or {}
@@ -1131,7 +1240,7 @@ def _resolve_explicit_runtime(
             expires_at = creds.get("expires_at")
             if not explicit_base_url:
                 base_url = creds.get("base_url", "").rstrip("/") or base_url
-        return {
+        return _with_endpoint_candidate({
             "provider": "nous",
             "api_mode": "chat_completions",
             "base_url": base_url,
@@ -1139,14 +1248,15 @@ def _resolve_explicit_runtime(
             "source": "explicit",
             "expires_at": expires_at,
             "requested_provider": requested_provider,
-        }
+        }, source="runtime", override_present=bool(explicit_base_url))
 
     # Azure Foundry: user-configured endpoint with selectable API mode
     if provider == "azure-foundry":
+        key_override = explicit_api_key
         return _resolve_azure_foundry_runtime(
             requested_provider=requested_provider,
             model_cfg=model_cfg,
-            explicit_api_key=explicit_api_key,
+            explicit_api_key=key_override,
             explicit_base_url=explicit_base_url,
         )
 
@@ -1187,24 +1297,25 @@ def _resolve_explicit_runtime(
                 if detected:
                     api_mode = detected
 
-        return {
+        return _with_endpoint_candidate({
             "provider": provider,
             "api_mode": api_mode,
             "base_url": base_url.rstrip("/"),
             "api_key": api_key,
             "source": "explicit",
             "requested_provider": requested_provider,
-        }
+        }, source="runtime" if explicit_base_url else "managed", override_present=bool(explicit_base_url))
 
     return None
 
 
-def resolve_runtime_provider(
+def _resolve_runtime_provider_candidate(
     *,
     requested: Optional[str] = None,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    _model_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -1217,7 +1328,7 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
-    model_cfg = _get_model_config()
+    model_cfg = _model_cfg if _model_cfg is not None else _get_model_config()
 
     # ``codex app-server`` is a local subprocess transport whose authentication
     # is owned by Codex itself. Resolve it before custom endpoints, explicit
@@ -1231,7 +1342,7 @@ def resolve_runtime_provider(
         and str(model_cfg.get("openai_runtime") or "").strip().lower()
         == "codex_app_server"
     ):
-        return {
+        return _with_endpoint_candidate({
             "provider": "openai-codex",
             "api_mode": "codex_app_server",
             "base_url": "",
@@ -1239,7 +1350,7 @@ def resolve_runtime_provider(
             "source": "local-codex-app-server",
             "credential_pool": None,
             "requested_provider": normalized_requested_provider,
-        }
+        }, source="runtime", override_present=False)
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
@@ -1252,29 +1363,14 @@ def resolve_runtime_provider(
             or (get_env_value("AZURE_ANTHROPIC_KEY") or "").strip()
             or (get_env_value("ANTHROPIC_API_KEY") or "").strip()
         )
-        return {
+        return _with_endpoint_candidate({
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
             "base_url": _eff_base.rstrip("/"),
             "api_key": _azure_key,
             "source": "azure-explicit",
             "requested_provider": requested_provider,
-        }
-
-    # Azure Foundry: user-configured endpoint with selectable API mode
-    # (OpenAI-style chat_completions or Anthropic-style anthropic_messages).
-    # Resolve before the custom-runtime / pool / generic paths so Azure
-    # config is always picked up from model.base_url + model.api_mode,
-    # regardless of whether the caller passed explicit_* args.
-    if requested_provider == "azure-foundry":
-        azure_runtime = _resolve_azure_foundry_runtime(
-            requested_provider=requested_provider,
-            model_cfg=model_cfg,
-            explicit_api_key=explicit_api_key,
-            explicit_base_url=explicit_base_url,
-            target_model=target_model,
-        )
-        return azure_runtime
+        }, source="runtime", override_present=bool(_eff_base))
 
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,
@@ -1357,7 +1453,25 @@ def resolve_runtime_provider(
                 model_cfg=model_cfg,
                 pool=pool,
                 target_model=target_model,
+                fallback_source=(
+                    "custom"
+                    if provider == "custom" and requested_provider == "custom"
+                    else None
+                ),
             )
+
+    # Azure Foundry: user-configured endpoint with selectable API mode
+    # (OpenAI-style chat_completions or Anthropic-style anthropic_messages).
+    # Explicit arguments are handled above; when no pool entry was selected,
+    # fall back to the configured endpoint and credentials.
+    if provider == "azure-foundry":
+        return _resolve_azure_foundry_runtime(
+            requested_provider=requested_provider,
+            model_cfg=model_cfg,
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+            target_model=target_model,
+        )
 
     if provider == "nous":
         try:
@@ -1365,7 +1479,7 @@ def resolve_runtime_provider(
                 min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
                 timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
             )
-            return {
+            return _with_endpoint_candidate({
                 "provider": "nous",
                 "api_mode": "chat_completions",
                 "base_url": creds.get("base_url", "").rstrip("/"),
@@ -1373,7 +1487,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "portal"),
                 "expires_at": creds.get("expires_at"),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
         except AuthError:
             if requested_provider != "auto":
                 raise
@@ -1385,7 +1499,7 @@ def resolve_runtime_provider(
     if provider == "openai-codex":
         try:
             creds = resolve_codex_runtime_credentials()
-            return {
+            return _with_endpoint_candidate({
                 "provider": "openai-codex",
                 "api_mode": "codex_responses",
                 "base_url": creds.get("base_url", "").rstrip("/"),
@@ -1393,7 +1507,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
         except AuthError:
             if requested_provider != "auto":
                 raise
@@ -1405,7 +1519,7 @@ def resolve_runtime_provider(
     if provider == "xai-oauth":
         try:
             creds = resolve_xai_oauth_runtime_credentials()
-            return {
+            return _with_endpoint_candidate({
                 "provider": "xai-oauth",
                 "api_mode": "codex_responses",
                 "base_url": (creds.get("base_url") or "").rstrip("/") or DEFAULT_XAI_OAUTH_BASE_URL,
@@ -1413,7 +1527,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
         except AuthError:
             if requested_provider != "auto":
                 raise
@@ -1423,7 +1537,7 @@ def resolve_runtime_provider(
     if provider == "qwen-oauth":
         try:
             creds = resolve_qwen_runtime_credentials()
-            return {
+            return _with_endpoint_candidate({
                 "provider": "qwen-oauth",
                 "api_mode": "chat_completions",
                 "base_url": creds.get("base_url", "").rstrip("/"),
@@ -1431,7 +1545,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "qwen-cli"),
                 "expires_at_ms": creds.get("expires_at_ms"),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
         except AuthError:
             if requested_provider != "auto":
                 raise
@@ -1443,19 +1557,19 @@ def resolve_runtime_provider(
         if pconfig and pconfig.auth_type == "oauth_minimax":
             from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
             creds = resolve_minimax_oauth_runtime_credentials()
-            return {
+            return _with_endpoint_candidate({
                 "provider": provider,
                 "api_mode": "anthropic_messages",
                 "base_url": creds["base_url"],
                 "api_key": creds["api_key"],
                 "source": creds.get("source", "oauth"),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
 
     if provider == "google-gemini-cli":
         try:
             creds = resolve_gemini_oauth_runtime_credentials()
-            return {
+            return _with_endpoint_candidate({
                 "provider": "google-gemini-cli",
                 "api_mode": "chat_completions",
                 "base_url": creds.get("base_url", ""),
@@ -1465,7 +1579,7 @@ def resolve_runtime_provider(
                 "email": creds.get("email", ""),
                 "project_id": creds.get("project_id", ""),
                 "requested_provider": requested_provider,
-            }
+            }, source="runtime", override_present=False)
         except AuthError:
             if requested_provider != "auto":
                 raise
@@ -1474,7 +1588,7 @@ def resolve_runtime_provider(
 
     if provider == "copilot-acp":
         creds = resolve_external_process_provider_credentials(provider)
-        return {
+        return _with_endpoint_candidate({
             "provider": "copilot-acp",
             "api_mode": "chat_completions",
             "base_url": creds.get("base_url", "").rstrip("/"),
@@ -1483,7 +1597,7 @@ def resolve_runtime_provider(
             "args": list(creds.get("args") or []),
             "source": creds.get("source", "process"),
             "requested_provider": requested_provider,
-        }
+        }, source="runtime", override_present=False)
 
     # Anthropic (native Messages API)
     if provider == "anthropic":
@@ -1543,14 +1657,14 @@ def resolve_runtime_provider(
                     "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
                     "run 'claude setup-token', or authenticate with 'claude /login'."
                 )
-        return {
+        return _with_endpoint_candidate({
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
             "base_url": base_url,
             "api_key": token,
             "source": "env",
             "requested_provider": requested_provider,
-        }
+        }, source="managed", override_present=False)
 
     # AWS Bedrock (native Converse API via boto3)
     if provider == "bedrock":
@@ -1620,12 +1734,15 @@ def resolve_runtime_provider(
             }
         if guardrail_config:
             runtime["guardrail_config"] = guardrail_config
-        return runtime
+        return _with_endpoint_candidate(runtime, source="runtime", override_present=False)
 
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        creds = resolve_api_key_provider_credentials(provider)
+        if provider == "zai":
+            creds = auth_mod._resolve_zai_runtime_credentials()
+        else:
+            creds = resolve_api_key_provider_credentials(provider)
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — mirrors the Anthropic path above.  Without
         # this, users who set model.base_url to e.g. api.minimaxi.com/anthropic
@@ -1634,7 +1751,14 @@ def resolve_runtime_provider(
         cfg_base_url = ""
         if cfg_provider == provider:
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
-        base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
+        creds_endpoint_source = str(
+            creds.get("_endpoint_candidate_source") or "managed"
+        ).strip().lower()
+        base_url = (
+            creds.get("base_url", "").rstrip("/")
+            if creds_endpoint_source == "runtime"
+            else cfg_base_url or creds.get("base_url", "").rstrip("/")
+        )
         api_mode = "chat_completions"
         if provider == "copilot":
             api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
@@ -1668,22 +1792,141 @@ def resolve_runtime_provider(
         # Strip trailing /v1 for OpenCode Anthropic models (see comment above).
         if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
             base_url = re.sub(r"/v1/?$", "", base_url)
-        return {
+        return _with_endpoint_candidate({
             "provider": provider,
             "api_mode": api_mode,
             "base_url": base_url,
             "api_key": creds.get("api_key", ""),
             "source": creds.get("source", "env"),
             "requested_provider": requested_provider,
-        }
+        }, source=creds_endpoint_source, override_present=False)
 
     runtime = _resolve_openrouter_runtime(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        model_cfg=model_cfg,
     )
     runtime["requested_provider"] = requested_provider
     return runtime
+
+
+def _read_runtime_raw_config() -> Dict[str, Any]:
+    """Read raw YAML only for endpoint-residue provenance checks."""
+    try:
+        raw = read_raw_config()
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _raw_config_endpoint_override_present(
+    raw_config: Dict[str, Any], provider: str
+) -> bool:
+    """Report whether raw config contains an actual endpoint override field."""
+    if not isinstance(raw_config, dict):
+        return False
+    canonical = normalize_provider(provider)
+    model = raw_config.get("model")
+    if isinstance(model, dict) and normalize_provider(str(model.get("provider") or "")) == canonical:
+        if "base_url" in model and str(model.get("base_url") or "").strip():
+            return True
+    providers = raw_config.get("providers")
+    if isinstance(providers, dict):
+        for key, value in providers.items():
+            if normalize_provider(str(key)) != canonical or not isinstance(value, dict):
+                continue
+            if "base_url" in value and str(value.get("base_url") or "").strip():
+                return True
+    return False
+
+
+def finalize_runtime_endpoint(
+    candidate: Dict[str, Any],
+    *,
+    requested: Optional[str],
+    candidate_source: str,
+    candidate_override_present: bool,
+) -> Dict[str, Any]:
+    """Apply the shared endpoint authority at the runtime's sole exit."""
+    result = dict(candidate or {})
+    result.pop("_endpoint_candidate_source", None)
+    result.pop("_endpoint_candidate_override_present", None)
+    candidate_ignored = bool(result.pop("_endpoint_candidate_ignored", False))
+    actual_provider = result.get("provider") or resolve_requested_provider(requested)
+    actual_provider = str(actual_provider or "").strip().lower()
+    configured_url = str(result.get("base_url") or "").strip()
+    runtime_url = configured_url if candidate_source == "runtime" else ""
+    if candidate_source == "runtime":
+        configured_url = ""
+    resolution = resolve_provider_endpoint(
+        actual_provider,
+        configured_url=configured_url,
+        runtime_url=runtime_url,
+        candidate_source=candidate_source,
+        candidate_override_present=bool(candidate_override_present),
+    )
+    result["provider"] = result.get("provider") or resolution.provider
+    result["base_url"] = resolution.effective_url
+    result["endpoint_policy"] = resolution.policy
+    result["endpoint_source"] = resolution.source
+    result["endpoint_candidate_ignored"] = bool(
+        resolution.candidate_ignored or candidate_ignored
+    )
+    if resolution.policy == "fixed":
+        overlay = HERMES_OVERLAYS.get(resolution.provider)
+        if overlay is None or not overlay.base_url_override:
+            result["base_url"] = ""
+        if overlay is not None:
+            result["api_mode"] = TRANSPORT_TO_API_MODE.get(
+                overlay.transport, "chat_completions"
+            )
+    return result
+
+
+def resolve_runtime_provider(
+    *,
+    requested: Optional[str] = None,
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve runtime credentials and finalize endpoint ownership once."""
+    model_cfg = _get_model_config()
+    raw_config = _read_runtime_raw_config()
+    if requested and requested.strip():
+        requested_provider = requested.strip().lower()
+    else:
+        configured_provider = str(model_cfg.get("provider") or "").strip().lower()
+        requested_provider = configured_provider or os.getenv(
+            "HERMES_INFERENCE_PROVIDER", "auto"
+        ).strip().lower() or "auto"
+
+    candidate = _resolve_runtime_provider_candidate(
+        requested=requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+        target_model=target_model,
+        _model_cfg=model_cfg,
+    )
+    if not isinstance(candidate, dict):
+        return candidate
+    candidate = dict(candidate)
+    candidate_source = candidate.pop("_endpoint_candidate_source", "managed")
+    candidate_override_present = candidate.pop(
+        "_endpoint_candidate_override_present", False
+    )
+    actual_provider = candidate.get("provider") or requested_provider
+    candidate_override_present = bool(
+        candidate_override_present
+        or _raw_config_endpoint_override_present(raw_config, actual_provider)
+    )
+    return finalize_runtime_endpoint(
+        candidate,
+        requested=requested_provider,
+        candidate_source=candidate_source,
+        candidate_override_present=candidate_override_present,
+    )
 
 
 def format_runtime_provider_error(error: Exception) -> str:

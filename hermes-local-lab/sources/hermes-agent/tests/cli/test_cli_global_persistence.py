@@ -104,6 +104,31 @@ def test_save_config_values_is_all_or_nothing_on_replace_failure(
     assert isolated_config.read_bytes() == original
 
 
+def test_global_model_switch_cleans_previous_endpoint_ownership(isolated_config):
+    isolated_config.write_text(
+        "model:\n"
+        "  default: old-model\n"
+        "  provider: deepseek\n"
+        "  base_url: https://old.example.invalid/v1\n"
+        "  api_mode: chat_completions\n"
+        "  request_receipt:\n"
+        "    id: old-receipt\n",
+        encoding="utf-8",
+    )
+
+    from cli import _persist_global_model_switch
+
+    assert _persist_global_model_switch(_switch_result()) is True
+    saved = yaml.safe_load(isolated_config.read_text(encoding="utf-8"))
+
+    assert saved["model"]["provider"] == "new-provider"
+    assert saved["model"]["default"] == "new-model"
+    assert saved["model"]["request_receipt"] == {"id": "old-receipt"}
+    saved_fields = set(saved["model"])
+    assert "base_url" not in saved_fields, "global switch retained old endpoint"
+    assert "api_mode" not in saved_fields, "global switch retained old transport"
+
+
 def test_picker_global_failure_is_explicit_and_never_claims_saved(
     monkeypatch,
 ):
