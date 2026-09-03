@@ -8,6 +8,8 @@
 
 本文不是某个 commit 的发布证明。最终发布身份必须由当前交付目录中的 `taiji-package-manifest.json`、`.build-success`、各级 SHA256、断网演练证据、认证集、v3 发布回执和签名共同确定。
 
+安装态 DOCX 调用固定使用安装根下 `runtime/node/bin/node`，校验版本 22.23.1；缺失、越出运行目录或版本不符时明确失败，不使用系统/用户 PATH 回退。生成成功还须同时具备合法成功 JSON 与当前请求输出目录中真实、非空的 `document.docx`。源码回归只能证明该选择和结果检查逻辑；当前候选的真实 DOCX 生成仍须在目标机业务验收中另行验证。
+
 需求到实现、测试和证据范围的逐项索引见：[Taiji 国产 x86_64 黄金制包流程追踪矩阵](taiji-kylin-packaging-traceability.md)。矩阵中的“已实时验证”只表示本地证据，不表示真实 Kylin/UOS 目标机认证。
 
 ### 1.1 真实麒麟主机与远程操作边界

@@ -17,6 +17,15 @@ Do not call lower-level render modules directly from a host product. Use the
 CLIs below so source normalization, asset packaging, render-plan generation,
 delivery validation, replay metadata, and failure artifacts stay in one chain.
 
+Use a prepared Node 22 or 24 runtime for development; the Linux delivery runtime
+remains pinned to Node 22.23.1. Node 26 is not supported by the current file ZIP
+reading dependencies. Do not repair compatibility by editing `node_modules`.
+Carbone rendering has a 120-second deadline within the host's 180-second process
+budget. Missing callbacks and callback errors produce the existing `render_failed`
+JSON and nonzero CLI exit rather than a successful process with no document.
+Hosts must also require `ok: true`, complete result fields, and an existing,
+nonempty `document.docx` in the requested delivery directory before reporting success.
+
 ## Canonical CLI
 
 List templates when the user has not selected one:

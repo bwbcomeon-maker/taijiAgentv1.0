@@ -47,6 +47,36 @@ function runJob(args) {
   });
 }
 
+for (const failure of ['no-callback', 'callback-error']) {
+  test(`run-job reports render_failed when Carbone has ${failure}`, (t) => {
+    const root = makeTempWorkspace(t);
+    const source = path.join(root, 'source.md');
+    const delivery = path.join(root, 'delivery');
+    fs.writeFileSync(source, '# Proposal\n\n## Architecture\n\n| Component | Role |\n| --- | --- |\n| Source | Input |\n\n```mermaid\nflowchart LR\n A[Source] --> B[Delivery]\n```\n');
+    const preload = path.join(root, 'carbone-failure.cjs');
+    fs.writeFileSync(preload, `
+      require(${JSON.stringify(path.join(ENGINE_ROOT, 'src/rendering/render-docx.js'))});
+      const carbone = require(${JSON.stringify(require.resolve('carbone'))});
+      carbone.render = (template, data, callback) => {
+        if (${JSON.stringify(failure)} === 'callback-error') callback(new Error('synthetic render failure'));
+      };
+      const schedule = global.setTimeout;
+      global.setTimeout = (callback, delay, ...args) => schedule(callback, Math.min(delay, 25), ...args);
+    `);
+    const result = spawnSync(process.execPath, [
+      '--require', preload, RUN_JOB, '--template-id', 'general-proposal',
+      '--source', source, '--out-dir', delivery, '--json',
+    ], { cwd: ENGINE_ROOT, encoding: 'utf8', timeout: 10_000 });
+    assertExitCode(result, 4);
+    const payload = parseStdoutJson(result);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.code, 'render_failed');
+    assert.equal(fs.existsSync(path.join(delivery, 'document.docx')), false);
+    assert.equal(fs.existsSync(payload.failureReportPath), true);
+    assert.match(payload.message, failure === 'no-callback' ? /timed out/i : /synthetic render failure/);
+  });
+}
+
 function listTemplates(args = ['--json']) {
   return spawnSync(process.execPath, [LIST_TEMPLATES, ...args], {
     cwd: ENGINE_ROOT,

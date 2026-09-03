@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -335,12 +336,33 @@ def engine_root() -> Path:
 
 
 def run_engine(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    node = shutil.which("node")
-    if not node:
+    from api.product_diagnostics import _installed_production
+
+    installed = _installed_production()
+    if installed:
+        node_root = Path(__file__).resolve().parents[2] / "node"
+        candidate = node_root / "bin" / "node"
+        node = candidate.resolve()
+        if not node.is_relative_to(node_root):
+            raise DocxEngineV2Error("Packaged DOCX Node.js must remain inside its runtime directory")
+    else:
+        candidate = shutil.which("node")
+        node = Path(candidate).resolve() if candidate else None
+    if node is None or not node.is_file() or not os.access(node, os.X_OK):
         raise FileNotFoundError("Node.js is not available for DOCX Engine V2")
+    version_result = subprocess.run(
+        [str(node), "--version"], text=True, capture_output=True, timeout=5, check=False,
+    )
+    version = version_result.stdout.strip()
+    supported = version == "v22.23.1" if installed else bool(re.fullmatch(r"v(?:22|24)\.\d+\.\d+", version))
+    if version_result.returncode != 0 or not supported:
+        raise DocxEngineV2Error(f"Unsupported DOCX Node.js version: {version or 'unknown'}")
+    logging.getLogger(__name__).info("DOCX Node.js runtime: %s (%s)", node, version)
+    child_env = {**os.environ, "PATH": str(node.parent) + os.pathsep + os.environ.get("PATH", "")}
     return subprocess.run(
-        [node, *[str(arg) for arg in args]],
+        [str(node), *[str(arg) for arg in args]],
         cwd=str(cwd or engine_root()),
+        env=child_env,
         text=True,
         capture_output=True,
         timeout=180,
@@ -510,14 +532,27 @@ def _create_job_impl(
     except (FileNotFoundError, OSError, ValueError) as exc:
         return _error_payload("validation_failed", str(exc)), 400
 
-    completed = run_engine(args)
+    try:
+        completed = run_engine(args)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, DocxEngineV2Error) as exc:
+        return _known_failure_payload(_error_payload("render_failed", str(exc))), 500
     engine_payload = _payload_from_completed(completed, default_code="render_failed")
-    if completed.returncode != 0:
+    if completed.returncode != 0 or engine_payload.get("ok") is not True:
         return _known_failure_payload(engine_payload), _status_for_engine_failure(engine_payload)
 
-    delivery_dir_raw = str(engine_payload.get("deliveryDir", "")).strip()
-    delivery_dir = Path(delivery_dir_raw).expanduser() if delivery_dir_raw else Path()
-    quality_report_path = delivery_dir / "quality-report.json" if delivery_dir_raw else Path()
+    try:
+        for field in ("jobId", "deliveryDir", "documentPath"):
+            if not isinstance(engine_payload.get(field), str) or not engine_payload[field].strip():
+                raise ValueError(f"DOCX result is missing {field}")
+        delivery_dir = Path(engine_payload["deliveryDir"]).resolve(strict=True)
+        document = Path(engine_payload["documentPath"]).resolve(strict=True)
+        if delivery_dir != out_dir.resolve() or document != delivery_dir / "document.docx":
+            raise ValueError("DOCX result does not match the requested output directory")
+        if not document.is_file() or document.stat().st_size == 0:
+            raise ValueError("DOCX result has no generated document")
+    except (OSError, ValueError) as exc:
+        return _known_failure_payload(_error_payload("render_failed", str(exc))), 500
+    quality_report_path = delivery_dir / "quality-report.json"
     quality_report = _read_quality_report(quality_report_path)
 
     return {

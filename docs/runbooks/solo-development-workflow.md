@@ -52,6 +52,7 @@ git rev-list --left-right --count HEAD...origin/main
 - 每种模式先运行本地改动安全检查，拒绝私钥、明显令牌和临时/制包输出。
 - 默认与 `--full` 不安装依赖、不访问网络、不启动浏览器或持久服务。
 - 缺少 Python、Node、npm、准备好的依赖目录或测试入口时，脚本必须明确打印缺失项并失败；不得自动安装后把环境变化当作验证。
+- 涉及 Node 的套件在测试前解析并记录 Node/npm 路径与版本，开发验证使用 Node 22 或 24；其他 major 在预检阶段拒绝。将已准备的工具链 `bin` 放在本次命令的 PATH 首位，子进程继承同一 Node 来源；不修改全局软链接。安装态 DOCX 固定使用同级 `runtime/node/bin/node` 的 22.23.1，不退回系统或用户 PATH。
 - `--browser-smoke` 缺少 Python Playwright 时以专用状态失败并写明前置缺失；记录为“未验证”，不能写 PASS。
 - 自动化通过不能替代真实 Electron、OAuth/Provider、WPS/Word 或目标机验收。
 

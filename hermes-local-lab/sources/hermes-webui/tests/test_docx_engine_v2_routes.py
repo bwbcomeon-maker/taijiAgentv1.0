@@ -1,9 +1,109 @@
 from pathlib import Path
 from types import SimpleNamespace
 from io import BytesIO
+import json
+import subprocess
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("stdout", ["", "not-json", "[]", '{"ok":false,"code":"render_failed"}', '{"ok":true}'])
+def test_docx_job_rejects_zero_exit_without_a_complete_success(monkeypatch, tmp_path, stdout):
+    from api import docx_engine_v2
+
+    (tmp_path / "source.md").write_text("# Synthetic source\n")
+    monkeypatch.setattr(docx_engine_v2, "run_engine", lambda args: subprocess.CompletedProcess(args, 0, stdout, ""))
+    payload, status = docx_engine_v2.create_job(
+        {"template_id": "general-proposal", "source_path": "source.md", "out_dir": "delivery"}, tmp_path
+    )
+    assert status >= 400
+    assert payload["ok"] is False
+    assert payload["code"] == "render_failed"
+
+
+@pytest.mark.parametrize("artifact", ["missing", "outside", "symlink", "empty", "valid"])
+def test_docx_job_success_requires_the_requested_document(monkeypatch, tmp_path, artifact):
+    from api import docx_engine_v2
+
+    (tmp_path / "source.md").write_text("# Synthetic source\n")
+    delivery = tmp_path / "delivery"
+    delivery.mkdir()
+    document = delivery / "document.docx"
+    if artifact == "outside":
+        document = tmp_path / "other.docx"
+    if artifact == "symlink":
+        outside = tmp_path / "other.docx"
+        outside.write_bytes(b"synthetic-docx")
+        document.symlink_to(outside)
+    elif artifact != "missing":
+        document.write_bytes(b"" if artifact == "empty" else b"synthetic-docx")
+    result = {"ok": True, "jobId": "job-test", "deliveryDir": str(delivery), "documentPath": str(document)}
+    monkeypatch.setattr(docx_engine_v2, "run_engine", lambda args: subprocess.CompletedProcess(args, 0, json.dumps(result), ""))
+    payload, status = docx_engine_v2.create_job(
+        {"template_id": "general-proposal", "source_path": "source.md", "out_dir": "delivery"}, tmp_path
+    )
+    assert (status == 200) is (artifact == "valid")
+    assert payload["ok"] is (artifact == "valid")
+
+
+def test_docx_installed_node_cannot_fall_back_to_path(monkeypatch, tmp_path):
+    from api import docx_engine_v2, product_diagnostics
+
+    module = tmp_path / "runtime/web/api/docx_engine_v2.pyc"
+    module.parent.mkdir(parents=True)
+    monkeypatch.setattr(docx_engine_v2, "__file__", str(module))
+    monkeypatch.setattr(product_diagnostics, "_installed_production", lambda: True)
+    monkeypatch.setattr(docx_engine_v2.shutil, "which", lambda name: pytest.fail("installed runtime must not search PATH"))
+    with pytest.raises(FileNotFoundError, match="Node"):
+        docx_engine_v2.run_engine(["unused.js"])
+
+
+def test_docx_installed_node_directory_cannot_escape_runtime(monkeypatch, tmp_path):
+    from api import docx_engine_v2, product_diagnostics
+
+    module = tmp_path / "runtime/web/api/docx_engine_v2.pyc"
+    module.parent.mkdir(parents=True)
+    outside = tmp_path / "external-node"
+    outside.mkdir()
+    (tmp_path / "runtime/node").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(docx_engine_v2, "__file__", str(module))
+    monkeypatch.setattr(product_diagnostics, "_installed_production", lambda: True)
+    monkeypatch.setattr(docx_engine_v2.subprocess, "run", lambda *a, **kw: pytest.fail("must reject before execution"))
+    with pytest.raises(docx_engine_v2.DocxEngineV2Error, match="runtime directory"):
+        docx_engine_v2.run_engine(["unused.js"])
+
+
+@pytest.mark.parametrize("installed,version,accepted", [(False, "v22.23.1", True), (False, "v24.19.0", True), (False, "v26.8.1", False), (True, "v22.23.1", True), (True, "v24.19.0", False)])
+def test_docx_node_identity_and_child_environment(monkeypatch, tmp_path, installed, version, accepted):
+    from api import docx_engine_v2, product_diagnostics
+
+    module = tmp_path / "runtime/web/api/docx_engine_v2.pyc"
+    module.parent.mkdir(parents=True)
+    node = tmp_path / "runtime/node/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("#!/bin/sh\n")
+    node.chmod(0o755)
+    monkeypatch.setattr(docx_engine_v2, "__file__", str(module))
+    monkeypatch.setattr(product_diagnostics, "_installed_production", lambda: installed)
+    monkeypatch.setattr(docx_engine_v2.shutil, "which", lambda name: str(node))
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, version + "\n" if args[-1] == "--version" else '{"ok":true}', "")
+
+    monkeypatch.setattr(docx_engine_v2.subprocess, "run", run)
+    if not accepted:
+        with pytest.raises(docx_engine_v2.DocxEngineV2Error, match="Node"):
+            docx_engine_v2.run_engine(["unused.js"])
+        assert len(calls) == 1
+    else:
+        docx_engine_v2.run_engine(["unused.js"])
+        assert len(calls) == 2
+        assert calls[-1][0][0] == str(node)
+        assert calls[-1][1]["env"]["PATH"].split(":")[0] == str(node.parent)
 
 
 def _patch_route_json(monkeypatch, tmp_path):
@@ -885,6 +985,8 @@ def test_docx_engine_v2_create_job_allows_user_absolute_source_paths(monkeypatch
     def fake_run_engine(args):
         calls.append(args)
         out_dir = Path(args[args.index("--out-dir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "document.docx").write_bytes(b"synthetic-docx")
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,

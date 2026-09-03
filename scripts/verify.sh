@@ -84,6 +84,7 @@ AGENT_RUNNER="$ROOT/$AGENT_REL/scripts/run_tests.sh"
 print_resolvers() {
   printf 'INTERPRETER\troot-webui-browser=%s\n' "$ROOT_PYTHON"
   printf 'RUNNER\tagent=%s (self-resolving)\n' "$AGENT_RUNNER"
+  printf 'INTERPRETER\tnode=%s\tnpm=%s\n' "$(command -v node || true)" "$(command -v npm || true)"
 }
 
 emit_plan() {
@@ -264,6 +265,20 @@ run_baseline() {
 
 preflight_selected_suites() {
   require_executable "$ROOT_PYTHON" "root/WebUI/browser Python"
+  if [ "$RUN_DESKTOP" -eq 1 ] || [ "$RUN_DOCX" -eq 1 ] || [ "$RUN_WEBUI" -eq 1 ]; then
+    require_command node
+    require_command npm
+    verification_node="$("$ROOT_PYTHON" -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve())' "$(command -v node)")"
+    verification_node_version="$("$verification_node" --version)"
+    if ! [[ "$verification_node_version" =~ ^v(22|24)\.[0-9]+\.[0-9]+$ ]]; then
+      printf 'unsupported Node.js version: %s (%s); use prepared Node.js 22 or 24\n' "$verification_node_version" "$verification_node" >&2
+      exit 1
+    fi
+    export PATH="$(dirname "$verification_node"):$PATH"
+    verification_npm="$(command -v npm)"
+    verification_npm_version="$("$verification_npm" --version)"
+    printf 'TOOLCHAIN\tnode=%s\tversion=%s\tnpm=%s\tversion=%s\n' "$verification_node" "$verification_node_version" "$verification_npm" "$verification_npm_version"
+  fi
   if [ "$RUN_ROOT" -eq 1 ]; then
     require_directory "$ROOT/tests" "root tests directory"
   fi

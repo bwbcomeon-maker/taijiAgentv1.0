@@ -1,5 +1,15 @@
 # Hermes Web UI
 
+## DOCX runtime and result validation
+
+Development DOCX calls require a prepared Node 22 or 24 on the service PATH.
+Installed calls use the packaged `runtime/node/bin/node` at version 22.23.1,
+without falling back to a system or user Node. Child tools inherit that runtime.
+Generation succeeds only with a successful engine response and a real, nonempty
+document in the requested output directory; empty or malformed output now follows
+the existing generation-failed UI path. Carbone rendering times out after 120
+seconds within the adapter's existing 180-second process budget.
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).

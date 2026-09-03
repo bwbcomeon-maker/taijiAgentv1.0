@@ -77,13 +77,24 @@ async function renderDocx({ templatePackage, renderPlan, outputPath } = {}) {
 
 function renderCarbone(templatePath, data) {
   return new Promise((resolve, reject) => {
-    carbone.render(templatePath, data, (error, result) => {
+    let settled = false;
+    // Keep pending work alive and fail before the caller's 180-second deadline.
+    const timer = setTimeout(() => finish(new Error('DOCX rendering timed out after 120 seconds')), 120_000);
+    function finish(error, result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (error) {
         reject(error);
         return;
       }
       resolve(result);
-    });
+    }
+    try {
+      carbone.render(templatePath, data, finish);
+    } catch (error) {
+      finish(error);
+    }
   });
 }
 

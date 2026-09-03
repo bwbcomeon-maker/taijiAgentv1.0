@@ -1467,6 +1467,28 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
             self.assertIn("apps/taiji-desktop/node_modules/acorn", output)
             self.assertFalse(python_log.exists(), "root suite ran before selected-suite preflight")
 
+    def test_verify_rejects_incompatible_node_before_test_execution(self):
+        with tempfile.TemporaryDirectory(prefix="taiji-node-version-") as temp_dir:
+            base = Path(temp_dir)
+            repo = base / "repo"
+            _init_repo(repo)
+            verify = self._install_verify_fixture(repo)
+            (repo / "tests").mkdir()
+            binaries = base / "bin"
+            binaries.mkdir()
+            node = binaries / "node"
+            node.write_text("#!/bin/sh\nprintf 'v26.8.1\\n'\n", encoding="utf-8")
+            node.chmod(0o755)
+            result = _run(
+                ["/bin/bash", str(verify), "--full"], cwd=repo,
+                env={"TAIJI_AGENT_PYTHON": sys.executable, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]},
+            )
+            output = _combined_output(result)
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn("unsupported Node.js version", output)
+            self.assertIn("v26.8.1", output)
+            self.assertNotIn("verification: PASS", output)
+
     def test_verify_reports_separate_python_and_agent_runner_resolution(self):
         self._require_script(VERIFY)
         source = VERIFY.read_text(encoding="utf-8")
