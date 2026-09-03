@@ -1816,9 +1816,9 @@ def test_main_model_refresh_keeps_non_secret_pending_receipt_when_get_still_fail
     assert result["pendingReconciliation"] == {
         "provider": "deepseek",
         "model": "deepseek-chat",
-        "base_url": "",
         "request_id": result["expectedRequestId"],
     }
+    assert "base_url" not in result["pendingReconciliation"]
     assert "api_key" not in result["pendingReconciliation"]
     assert result["fullLoadCount"] == 0
     assert result["imageLoadCount"] == 0
