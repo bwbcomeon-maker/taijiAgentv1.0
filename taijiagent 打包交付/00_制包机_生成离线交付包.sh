@@ -1491,12 +1491,12 @@ PY
 cleanup_sealed_snapshot_transport() {
   local control_fifo status_fifo
   if [ "$SEALED_SNAPSHOT_STATUS_OPEN" = 1 ]; then
-    exec 8<&- 2>/dev/null || true
+    exec 8<&- || true
     SEALED_SNAPSHOT_STATUS_OPEN=0
   fi
   if [ "$SEALED_SNAPSHOT_CONTROL_OPEN" = 1 ]; then
     printf 'A' >&7 2>/dev/null || true
-    exec 7>&- 2>/dev/null || true
+    exec 7>&- || true
     SEALED_SNAPSHOT_CONTROL_OPEN=0
   fi
   if [ -n "$SEALED_SNAPSHOT_HOLDER_PID" ]; then
@@ -1517,11 +1517,11 @@ cleanup_sealed_snapshot_transport() {
 
 close_sealed_snapshot_slot() {
   case "$1" in
-    archive) exec 9<&- 2>/dev/null || true ; FIXED_TOOL_ARCHIVE_FD_PATH="" ;;
-    node) exec 4<&- 2>/dev/null || true ; BUILD_NODE_HELD_PATH="" ;;
-    npm) exec 5<&- 2>/dev/null || true ; BUILD_NPM_CLI_HELD_PATH="" ;;
-    inventory) exec 14<&- 2>/dev/null || true ; SOURCE_INVENTORY_FD="" ;;
-    electron) exec 15<&- 2>/dev/null || true ; ELECTRON_ARCHIVE_FD="" ;;
+    archive) exec 9<&- || true ; FIXED_TOOL_ARCHIVE_FD_PATH="" ;;
+    node) exec 4<&- || true ; BUILD_NODE_HELD_PATH="" ;;
+    npm) exec 5<&- || true ; BUILD_NPM_CLI_HELD_PATH="" ;;
+    inventory) exec 14<&- || true ; SOURCE_INVENTORY_FD="" ;;
+    electron) exec 15<&- || true ; ELECTRON_ARCHIVE_FD="" ;;
     *) return 1 ;;
   esac
 }
@@ -1674,9 +1674,9 @@ retain_fixed_tool_archive_snapshot() {
 }
 
 close_retained_tool_archive_snapshots() {
-  exec 10<&- 2>/dev/null || true
-  exec 11<&- 2>/dev/null || true
-  exec 12<&- 2>/dev/null || true
+  exec 10<&- || true
+  exec 11<&- || true
+  exec 12<&- || true
 }
 
 retain_source_archive_snapshot() {
@@ -1692,9 +1692,9 @@ retain_source_archive_snapshot() {
 
 close_retained_formal_archive_snapshots() {
   close_retained_tool_archive_snapshots
-  exec 13<&- 2>/dev/null || true
-  exec 14<&- 2>/dev/null || true
-  exec 15<&- 2>/dev/null || true
+  exec 13<&- || true
+  exec 14<&- || true
+  exec 15<&- || true
   SOURCE_ARCHIVE_FD=""
   SOURCE_INVENTORY_FD=""
   ELECTRON_ARCHIVE_FD=""
@@ -2082,8 +2082,8 @@ seal_build_node_runtime() {
 }
 
 close_build_node_runtime_fds() {
-  exec 4<&- 2>/dev/null || true
-  exec 5<&- 2>/dev/null || true
+  exec 4<&- || true
+  exec 5<&- || true
   BUILD_NODE_HELD_PATH=""
   BUILD_NPM_CLI_HELD_PATH=""
   BUILD_NODE_RUNTIME_SEALED=0

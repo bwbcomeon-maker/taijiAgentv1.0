@@ -223,6 +223,41 @@ class CandidateTransportContractTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, rendered)
 
+    def test_real_transport_preserves_both_failure_streams_and_success(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-real-transport-errors-") as temporary:
+            root = Path(temporary)
+            repo, target, ssh_config, _plan = make_plan(module, root)
+            cases = (
+                ("stdout detail\n", "stderr detail\n", ("stdout detail", "stderr detail")),
+                ("stdout only\n", "", ("stdout only",)),
+                ("", "stderr only\n", ("stderr only",)),
+                ("", "", ("command returned non-zero",)),
+            )
+            for stdout, stderr, expected_fragments in cases:
+                with self.subTest(stdout=stdout, stderr=stderr):
+                    runner = lambda argv, *, cwd, environment, timeout: subprocess.CompletedProcess(
+                        list(argv), 17, stdout, stderr
+                    )
+                    transport = module.RealSshTransport(
+                        repo, target, ssh_config=ssh_config, command_runner=runner
+                    )
+                    with self.assertRaises(module.PipelineError) as raised:
+                        transport._execute(["/usr/bin/ssh", "failure"], "BUILD_00_FAILED", 10)
+                    self.assertEqual(raised.exception.category, "BUILD_00_FAILED")
+                    for fragment in expected_fragments:
+                        self.assertIn(fragment, str(raised.exception))
+
+            success_runner = lambda argv, *, cwd, environment, timeout: subprocess.CompletedProcess(
+                list(argv), 0, "stdout success\n", "stderr success\n"
+            )
+            transport = module.RealSshTransport(
+                repo, target, ssh_config=ssh_config, command_runner=success_runner
+            )
+            self.assertIsNone(
+                transport._execute(["/usr/bin/ssh", "success"], "BUILD_00_FAILED", 10)
+            )
+
     def test_online_doctor_blocks_reachable_builder_below_policy_glibc(self):
         module = load_candidate()
         with tempfile.TemporaryDirectory(prefix="taiji-online-blocked-") as temporary:

@@ -517,6 +517,7 @@ SHA256SUMS.txt
 - `dpkg` 成功不等于部署成功：安装后 verifier 缺失、不可执行、日志无法安全创建或校验返回非零时都必须 fail closed。`installed/reinstalled/upgraded/rolled_back` 回执必须同时满足 `native_verify=PASS`，回执校验器也必须拒绝“成功结果 + FAIL/NOT_RUN”的伪成功组合。
 - `preinst` 必须在解包前探测 canonical policy 声明的全部 `required_system_sonames`：真实目标机使用受信 `ldconfig -p`，模拟根只检查受控的标准 x86_64 库目录；缺失任一项时以 `TAIJI-LINUX-E014-RUNTIME` 失败关闭，禁止先写入半包再碰运气。
 - 静默部署器执行当前 DEB 或 N-1 DEB 的 `dpkg --install`，以及两者的 native verify 时，必须把完整输出写入权限 `0600` 的 root-only 临时日志；返回非零时在清理前向操作员回显最后 80 行。不得再把维护者脚本和 native verify 的关键错误重定向到 `/dev/null`，否则现场只能看到笼统失败并被迫重复制包。成功后立即删除这些临时日志，失败时在写回执后按固定路径清理。
+- 候选控制器的远程 SSH/SCP 命令返回非零时，错误记录必须同时保留该命令的 `stderr` 与 `stdout`（包括仅有一路和两路均为空的情况）；SSH banner 或其它 stderr 内容不得遮蔽构建命令写入 stdout 的根因。非零状态保持原样，空输出记录为明确的非零回退提示。
 - 已由 `dpkg` 管理的现有安装直接走 apt/dpkg 原生升级或同版本重装；`02` 不得预先 unhold、purge、强制删除包状态或手工删除 `/opt/taiji-agent`。
 - `02` 提权后复制候选 DEB 或 N-1 DEB 时，必须把 DEB 与同名 `.sha256` 作为一组暂存，并保留 manifest/sidecar 绑定的原始 DEB basename；不得改名为 `candidate.deb`、`previous.deb` 等内部别名。sidecar 首行的 basename 与实际暂存 DEB 不同必须在调用 `dpkg` 前以 `DEB_SHA256_SIDECAR_MISMATCH` 或 `PREVIOUS_DEB_SHA256_SIDECAR_MISMATCH` 失败关闭。
 - 没有 `dpkg` 状态但存在旧系统安装时，`02` 仅允许清理固定白名单内的 legacy 路径；用户 XDG 配置、授权、密钥、会话和附件不在清理范围。

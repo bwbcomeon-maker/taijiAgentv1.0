@@ -748,7 +748,11 @@ class RealSshTransport:
             timeout=timeout,
         )
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "command returned non-zero"
+            detail = "\n".join(
+                part.strip()
+                for part in (result.stderr or "", result.stdout or "")
+                if part and part.strip()
+            ) or "command returned non-zero"
             raise PipelineError("{}: {}".format(category, detail), category=category)
 
     def online_doctor(self) -> Dict[str, Any]:

@@ -731,6 +731,103 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn("extract_sealed_snapshot_python", python38_gate)
         self.assertIn("exercise_sealed_snapshot_python(temp_root)", python38_gate)
 
+    def test_fd_closers_keep_shell_stderr_visible_and_are_idempotent(self):
+        """Closing source-script FDs must not permanently redirect the caller's stderr."""
+        shell = r'''
+set -Eeuo pipefail
+source "$1"
+trap - EXIT ERR INT TERM HUP
+fixture="$2"
+assert_fd_closed() {
+  local fd="$1"
+  if /usr/bin/true <&"$fd" 2>/dev/null; then
+    printf 'fd %s remains open\n' "$fd" >&2
+    return 1
+  fi
+}
+close_slot_and_assert() {
+  local fd="$1" slot="$2"
+  close_sealed_snapshot_slot "$slot"
+  assert_fd_closed "$fd"
+  close_sealed_snapshot_slot "$slot"
+  assert_fd_closed "$fd"
+}
+exec 9< "$fixture"
+close_slot_and_assert 9 archive
+exec 4< "$fixture"
+close_slot_and_assert 4 node
+exec 5< "$fixture"
+close_slot_and_assert 5 npm
+exec 14< "$fixture"
+close_slot_and_assert 14 inventory
+exec 15< "$fixture"
+close_slot_and_assert 15 electron
+exec 10< "$fixture"
+exec 11< "$fixture"
+exec 12< "$fixture"
+close_retained_tool_archive_snapshots
+assert_fd_closed 10
+assert_fd_closed 11
+assert_fd_closed 12
+close_retained_tool_archive_snapshots
+exec 13< "$fixture"
+exec 14< "$fixture"
+exec 15< "$fixture"
+close_retained_formal_archive_snapshots
+assert_fd_closed 13
+assert_fd_closed 14
+assert_fd_closed 15
+close_retained_formal_archive_snapshots
+exec 4< "$fixture"
+exec 5< "$fixture"
+close_build_node_runtime_fds
+assert_fd_closed 4
+assert_fd_closed 5
+close_build_node_runtime_fds
+transport_dir="${fixture}.transport"
+mkdir "$transport_dir"
+mkfifo "$transport_dir/control" "$transport_dir/status"
+exec 7<> "$transport_dir/control"
+exec 8<> "$transport_dir/status"
+SEALED_SNAPSHOT_TRANSPORT_DIR="$transport_dir"
+SEALED_SNAPSHOT_CONTROL_OPEN=1
+SEALED_SNAPSHOT_STATUS_OPEN=1
+cleanup_sealed_snapshot_transport
+assert_fd_closed 7
+assert_fd_closed 8
+[ ! -e "$transport_dir" ]
+cleanup_sealed_snapshot_transport
+printf '%s\n' 'stderr-survived-after-real-source-fd-closures' >&2
+'''
+        with tempfile.TemporaryDirectory(prefix="taiji-fd-closers-") as temporary:
+            source_path = Path(temporary) / "builder-functions.sh"
+            source_path.write_text(
+                BUILDER.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0] + "\n",
+                encoding="utf-8",
+            )
+            fixture = Path(temporary) / "fixture"
+            fixture.write_bytes(b"fd closer fixture\n")
+            result = subprocess.run(
+                ["/bin/bash", "-p", "-c", shell, "fd-closer-test", str(source_path), str(fixture)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={
+                    "HOME": temporary,
+                    "HERMES_HOME": temporary,
+                    "HERMES_DISABLE_LAZY_INSTALLS": "1",
+                    "PATH": "/usr/bin:/bin",
+                    "TMPDIR": temporary,
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("stderr-survived-after-real-source-fd-closures", result.stderr)
+
     def test_candidate_build_uses_sealed_node_and_npm_before_any_build_argv(self):
         builder = BUILDER.read_text(encoding="utf-8")
         deb_builder = DEB_BUILDER.read_text(encoding="utf-8")
