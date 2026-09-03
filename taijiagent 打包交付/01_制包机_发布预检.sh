@@ -745,6 +745,72 @@ PY
     "${formal_log_args[@]}" \
     || fail "正式构建测试日志摘要或 formal-build-tests/v2 语义无效"
 }
+resolve_release_dpkg_deb() {
+  /usr/bin/python3 -I -B - <<'PY'
+import grp
+import os
+import stat
+import sys
+from pathlib import Path
+
+prefixes = [Path("/usr")]
+admin_gid = None
+if sys.platform == "darwin":
+    prefixes.extend([Path("/opt/homebrew"), Path("/usr/local")])
+    try:
+        admin_gid = grp.getgrnam("admin").gr_gid
+    except KeyError:
+        pass
+
+def check_chain(path, prefix, allow_leaf_link=False):
+    leaf = path
+    while True:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) and not (allow_leaf_link and path == leaf):
+            raise ValueError("tool path contains an additional symlink")
+        if metadata.st_uid not in (0, os.getuid()):
+            raise ValueError("unexpected tool owner")
+        if not stat.S_ISLNK(metadata.st_mode):
+            admin_directory = (
+                prefix != Path("/usr") and stat.S_ISDIR(metadata.st_mode)
+                and metadata.st_uid == os.getuid() and metadata.st_gid == admin_gid
+            )
+            if metadata.st_mode & 0o002 or (metadata.st_mode & 0o020 and not admin_directory):
+                raise ValueError("untrusted writable tool path")
+        if path == prefix:
+            return
+        path = path.parent
+
+for prefix in prefixes:
+    candidate = prefix / "bin/dpkg-deb"
+    if not os.path.lexists(candidate):
+        continue
+    try:
+        if prefix.resolve(strict=True) != prefix:
+            raise ValueError("tool prefix must not be redirected")
+        # Homebrew's bin link may point directly into Cellar; do not follow
+        # additional links that could leave the prefix and then return.
+        check_chain(candidate, prefix, allow_leaf_link=True)
+        resolved = Path(os.path.abspath(candidate.parent / os.readlink(candidate))) if candidate.is_symlink() else candidate
+        resolved.relative_to(prefix)
+        check_chain(resolved, prefix)
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise ValueError("tool is not an executable regular file")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SystemExit("unsafe dpkg-deb at {}: {}".format(candidate, error))
+    print(resolved)
+    break
+else:
+    raise SystemExit("dpkg-deb unavailable at the supported system/Homebrew locations")
+PY
+}
+
+dpkg-deb() {
+  local tool
+  tool="$(resolve_release_dpkg_deb)" || return 1
+  "$tool" "$@"
+}
+
 verify_deb_payload() {
   local deb="$1" payload_root abi embedded_policy abi_sha icon_sha256 marker_icon_sha256
   require_release_temp_capacity "$PAYLOAD_VERIFY_MIN_FREE_MIB" "$PAYLOAD_VERIFY_MIN_FREE_INODES"

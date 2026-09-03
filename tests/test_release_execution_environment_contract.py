@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -33,6 +34,56 @@ HARDENED_RELEASE_SHELLS = (
 
 
 class ReleaseExecutionEnvironmentContractTests(unittest.TestCase):
+    def _dpkg_resolver_program(self):
+        source = (ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh").read_text()
+        match = re.search(r"resolve_release_dpkg_deb\(\) \{\n  /usr/bin/python3 -I -B - <<'PY'\n(.*?)\nPY\n\}", source, re.S)
+        self.assertIsNotNone(match, "release preflight needs an explicit dpkg-deb resolver")
+        return match.group(1)
+
+    def test_release_dpkg_resolver_uses_fixed_paths_and_rejects_unsafe_tools(self):
+        program = self._dpkg_resolver_program()
+        for case in ("system", "brew-symlink", "admin-directory", "group-writable-directory", "linux-no-brew", "missing", "escape", "escape-return", "writable-tool", "writable-prefix"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="taiji-dpkg-resolver-") as tmp:
+                base = Path(tmp).resolve()
+                system, brew, intel = [base / name for name in ("usr", "brew", "intel")]
+                for prefix in (system, brew, intel):
+                    (prefix / "bin").mkdir(parents=True)
+                candidate = system / "bin/dpkg-deb" if case == "system" else brew / "bin/dpkg-deb"
+                target = candidate
+                if case == "brew-symlink":
+                    target = brew / "Cellar/dpkg/1/bin/dpkg-deb"
+                    target.parent.mkdir(parents=True)
+                    candidate.symlink_to(target)
+                if case == "escape":
+                    target = base / "outside-dpkg"
+                    candidate.symlink_to(target)
+                if case == "escape-return":
+                    target = brew / "Cellar/dpkg/1/bin/dpkg-deb"
+                    target.parent.mkdir(parents=True)
+                    hop = base / "outside-hop"
+                    hop.symlink_to(target)
+                    candidate.symlink_to(hop)
+                if case != "missing":
+                    target.write_text("#!/bin/sh\nexit 0\n")
+                    target.chmod(0o777 if case == "writable-tool" else 0o755)
+                if case == "writable-prefix":
+                    brew.chmod(0o777)
+                if case in ("admin-directory", "group-writable-directory"):
+                    (brew / "bin").chmod(0o775)
+                hostile = base / "hostile"
+                hostile.mkdir()
+                (hostile / "dpkg-deb").write_text("#!/bin/sh\nexit 0\n")
+                (hostile / "dpkg-deb").chmod(0o755)
+                fixture = program.replace('"/usr"', json.dumps(str(system))).replace('"/opt/homebrew"', json.dumps(str(brew))).replace('"/usr/local"', json.dumps(str(intel)))
+                fixture = fixture.replace('grp.getgrnam("admin").gr_gid', str(os.getgid() if case == "admin-directory" else -1))
+                fixture = "import sys\nsys.platform = " + repr("linux" if case in ("system", "linux-no-brew") else "darwin") + "\n" + fixture
+                result = subprocess.run([sys.executable, "-I", "-B", "-c", fixture], env={"PATH": str(hostile)}, text=True, capture_output=True, check=False)
+                if case in ("system", "brew-symlink", "admin-directory"):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), str(target))
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+
     def test_release_shells_use_privileged_bash_and_reset_injection_environment(self):
         for path in (BUILDER, *HARDENED_RELEASE_SHELLS):
             with self.subTest(path=path.relative_to(ROOT)):
