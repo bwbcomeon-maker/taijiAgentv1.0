@@ -210,7 +210,7 @@ class SkillSourceContractTests(unittest.TestCase):
             "python3 -I -B scripts/doctor.py --repo <operator-supplied-path>",
             "恰好一个同一 commit 的 `tar.gz`、`manifest.json` 与 `tar.gz.sha256` 三件套",
             "`/usr/bin/taiji-agent-acceptance`",
-            "当“继续”夹带一个或多个外部或特权阶段",
+            "当“继续”夹带尚未授权的外部或特权阶段",
             "只提供只读诊断或计划",
             "`待授权阶段`",
             "`精确身份`",
@@ -266,18 +266,53 @@ class SkillSourceContractTests(unittest.TestCase):
         payload = json.loads((SKILL_ROOT / "evals/evals.json").read_text(encoding="utf-8"))
         self.assertEqual(set(payload), {"skill_name", "evals"})
         self.assertEqual(payload["skill_name"], "taiji-kylin-packaging")
-        self.assertEqual(len(payload["evals"]), 8)
-        self.assertEqual([entry["id"] for entry in payload["evals"]], list(range(1, 9)))
+        ids = [entry["id"] for entry in payload["evals"]]
+        self.assertTrue(ids)
+        self.assertTrue(all(isinstance(value, int) and value > 0 for value in ids))
+        self.assertEqual(ids, sorted(set(ids)))
         for entry in payload["evals"]:
             self.assertEqual(
                 set(entry),
                 {"id", "prompt", "expected_output", "files", "expectations"},
             )
-            self.assertEqual(len(entry["expectations"]), 3)
-        self.assertEqual(sum(len(entry["expectations"]) for entry in payload["evals"]), 24)
+            self.assertTrue(entry["expectations"])
+            self.assertTrue(all(isinstance(item, str) and item.strip() for item in entry["expectations"]))
         rendered = json.dumps(payload, ensure_ascii=False)
         for topic in ("dirty", "frozen", "继续", "一个 DEB", "/usr/bin/taiji-agent-acceptance", "历史 v2", "私有"):
             self.assertIn(topic, rendered)
+        for scenario in ("只读 SSH", "同一对象", "hotfix", "模型对话", "新建用户"):
+            self.assertIn(scenario, rendered)
+
+    def test_authorization_continuity_does_not_authorize_new_stages(self) -> None:
+        content = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("a historical approval, or the user's word", content)
+        self.assertNotIn("| SSH or file transfer | Stop |", content)
+        self.assertRegex(content, r"只读 SSH.{0,100}无需重复")
+        self.assertRegex(content, r"同一对象.{0,80}阶段.{0,80}影响范围.{0,100}延续")
+        self.assertRegex(content, r"(对象|摘要).{0,80}变化.{0,100}授权")
+        self.assertIn("A build approval does not authorize installation", content)
+        self.assertIn("`BUILD`", content)
+        self.assertIn("黄金编排器", content)
+
+    def test_hotfix_and_target_labels_match_the_current_linux_boundary(self) -> None:
+        for path in (RUNBOOK, SKILL_ROOT / "SKILL.md", SKILL_ROOT / "references/deb-offline-delivery.md"):
+            content = path.read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                self.assertRegex(content, r"Linux.{0,80}hotfix.{0,80}(不支持|尚未支持)")
+                self.assertIn("clean `main`", content)
+        for path in (RUNBOOK, SKILL_ROOT / "references/release-gates.md"):
+            content = path.read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                self.assertIn("指定主机安装与桌面检查通过", content)
+                for label in ("制包输入已准备", "候选 DEB 已构建", "离线安装已演练", "目标机已验证", "发布前证据门禁已闭合", "客户单 DEB 已发布"):
+                    self.assertIn(label, content)
+                target_row = next(line for line in content.splitlines() if line.startswith("| 目标机已验证 |"))
+                self.assertIn("模型对话", target_row)
+                self.assertIn("附件", target_row)
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        self.assertRegex(runbook, r"新建用户.{0,80}(不能|不足以).{0,60}首次安装")
+        self.assertIn("系统安装基线", runbook)
+        self.assertIn("用户配置基线", runbook)
 
     def test_active_skill_does_not_recommend_stale_tmp_build_root(self) -> None:
         active_files = SOURCE_FILES - {"references/kylin-deb-version-history.md", "evals/evals.json"}

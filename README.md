@@ -35,13 +35,21 @@ To configure real model providers, copy `hermes-local-lab/.env.example` to `herm
 ## Development and Release Identity
 
 Daily work uses direct development on `main`. In this repository, `main` is the
-latest locally verified development line; `main` is not equivalent to a stable
-release. One writing Agent owns the working tree while Sol and other Agents may
+daily development line; verification must bind a specific commit or identified
+working-tree content. The branch name alone proves no validation, and `main` is
+not equivalent to a stable release. One coordinated writer owns the shared
+working tree and Git index across tasks while Sol and other Agents may
 audit read-only. Unless the user explicitly limits work to `local-only`, the
 default closeout is local verification, exact staging, final Sol review of the
 complete cached patch, one clear commit, remote refresh/divergence proof, and a
 normal push to `origin/main` without another permission prompt. Any staged-byte
 change invalidates that review and requires a fresh review before commit.
+
+Analysis, review, or planning alone does not authorize edits or commit/push.
+Current task boundaries and project rules take precedence over historical memory.
+Use the repository-owned Skills linked from `AGENTS.md`, not same-named global
+copies. If the required Sol review is unavailable or blocking issues remain at
+the remediation limit, stop before committing.
 
 `Main Validation` runs asynchronously after a push to `main`. It is non-required
 supplemental evidence for daily work, not permission to skip local verification.

@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -395,7 +396,10 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
     def test_active_rules_define_direct_main_and_release_identity(self):
         texts = [self._read_required(path) for path in ACTIVE_RULE_FILES[:4]]
         combined = "\n".join(texts)
-        self.assertRegex(combined, r"main.{0,40}(本地验证|locally verified).{0,40}(开发版本|development)")
+        self.assertRegex(combined, r"main.{0,40}(日常开发主线|daily development line)")
+        for text in texts:
+            self.assertNotRegex(text, r"最新本地验证的开发版本|latest locally verified development line")
+        self.assertRegex(combined, r"验证结论.{0,60}(提交|commit).{0,60}工作树")
         self.assertRegex(combined, r"main.{0,80}(不等同|not equivalent).{0,80}(稳定|stable)")
         self.assertIn("vX.Y.Z-rc.N", combined)
         self.assertIn("vX.Y.Z", combined)
@@ -416,6 +420,49 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, combined)
         self.assertRegex(combined, r"(?is)(staged bytes|暂存字节).{0,120}(变化|change).{0,120}(重新审核|fresh review|重审)")
+
+    def test_governance_routes_analysis_and_shared_writer_without_expanding_authority(self):
+        for path in (ROOT / "AGENTS.md", LIFECYCLE, SOLO_RUNBOOK):
+            text = self._read_required(path)
+            with self.subTest(path=path):
+                self.assertRegex(text, r"仅分析.{0,80}(不触发|不执行).{0,40}commit/push")
+                self.assertRegex(text, r"共享工作树.{0,60}Git index.{0,100}(唯一|一个).{0,20}写入")
+                self.assertRegex(text, r"(轮次|次数)上限.{0,100}停止提交")
+        lifecycle = self._read_required(LIFECYCLE)
+        self.assertRegex(lifecycle, r"根因未确认.{0,100}两次")
+        self.assertRegex(lifecycle, r"旧记忆.{0,80}(不能|不得).{0,40}覆盖")
+        self.assertRegex(lifecycle, r"Sol.{0,80}(不可用|无法获得).{0,80}提交前")
+
+    def test_project_entry_routes_to_existing_project_skills_and_platform_runbooks(self):
+        path = ROOT / "AGENTS.md"
+        text = self._read_required(path)
+        targets = re.findall(r"\]\(([^)]+)\)", text)
+        self.assertTrue(targets)
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertNotIn("://", target, "project rule entry must use repository-owned references")
+                self.assertTrue((path.parent / unquote(target.split("#", 1)[0])).is_file())
+        for skill in ("taiji-kylin-packaging", "frontend-ux-qa"):
+            self.assertIn(f".agents/skills/{skill}/SKILL.md", targets)
+        self.assertIn("docs/runbooks/taiji-windows-candidate-pipeline.md", targets)
+        self.assertRegex(text, r"同名全局 Skill.{0,80}(不|不得).{0,20}替代")
+
+    def test_frontend_contract_scope_preserves_ui_regression_severity(self):
+        skill = ROOT / ".agents/skills/frontend-ux-qa"
+        for relative in (
+            "SKILL.md", "references/feature-contract-template.md",
+            "references/frontend-ux-rubric.md", "references/subagent-review-template.md",
+        ):
+            text = self._read_required(skill / relative)
+            with self.subTest(file=relative):
+                for concept in ("功能契约", "内部 API", "CLI", "授权角色", "既有产品回归", "P0", "P1"):
+                    self.assertIn(concept, text)
+                self.assertNotIn("每个用户可感知能力必须", text)
+                self.assertNotIn("如果代码存在某个 action", text)
+        entry = self._read_required(skill / "SKILL.md")
+        self.assertRegex(entry, r"纯规则文档.{0,60}不触发")
+        self.assertIn("真实浏览器测试：未验证", entry)
+        self.assertIn("中文《前端 UX QA 报告》", entry)
 
     def test_active_rules_have_no_mandatory_daily_branch_worktree_pr_or_ci(self):
         texts = {path: self._read_required(path) for path in ACTIVE_RULE_FILES}

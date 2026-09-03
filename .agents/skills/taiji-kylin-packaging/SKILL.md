@@ -46,8 +46,10 @@ Read versions, hashes, stage definitions, compatibility policy, target matrix, a
 
 The six-field `taiji-packaging-interface/v1` contract keeps preparation and construction separate:
 
-- `builder_input_entry` (`taijiagent 打包交付/99_本机_准备制包输入包.sh`) prepares the frozen trio from an accepted source checkout. Doctor 的 repo 模式只能把 99 报告为下一步，且仍需要当轮专项授权。
+- `builder_input_entry` (`taijiagent 打包交付/99_本机_准备制包输入包.sh`) prepares the frozen trio from an accepted source checkout. Doctor 的 repo 模式只能把 99 报告为下一步，执行前须核对该阶段的有效专项授权。
 - `build_host_entry` (`taijiagent 打包交付/00_制包机_生成离线交付包.sh`) consumes that frozen trio on the controlled Linux build host. Never skip directly from repo inspection to 00.
+
+当前 Linux 输入链只接受已复验的 clean `main`；Linux hotfix 分支制包尚未支持。通用 `release-check.sh --hotfix-from` 支持源码修订身份检查，不代表该 Linux 输入链可接受非 main 来源，不得绕过现有门禁。
 
 ## Candidate-only controller
 
@@ -71,31 +73,36 @@ The six-field `taiji-packaging-interface/v1` contract keeps preparation and cons
 
 ## Authorization boundary
 
-兼容检查通过不等于已获执行授权。Orchestrator `READY`, an existing script, a historical approval, or the user's word “继续” also does not authorize an external or privileged action.
+兼容检查通过不等于已获执行授权。Orchestrator `READY`、脚本存在或其他制品的历史授权不授予新的外部操作权限。先核对当前用户边界和项目授权，再判断是否缺少授权。
+
+同一对象、阶段、主机和影响范围内仍有效的授权可以跨轮延续，“继续”不清零既有授权，也不自动扩大阶段。对象、commit/制品摘要或影响范围变化时重新核对授权，只暂停缺少授权的部分。项目已允许的 `kylin` 只读 SSH 能力检查无需重复确认；其他主机须按其明确访问范围核对。不得根据文件名、命令可用性或另一任务的授权推断当前授权。
 
 | Action | Default | Required approval scope |
 | --- | --- | --- |
 | Read-only inspection, doctor, selftest, local static/unit checks, plan or dry-run | Allowed within the user's local scope | None beyond the current task |
-| Download or install a public tool | Stop | Tool, source, machine, filesystem impact, rollback |
-| `sudo` or system dependency installation | Stop | Exact command class, machine, impact, rollback |
-| SSH or file transfer | Stop | Host alias, objects, direction, hashes, destination |
-| 实际 DEB 制包 | Stop | Source commit, build host, output, network/dependency boundary, rollback |
-| Install, upgrade, remove, or target acceptance | Stop | DEB basename/bytes/SHA256, target, lifecycle actions, data impact, rollback |
-| Certification or publication 签名 | Stop | Exact evidence identity, key role, signer, output |
-| Customer-directory 发布 | Stop | Exact DEB hash, channel/directory, audience, rollback |
-| Destructive cleanup | Stop | Exact owned targets and recovery proof |
+| Read-only SSH capability check | Allowed within explicit project/user access scope | Host alias and read-only command scope; no transfer or system changes |
+| File transfer | Verify existing approval; stop if absent | Host alias, objects, direction, hashes, destination |
+| Download or install a public tool | Verify existing approval; stop if absent | Tool, source, machine, filesystem impact, rollback |
+| `sudo` or system dependency installation | Verify existing approval; stop if absent | Exact command class, machine, impact, rollback |
+| 实际 DEB 制包 | Verify existing approval; stop if absent | Source commit, build host, output, network/dependency boundary, rollback |
+| Install, upgrade, remove, or target acceptance | Verify existing approval; stop if absent | DEB basename/bytes/SHA256, target, lifecycle actions, data impact, rollback |
+| Certification or publication 签名 | Verify existing approval; stop if absent | Exact evidence identity, key role, signer, output |
+| Customer-directory 发布 | Verify existing approval; stop if absent | Exact DEB hash, channel/directory, audience, rollback |
+| Destructive cleanup | Verify existing approval; stop if absent | Exact owned targets and recovery proof |
 
 Each approval covers only the named stage. A build approval does not authorize installation; acceptance does not authorize signing; signing does not authorize publication. An explicit current prohibition on network, SSH, packaging, installation, signing, or publication always wins.
 
-当“继续”夹带一个或多个外部或特权阶段时，必须同时完成三件事：
+当“继续”夹带尚未授权的外部或特权阶段时：
 
-1. 逐项拒绝执行所有未获当轮专项授权的阶段。
-2. 只提供只读诊断或计划，不发起下载、SSH、sudo、制包、安装、签名或发布。
-3. 为用户夹带的每个阶段分别输出一个待授权块，不得合并成一句“需要批准”：
+1. 逐项暂停缺少有效授权的阶段；原已授权且不依赖这些阶段的工作可以继续。
+2. 对未授权阶段只提供只读诊断或计划，先补齐可查明的对象、证据和影响，再询问仍缺少的用户决定。不得把“顺便”一词本身当成授权无效的理由。
+3. 为确实尚未授权的阶段分别输出具体的待授权块：
    - `待授权阶段`：本次被拒绝的单一阶段。
    - `精确身份`：从上表逐项给出对象、commit/版本/制品或证据 SHA256、主机/签名者/渠道和输入输出。
    - `影响范围`：网络、文件系统、系统依赖、安装态、证据态或客户目录中会变更的精确范围。
    - `回滚与停止条件`：失败时如何恢复、哪个检查点必须停止，以及不会自动继续到的下游阶段。
+
+授权延续不绕过候选控制器现有的精确 `BUILD` 确认，也不把 candidate-only 结果升级为黄金编排器 checkpoint。
 
 ## Four artifact roles
 
@@ -124,6 +131,8 @@ Use only the narrowest label supported by current evidence:
 Code or tests present without a current successful run: `已实现，未实时验证`. Old artifacts or logs: `历史线索`. An unrun gate: `未实时验证`.
 
 Local source tests cannot prove a Linux DEB exists. A build-host install cannot prove a clean first graphical installation. One real Kylin terminal cannot prove every Kylin/UOS/openKylin release. A signature cannot repair stale or incomplete evidence.
+
+“指定主机安装与桌面检查通过”只是局部证据描述；“目标机已验证”还须完成同一 DEB 的真实模型对话、附件及权威手册规定的全部适用业务路径。支持矩阵、认证签名和发布条件归入“发布前证据门禁已闭合”，不因单机验收而省略。详见 `references/release-gates.md`；不改变证据 JSON、状态枚举或脚本门禁。
 
 ## Route the task
 

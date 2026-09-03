@@ -19,7 +19,9 @@ git fetch origin main
 git rev-list --left-right --count HEAD...origin/main
 ```
 
-当前分支必须是 `main`。开始修改前应确认本地与远端没有未知分叉，并明确一个写入 Agent；并行 Sol、规范和质量审查均保持只读。已有脏路径逐项标注归属，不能顺手清理或夹带。
+当前分支必须是 `main`。开始修改前应确认本地与远端没有未知分叉；同一共享工作树及 Git index 同一时间只有一个协调后的写入者，覆盖跨任务场景。并行 Sol、规范和质量审查均保持只读。已有脏路径逐项标注归属，不能顺手清理或夹带。
+
+仅分析、审查或制定计划不触发修改或 commit/push。`main` 是日常开发主线，验证结论绑定具体提交或明确的工作树内容，分支名不证明验证通过。旧记忆不能覆盖当前项目授权。
 
 默认顺序是：
 
@@ -74,7 +76,7 @@ git diff --cached
 - 当前验证能证明什么，浏览器、真实桌面、目标机等哪些仍未验证；
 - cached path/status、执行位和完整字节是否正是本任务提交候选；`git diff --cached` 为空时不能给出最终通过。
 
-发现问题时回到修改和验证，再精确暂存并重跑全部五个视图。任何重新暂存都会改变 staged bytes 并使旧结论失效；必须取得绑定最新 cached patch 的新审核结论。
+发现问题时回到修改和验证，再精确暂存并重跑全部五个视图。任何 staged bytes 变化都会使旧结论失效；必须取得绑定最新 cached patch 的新审核结论。达到修复轮次上限仍有阻断项时停止提交；无法获得 Sol 审核时也停在提交前，不以旧审核或其他模型冒充 Sol 审核。
 
 ## 4. 精确暂存、提交与正常推送
 
@@ -207,6 +209,8 @@ hotfix 必须从目标版本的已发布稳定 Tag 起步，不得使用 `origin
 清理前核对全部 worktree、refs、未跟踪/未提交内容、仅分支提交、关联进程和备份。任何内容价值或归属不明时停止；不得机械升级为强删。
 
 ## 9. Linux 候选的额外门禁
+
+当前 Linux 输入链仅接受已复验的 clean `main`；Linux hotfix 分支制包尚未支持。通用 `release-check.sh --hotfix-from` 通过不能放行 `99/00/01` 的非 main 来源，不得通过临时移动 main 或修改门禁制包。
 
 `scripts/taiji-release-check.sh` 保持为 Linux 候选的额外 DEB、签名、认证矩阵和 GitHub CI 证据门禁，不属于日常 `scripts/verify.sh`，也不得被通用 `release-check.sh` 弱化或替代。
 
