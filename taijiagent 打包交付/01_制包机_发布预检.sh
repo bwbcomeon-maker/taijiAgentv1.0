@@ -1070,6 +1070,24 @@ main() {
   check_delivery_artifacts
   ok "发布预检通过"
 }
+# Re-enter this same frozen verifier only when the actual temporary filesystem
+# folds case. The child probes the new APFS workspace, so no environment flag
+# can bypass the check or cause recursive image creation.
+if [ "$(uname -s)" = Darwin ] && [ "$REQUIRE_ARTIFACTS" = 1 ]; then
+  CASE_WORKSPACE_HELPER="$REPO_ROOT/packaging/linux/macos_case_workspace.py"
+  [ -f "$CASE_WORKSPACE_HELPER" ] && [ ! -L "$CASE_WORKSPACE_HELPER" ] \
+    || fail "缺少可信 Mac 验包工作区辅助脚本"
+  [ "$(sha256sum "$CASE_WORKSPACE_HELPER" | awk '{print $1}')" = "86d8080a4260b8da04958d4cad721a77e483ca81ea5f19c636aa4e76965720af" ] \
+    || fail "Mac 验包工作区辅助脚本与冻结预检摘要不一致"
+  if /usr/bin/python3 -I -B "$CASE_WORKSPACE_HELPER" --probe "$RELEASE_TEMP_ROOT"; then
+    :
+  else
+    CASE_PROBE_STATUS=$?
+    [ "$CASE_PROBE_STATUS" = 1 ] || fail "无法安全探测验包临时目录的大小写行为"
+    exec /usr/bin/python3 -I -B "$CASE_WORKSPACE_HELPER" --parent "$RELEASE_TEMP_ROOT" \
+      -- /bin/bash -p "$SCRIPT_DIR/01_制包机_发布预检.sh" "$@"
+  fi
+fi
 trap cleanup_release_temp_artifacts EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
