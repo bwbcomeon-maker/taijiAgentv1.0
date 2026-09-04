@@ -422,6 +422,15 @@ def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(m
     ready = onboarding.get_setup_status()
     assert ready["overall_ready"] is True
 
+    monkeypatch.setattr(
+        onboarding, "build_security_status_payload",
+        lambda: {"mode": "restricted", "profile": "strict", "restart_required": True},
+    )
+    pending = onboarding.get_setup_status()
+    assert pending["overall_ready"] is False
+    security = next(item for item in pending["items"] if item["id"] == "security")
+    assert "重新打开" in security["reason"]
+
 
 def test_agent_discovery_accepts_sourceless_installed_entrypoint(monkeypatch, tmp_path):
     from api import config

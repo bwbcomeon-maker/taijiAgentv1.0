@@ -696,6 +696,22 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 strict_result.stdout.splitlines()[:4],
                 ["strict", "restricted", "0", "true"],
             )
+            for scripts, delegate in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
+                (runtime_home / ".env").write_text(
+                    "TAIJI_SECURITY_PROFILE=strict\n"
+                    f"TAIJI_ALLOW_DELEGATE_TASK={delegate}\n"
+                    f"TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS={scripts}\n",
+                    encoding="utf-8",
+                )
+                extensions = subprocess.run(
+                    ["/bin/bash", "-c", 'source "$1"; printf "%s\\n" '
+                     '"$TAIJI_SECURITY_PROFILE" "$TAIJI_ALLOW_TERMINAL" '
+                     '"$TAIJI_ALLOW_EXECUTE_CODE" "$TAIJI_ALLOW_DELEGATE_TASK" '
+                     '"$TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS"', "bash", str(runtime_env)],
+                    env=run_env, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(extensions.returncode, 0, extensions.stderr)
+                self.assertEqual(extensions.stdout.splitlines(), ["strict", "0", "0", delegate, scripts])
             (runtime_home / ".env").write_text(
                 "TAIJI_SECURITY_PROFILE=local_controlled\n"
                 "TAIJI_SECURITY_MODE=full\n"

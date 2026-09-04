@@ -267,7 +267,7 @@ test("installed-production defaults to the strict enterprise profile", (t) => {
   assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "true");
 });
 
-test("installed-production preserves an explicit strict profile across restart", (t) => {
+test("installed-production preserves strict base and explicit extensions across restart", (t) => {
   const { applySecurityProfile } = loadLaunchProfile();
   const profile = resolveInstalled(t).resolve();
   const env = {
@@ -291,8 +291,8 @@ test("installed-production preserves an explicit strict profile across restart",
   assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
   assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
   assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
-  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
-  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "1");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "1");
   assert.equal(env.TAIJI_ALLOW_FUTURE_RELAXATION, "true");
 });
 

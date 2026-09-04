@@ -9,6 +9,7 @@ from typing import Any
 
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 _PROFILE_CHOICES = {"strict", "local_controlled"}
+_EXTENSION_KEYS = {"unapproved_skill_scripts", "delegate_task"}
 _CONTROLLED_ALLOW_VARS = {
     "terminal": "TAIJI_ALLOW_TERMINAL",
     "execute_code": "TAIJI_ALLOW_EXECUTE_CODE",
@@ -36,7 +37,7 @@ def _effective_profile() -> str:
     )
     if all(local_capabilities):
         return "local_controlled"
-    if any(_env_flag(var) for var in _CONTROLLED_ALLOW_VARS.values()):
+    if any(local_capabilities):
         return "custom_restricted"
     return "strict"
 
@@ -68,7 +69,8 @@ def _capability(name: str, allow_var: str | None, allowed: bool, approval_applic
 def build_security_status_payload() -> dict[str, Any]:
     mode = _security_mode()
     profile = _effective_profile()
-    persisted_profile = _persisted_security_profile()
+    configured = _persisted_security_settings()
+    persisted_profile = configured["profile"] if configured else None
     pending_profile = (
         persisted_profile
         if profile in _PROFILE_CHOICES and persisted_profile != profile
@@ -79,11 +81,18 @@ def build_security_status_payload() -> dict[str, Any]:
     execute_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_EXECUTE_CODE")
     scripts_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS")
     delegate_allowed = (not restricted) or _env_flag("TAIJI_ALLOW_DELEGATE_TASK")
+    effective_extensions = {
+        "unapproved_skill_scripts": scripts_allowed,
+        "delegate_task": delegate_allowed,
+    }
+    configured = configured or {"profile": profile, "capabilities": effective_extensions}
+    restart_required = configured != {"profile": profile, "capabilities": effective_extensions}
     return {
         "mode": mode,
         "profile": profile,
         "pending_profile": pending_profile,
-        "restart_required": pending_profile is not None,
+        "restart_required": restart_required,
+        "configured": configured,
         "profile_choices": sorted(_PROFILE_CHOICES),
         "desktop_profile_write_enabled": os.environ.get("TAIJI_DESKTOP_ONLY") == "1",
         "approval_available": True,
@@ -114,7 +123,7 @@ def _env_file() -> Path:
     return _runtime_home() / ".env"
 
 
-def _persisted_security_profile() -> str | None:
+def _persisted_security_settings() -> dict[str, Any] | None:
     """Return a canonical restart-pending profile without exposing env contents."""
     if os.environ.get("TAIJI_DESKTOP_ONLY") != "1":
         return None
@@ -138,7 +147,13 @@ def _persisted_security_profile() -> str | None:
         return None
     if selected == "local_controlled" and (terminal, execute_code) != ("1", "1"):
         return None
-    return selected
+    return {
+        "profile": selected,
+        "capabilities": {
+            key: str(values.get(_CONTROLLED_ALLOW_VARS[key], "")).strip().lower() in _TRUTHY
+            for key in _EXTENSION_KEYS
+        },
+    }
 
 
 def _write_env(values: dict[str, str]) -> Path:
@@ -154,27 +169,28 @@ def _write_env(values: dict[str, str]) -> Path:
     return env_path
 
 
-def set_security_profile(profile: str) -> dict[str, Any]:
-    if os.environ.get("TAIJI_DESKTOP_ONLY") != "1":
+def set_security_profile(profile: str, *, capabilities: dict[str, bool] | None = None) -> dict[str, Any]:
+    if os.environ.get("TAIJI_DESKTOP_ONLY") != "1" or _security_mode() == "full":
         raise PermissionError("security profile switching is only available in the desktop runtime")
     selected = str(profile or "").strip()
     if selected not in _PROFILE_CHOICES:
         raise ValueError("profile must be strict or local_controlled")
+    if capabilities is not None and (
+        not isinstance(capabilities, dict)
+        or any(key not in _EXTENSION_KEYS or type(value) is not bool for key, value in capabilities.items())
+    ):
+        raise ValueError("capabilities must contain only boolean unapproved_skill_scripts or delegate_task")
     local_controlled = selected == "local_controlled"
     values = {
         "TAIJI_SECURITY_PROFILE": selected,
         "TAIJI_SECURITY_MODE": "restricted",
         "TAIJI_ALLOW_TERMINAL": "1" if local_controlled else "0",
         "TAIJI_ALLOW_EXECUTE_CODE": "1" if local_controlled else "0",
-        "TAIJI_ALLOW_DELEGATE_TASK": (
-            "1" if local_controlled and _env_flag("TAIJI_ALLOW_DELEGATE_TASK") else "0"
-        ),
-        "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": (
-            "1"
-            if local_controlled and _env_flag("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS")
-            else "0"
-        ),
     }
+    # Omitted keys are left untouched by the locked canonical writer. Reading
+    # the old process env here would overwrite another saved, pending choice.
+    values.update({_CONTROLLED_ALLOW_VARS[key]: "1" if enabled else "0"
+                   for key, enabled in (capabilities or {}).items()})
     _write_env(values)
     status = build_security_status_payload()
     pending_profile = selected if selected != status["profile"] else None
@@ -182,7 +198,7 @@ def set_security_profile(profile: str) -> dict[str, Any]:
         "ok": True,
         "profile": selected,
         "pending_profile": pending_profile,
-        "restart_required": pending_profile is not None,
+        "restart_required": status["restart_required"] or pending_profile is not None,
         # This is the effective state of the currently running Agent process.
         # Persisted changes become effective only after the desktop app restarts.
         "status": status,

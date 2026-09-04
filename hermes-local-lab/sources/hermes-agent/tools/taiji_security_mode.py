@@ -81,7 +81,7 @@ def security_profile() -> str:
         return "full"
     if is_terminal_allowed() and is_execute_code_allowed():
         return "local_controlled"
-    if any(env_flag_enabled(var) for var in _CONTROLLED_ALLOW_VARS.values()):
+    if is_terminal_allowed() or is_execute_code_allowed():
         return "custom_restricted"
     return "strict"
 

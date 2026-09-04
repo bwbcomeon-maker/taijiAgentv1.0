@@ -50,6 +50,7 @@ git rev-list --left-right --count HEAD...origin/main
 ```
 
 - 每种模式先运行本地改动安全检查，拒绝私钥、明显令牌和临时/制包输出。
+- 安全扫描完整检查 staged、unstaged、untracked 内容：新增文件及非源码单文件上限 1 MiB；仅 HEAD 中已有的普通源码文件（Python、JS/TS、CSS、HTML、Shell）允许在 4 MiB 内完整读取。暂存与工作树两个视图仍分别计入 4 MiB 总量预算，超过预算在读取内容前失败；保留私钥、令牌、凭据、Python 语法、非普通文件和并发变更检查，不允许仅扫描 diff 或静默跳过文件。
 - 默认与 `--full` 不安装依赖、不访问网络、不启动浏览器或持久服务。
 - 缺少 Python、Node、npm、准备好的依赖目录或测试入口时，脚本必须明确打印缺失项并失败；不得自动安装后把环境变化当作验证。
 - 涉及 Node 的套件在测试前解析并记录 Node/npm 路径与版本，开发验证使用 Node 22 或 24；其他 major 在预检阶段拒绝。将已准备的工具链 `bin` 放在本次命令的 PATH 首位，子进程继承同一 Node 来源；不修改全局软链接。安装态 DOCX 固定使用同级 `runtime/node/bin/node` 的 22.23.1，不退回系统或用户 PATH。

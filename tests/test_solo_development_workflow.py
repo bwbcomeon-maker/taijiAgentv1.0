@@ -794,6 +794,64 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
                 self.assertIn(target.name, output)
                 self.assertNotIn(secret, output)
 
+    def test_change_safety_scans_large_tracked_source_through_end(self):
+        padding = "# " + "x" * (MAX_SAFETY_FILE_BYTES + 64) + "\n"
+        historic = "historical_" + "B" * 32
+        for staged in (False, True):
+            with self.subTest(staged=staged), tempfile.TemporaryDirectory() as temp:
+                repo = Path(temp) / "repo"
+                _init_repo(repo)
+                scanner = self._install_safety_scanner(repo)
+                target = repo / "large.py"
+                baseline = padding + f'API_KEY = "{historic}"\n'
+                target.write_text(baseline)
+                _assert_command_ok(self, _git(repo, "add", target.name))
+                _assert_command_ok(self, _git(repo, "commit", "-m", "existing large source"))
+                target.write_text(baseline + "VALUE = 2\n")
+                if staged:
+                    _assert_command_ok(self, _git(repo, "add", target.name))
+                result = self._run_safety(repo, scanner)
+                self.assertEqual(result.returncode, 0, _combined_output(result))
+                for suffix, finding in (
+                    ('NEW_TOKEN = "' + "live_" + "N" * 32 + '"\n', "credential-assignment"),
+                    ('# ' + self._secret_token() + '\n', "high-confidence-token"),
+                    ('# -----BEGIN ' + 'PRIVATE KEY-----\n', "private-key"),
+                    ('def broken(\n', "python-parse-error"),
+                ):
+                    target.write_text(baseline + suffix)
+                    if staged:
+                        _assert_command_ok(self, _git(repo, "add", target.name))
+                        # A clean worktree must not hide unsafe staged bytes.
+                        target.write_text(baseline + "VALUE = 3\n")
+                    result = self._run_safety(repo, scanner)
+                    self.assertNotEqual(result.returncode, 0, _combined_output(result))
+                    self.assertIn(finding, _combined_output(result))
+                    self.assertNotIn(historic, _combined_output(result))
+
+    def test_change_safety_large_source_keeps_new_file_and_total_bounds(self):
+        for kind in ("untracked", "new-staged", "tracked-nonsource", "tracked-oversize", "tracked-total"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                repo = Path(temp) / "repo"
+                _init_repo(repo)
+                scanner = self._install_safety_scanner(repo)
+                target = repo / ("large.txt" if kind == "tracked-nonsource" else "large.py")
+                target.write_text("# initial\n")
+                if kind.startswith("tracked"):
+                    _assert_command_ok(self, _git(repo, "add", target.name))
+                    _assert_command_ok(self, _git(repo, "commit", "-m", "track fixture"))
+                size = MAX_SAFETY_TOTAL_BYTES + 1 if kind == "tracked-oversize" else MAX_SAFETY_FILE_BYTES + 64
+                target.write_text("#" + "x" * size + "\n")
+                if kind == "new-staged":
+                    _assert_command_ok(self, _git(repo, "add", target.name))
+                if kind == "tracked-total":
+                    target.write_text("#" + "x" * (MAX_SAFETY_TOTAL_BYTES // 2) + "\n")
+                    _assert_command_ok(self, _git(repo, "add", target.name))
+                    target.write_text(target.read_text() + "# changed\n")
+                result = self._run_safety(repo, scanner)
+                self.assertNotEqual(result.returncode, 0, _combined_output(result))
+                expected = "total-size-limit" if kind == "tracked-total" else "file-size-limit"
+                self.assertIn(expected, _combined_output(result))
+
     def test_change_safety_rejects_non_stage_zero_symlink_and_gitlink_index_entries(self):
         with tempfile.TemporaryDirectory(prefix="taiji-safety-index-mode-") as temp_dir:
             base = Path(temp_dir)
@@ -855,7 +913,7 @@ class SoloDevelopmentWorkflowContracts(unittest.TestCase):
         source = self._read_required(SAFETY)
         for token in (
             "MAX_CHANGE_ENTRIES",
-            "MAX_FILE_BYTES + 1",
+            "limit + 1",
             "os.O_NOFOLLOW",
             "os.open",
             "os.fstat",

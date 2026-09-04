@@ -35,8 +35,6 @@ def test_security_profile_uses_canonical_env_writer(
                 "TAIJI_SECURITY_MODE": "restricted",
                 "TAIJI_ALLOW_TERMINAL": "0",
                 "TAIJI_ALLOW_EXECUTE_CODE": "0",
-                "TAIJI_ALLOW_DELEGATE_TASK": "0",
-                "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": "0",
             },
             runtime_home / "config.yaml",
             {"project_process_env": False},
@@ -73,8 +71,6 @@ def test_local_controlled_enables_terminal_and_code_without_broadening_other_cap
         "TAIJI_SECURITY_MODE": "restricted",
         "TAIJI_ALLOW_TERMINAL": "1",
         "TAIJI_ALLOW_EXECUTE_CODE": "1",
-        "TAIJI_ALLOW_DELEGATE_TASK": "0",
-        "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": "0",
     }]
     assert result["pending_profile"] == "local_controlled"
     assert result["status"]["profile"] == "strict"
@@ -113,8 +109,6 @@ def test_saving_strict_from_local_controlled_keeps_current_process_truthful(
         "TAIJI_SECURITY_MODE": "restricted",
         "TAIJI_ALLOW_TERMINAL": "0",
         "TAIJI_ALLOW_EXECUTE_CODE": "0",
-        "TAIJI_ALLOW_DELEGATE_TASK": "0",
-        "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS": "0",
     }]
     assert result["pending_profile"] == "strict"
     assert result["status"]["profile"] == "local_controlled"

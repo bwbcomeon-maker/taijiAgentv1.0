@@ -313,13 +313,14 @@ function applySecurityProfile({
     runtimeEnv.TAIJI_SECURITY_PROFILE = profileName;
     runtimeEnv.TAIJI_SECURITY_MODE = "restricted";
     if (profileName === "strict") {
-      for (const name of SECURITY_ALLOW_FLAGS) runtimeEnv[name] = "0";
+      runtimeEnv.TAIJI_ALLOW_TERMINAL = "0";
+      runtimeEnv.TAIJI_ALLOW_EXECUTE_CODE = "0";
     } else {
       runtimeEnv.TAIJI_ALLOW_TERMINAL = "1";
       runtimeEnv.TAIJI_ALLOW_EXECUTE_CODE = "1";
-      runtimeEnv.TAIJI_ALLOW_DELEGATE_TASK = delegateEnabled ? "1" : "0";
-      runtimeEnv.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS = skillScriptsEnabled ? "1" : "0";
     }
+    runtimeEnv.TAIJI_ALLOW_DELEGATE_TASK = delegateEnabled ? "1" : "0";
+    runtimeEnv.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS = skillScriptsEnabled ? "1" : "0";
     return securityProfileDefaults(profileName);
   }
 

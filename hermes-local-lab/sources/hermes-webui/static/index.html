@@ -2224,16 +2224,24 @@
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field security-profile-card" id="settingsSecurityProfile" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsSecurityProfileSelect">安全模式</label>
-              <div class="settings-security-copy">正式安装建议使用“企业安全”；“本机调试”只供开发人员临时排查问题，切换后需要重新启动应用。</div>
+              <div class="settings-security-copy">正式安装需要使用“企业安全”；“本机调试”仅供开发排查。扩展能力默认关闭，可按需启用；保存后重新打开应用生效。</div>
               <div class="settings-security-row">
-                <select id="settingsSecurityProfileSelect" aria-label="选择安全模式">
-                  <option value="strict">企业安全（推荐）</option>
+                <select id="settingsSecurityProfileSelect" aria-label="选择安全模式" onchange="editSecuritySettings()" disabled>
+                  <option value="strict">企业安全</option>
                   <option value="local_controlled">本机调试（仅开发人员）</option>
                 </select>
-                <button class="sm-btn" id="settingsSecurityProfileSave" type="button" onclick="saveSecurityProfile()">保存安全模式</button>
+                <button class="sm-btn" id="settingsSecurityProfileSave" type="button" onclick="saveSecurityProfile()" disabled>保存安全设置</button>
               </div>
+              <fieldset class="settings-security-extensions" id="settingsSecurityExtensions" disabled>
+                <legend>可选扩展能力</legend>
+                <label><input id="settingsSecurityScripts" type="checkbox" onchange="editSecuritySettings()" aria-describedby="settingsSecurityScriptsHint"> 脚本任务</label>
+                <div id="settingsSecurityScriptsHint" class="settings-security-copy">允许定时执行应用脚本目录内的脚本。脚本以当前用户权限运行，不逐次审批，请仅启用可信脚本。</div>
+                <label><input id="settingsSecurityDelegate" type="checkbox" onchange="editSecuritySettings()" aria-describedby="settingsSecurityDelegateHint"> 委派</label>
+                <div id="settingsSecurityDelegateHint" class="settings-security-copy">允许创建子任务，可能增加模型调用与费用；仍受工具权限、数量和深度限制。</div>
+              </fieldset>
+              <div class="settings-security-copy">当前生效能力（保存不会立即改变下列状态）</div>
               <div class="security-capability-list" id="settingsSecurityCapabilities" aria-live="polite"></div>
-              <div id="settingsSecurityStatus" class="settings-autosave-status" aria-live="polite"></div>
+              <div id="settingsSecurityStatus" class="settings-autosave-status" aria-live="polite">正在读取安全设置…</div>
             </div>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_shutdown">Stop the taiji Agent server</label>

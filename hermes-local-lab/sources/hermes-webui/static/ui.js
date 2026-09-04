@@ -8582,7 +8582,25 @@ else startSystemHealthMonitor();
 // ── Security profile/status chip ───────────────────────────────────────
 let _securityStatusCache=null;
 let _securityStatusTimer=null;
-let _securityPendingProfile=null;
+let _securityDraft=null;
+let _securitySaving=false;
+let _securityStatusRequest=0;
+let _securitySaveMessage='';
+function _securityConfigured(data){
+  return data.configured||{profile:data.pending_profile||data.profile,capabilities:{
+    unapproved_skill_scripts:!!data.capabilities?.unapproved_skill_scripts?.allowed,
+    delegate_task:!!data.capabilities?.delegate_task?.allowed
+  }};
+}
+function editSecuritySettings(){
+  if(_securitySaving)return;
+  _securityDraft={profile:$('settingsSecurityProfileSelect').value,capabilities:{
+    unapproved_skill_scripts:$('settingsSecurityScripts').checked,
+    delegate_task:$('settingsSecurityDelegate').checked
+  }};
+  _securitySaveMessage='';
+  renderSecurityStatus(null);
+}
 function _securityProfileLabel(profile){
   const map={strict:'企业安全',local_controlled:'本机调试',full:'完全开放',custom_restricted:'自定义'};
   return map[profile]||'未知';
@@ -8610,19 +8628,22 @@ function renderSecurityStatus(payload){
   const save=$('settingsSecurityProfileSave');
   const status=$('settingsSecurityStatus');
   if(select&&data){
-    if(_securityPendingProfile&&data.profile===_securityPendingProfile)_securityPendingProfile=null;
-    const persistedPending=['strict','local_controlled'].includes(data.pending_profile)&&data.pending_profile!==data.profile
-      ?data.pending_profile
-      :null;
-    const pending=_securityPendingProfile||persistedPending;
-    const selected=pending||data.profile;
+    const settings=_securityDraft||_securityConfigured(data);
+    const selected=settings.profile;
     if(selected==='strict'||selected==='local_controlled')select.value=selected;
     const writable=!!data.desktop_profile_write_enabled&&data.profile!=='full';
-    select.disabled=!writable;
-    if(save)save.disabled=!writable;
-    if(status)status.textContent=pending
-      ? `已保存为“${_securityProfileLabel(pending)}”。当前仍为“${_securityProfileLabel(data.profile)}”；请关闭并重新打开 taiji Agent 后再检查。`
-      : (writable?'当前设置可在桌面端保存；变更后需要关闭并重新打开 taiji Agent。':'当前档位由管理员环境变量或非桌面运行态控制，设置页只读。');
+    select.disabled=!writable||_securitySaving;
+    if(save)save.disabled=!writable||_securitySaving;
+    const extensions=$('settingsSecurityExtensions');
+    if(extensions)extensions.disabled=!writable||_securitySaving;
+    const scripts=$('settingsSecurityScripts'),delegate=$('settingsSecurityDelegate');
+    if(scripts)scripts.checked=!!settings.capabilities.unapproved_skill_scripts;
+    if(delegate)delegate.checked=!!settings.capabilities.delegate_task;
+    if(status&&!_securitySaving)status.textContent=!writable
+      ?'当前设置由管理员或非桌面运行态控制，设置页只读。'
+      :_securitySaveMessage||(_securityDraft?'有未保存的修改，请保存安全设置。':data.restart_required
+        ?'安全设置已保存，当前运行状态未改变；请关闭并重新打开 taiji Agent 后再检查。'
+        :`当前为“${_securityProfileLabel(data.profile)}”，已保存的安全设置已生效。`);
   }
   const caps=$('settingsSecurityCapabilities');
   if(caps&&data&&data.capabilities){
@@ -8632,6 +8653,7 @@ function renderSecurityStatus(payload){
       if(!cap)return;
       const pill=document.createElement('div');
       pill.className='security-capability-pill '+(cap.allowed?'allowed':'blocked');
+      pill.dataset.securityCapability=key;
       const name=document.createElement('span');
       name.className='cap-name';
       name.textContent=_securityCapabilityLabel(key);
@@ -8653,7 +8675,9 @@ async function refreshSecurityStatus(force=false){
     return null;
   }
   try{
+    const request=++_securityStatusRequest;
     const payload=await api('/api/security/status',{timeoutToast:false});
+    if(request!==_securityStatusRequest||_securitySaving)return _securityStatusCache;
     renderSecurityStatus(payload);
     return payload;
   }catch(_){
@@ -8669,27 +8693,44 @@ function openSecuritySettings(){
 async function saveSecurityProfile(){
   const select=$('settingsSecurityProfileSelect');
   const status=$('settingsSecurityStatus');
-  if(!select)return;
-  if(status)status.textContent='正在保存安全模式...';
+  if(!select||_securitySaving||!_securityStatusCache?.desktop_profile_write_enabled||_securityStatusCache.profile==='full')return;
+  const submitted={profile:select.value,capabilities:{
+    unapproved_skill_scripts:!!$('settingsSecurityScripts')?.checked,
+    delegate_task:!!$('settingsSecurityDelegate')?.checked
+  }};
+  const configured=_securityConfigured(_securityStatusCache);
+  const enabling=Object.keys(submitted.capabilities).filter(key=>submitted.capabilities[key]&&!configured.capabilities[key]);
+  _securityDraft=submitted;
+  _securitySaving=true;
+  ++_securityStatusRequest;
+  renderSecurityStatus(null);
   try{
-    const result=await api('/api/security/profile',{method:'POST',body:JSON.stringify({profile:select.value})});
-    const savedProfile=result&&result.pending_profile?result.pending_profile:select.value;
+    if(enabling.length){
+      const confirmed=await showConfirmDialog({title:'确认启用扩展能力',
+        message:`将启用：${enabling.map(_securityCapabilityLabel).join('、')}。脚本任务可执行可信脚本，委派可能增加模型调用与费用；启用后不逐次确认，现有路径、工具和委派限制仍生效。`,
+        confirmLabel:'确认启用并保存',cancelLabel:'取消',focusCancel:true});
+      if(!confirmed)return;
+    }
+    if(status)status.textContent='正在保存安全设置…';
+    const result=await api('/api/security/profile',{method:'POST',body:JSON.stringify(submitted)});
     const restartRequired=!!(result&&result.restart_required);
-    _securityPendingProfile=restartRequired?savedProfile:null;
+    _securityDraft=null;
+    _securitySaveMessage='';
     if(result&&result.status)renderSecurityStatus(result.status);
-    if(status&&result)status.textContent=restartRequired
-      ?`已保存为“${_securityProfileLabel(savedProfile)}”。当前运行状态未改变；请关闭并重新打开 taiji Agent 后再检查。`
-      :`当前已是“${_securityProfileLabel(savedProfile)}”，无需重新打开应用。`;
     if(typeof showToast==='function')showToast(
-      restartRequired?'安全模式已保存，请关闭并重新打开应用。':'安全模式未改变，无需重新打开应用。',
+      restartRequired?'安全设置已保存，请关闭并重新打开应用。':'安全设置与当前状态一致，无需重新打开应用。',
       4500,
       restartRequired?'warning':'success'
     );
   }catch(e){
     const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope(e):null;
-    const message=productError?`${productError.title}：${productError.message}`:'安全模式保存失败，请重试。';
+    const message=productError?`安全设置保存失败：${productError.title}：${productError.message}`:'安全设置保存失败，请重试。';
+    _securitySaveMessage=message;
     if(status)status.textContent=message;
     if(typeof showToast==='function')showToast(message,5000,'error');
+  }finally{
+    _securitySaving=false;
+    renderSecurityStatus(null);
   }
 }
 function startSecurityStatusMonitor(){
@@ -8702,6 +8743,7 @@ if(typeof window!=='undefined'){
   window.renderSecurityStatus=renderSecurityStatus;
   window.openSecuritySettings=openSecuritySettings;
   window.saveSecurityProfile=saveSecurityProfile;
+  window.editSecuritySettings=editSecuritySettings;
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSecurityStatusMonitor);
 else startSecurityStatusMonitor();

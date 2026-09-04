@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_CHANGE_ENTRIES = 1024
+SOURCE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".sh"}
 GIT_LOCATOR_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -391,12 +392,16 @@ def _content_findings(path: str, content: bytes, baseline: bytes = b"") -> list[
     return findings
 
 
-def _read_index_blob(oid: str) -> tuple[int, bytes]:
+def _index_blob_size(oid: str) -> int:
     try:
-        size = int(_git_bytes("cat-file", "-s", oid).strip())
+        return int(_git_bytes("cat-file", "-s", oid).strip())
     except ValueError as exc:
         raise GitQueryError("Git blob size was malformed") from exc
-    if size > MAX_FILE_BYTES:
+
+
+def _read_index_blob(oid: str, limit: int = MAX_FILE_BYTES) -> tuple[int, bytes]:
+    size = _index_blob_size(oid)
+    if size > limit:
         return size, b""
     content = _git_bytes("cat-file", "blob", oid)
     if len(content) != size:
@@ -404,15 +409,24 @@ def _read_index_blob(oid: str) -> tuple[int, bytes]:
     return size, content
 
 
-def _baseline_content(entry: tuple[str, str] | None) -> bytes:
+def _baseline_content(entry: tuple[str, str] | None, limit: int = MAX_FILE_BYTES) -> bytes:
     if entry is None or entry[0] not in {"100644", "100755"}:
         return b""
-    size, content = _read_index_blob(entry[1])
-    return content if size <= MAX_FILE_BYTES else b""
+    size, content = _read_index_blob(entry[1], limit)
+    return content if size <= limit else b""
+
+
+def _file_limit(path: str, head_entries: dict[str, tuple[str, str]]) -> int:
+    # Only source already present in HEAD qualifies, never a newly staged file.
+    # This changes the bounded read budget, not the full-content checks.
+    entry = head_entries.get(path)
+    if entry and entry[0] in {"100644", "100755"} and PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES:
+        return MAX_TOTAL_BYTES
+    return MAX_FILE_BYTES
 
 
 def _read_worktree_file(
-    path: str, expected: tuple[object, ...]
+    path: str, expected: tuple[object, ...], limit: int = MAX_FILE_BYTES
 ) -> tuple[bytes | None, str | None]:
     if not expected or expected[0] != "entry":
         return None, "change-set-raced"
@@ -427,15 +441,15 @@ def _read_worktree_file(
         if _stat_signature(before) != expected_stat or not stat.S_ISREG(before.st_mode):
             return None, "change-set-raced"
         content = bytearray()
-        while len(content) < MAX_FILE_BYTES + 1:
-            chunk = os.read(descriptor, min(64 * 1024, MAX_FILE_BYTES + 1 - len(content)))
+        while len(content) < limit + 1:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - len(content)))
             if not chunk:
                 break
             content.extend(chunk)
         after = os.fstat(descriptor)
         if _stat_signature(after) != expected_stat:
             return None, "change-set-raced"
-        if len(content) > MAX_FILE_BYTES:
+        if len(content) > limit:
             return None, "file-size-limit"
         return bytes(content), None
     except OSError:
@@ -486,12 +500,16 @@ def _scan_capture(capture: dict[str, tuple[object, ...]]) -> list[tuple[str, str
         output_kind = _output_finding(path)
         if output_kind:
             findings.append((path, output_kind))
-        size, content = _read_index_blob(oid)
-        if size > MAX_FILE_BYTES:
+        limit = _file_limit(path, head_entries)
+        size = _index_blob_size(oid)
+        if size > limit:
             findings.append((path, "file-size-limit"))
             continue
         total += size
-        contents.append((path, content, _baseline_content(head_entries.get(path))))
+        if total > MAX_TOTAL_BYTES:
+            return findings + [("<change-set>", "total-size-limit")]
+        _, content = _read_index_blob(oid, limit)
+        contents.append((path, content, _baseline_content(head_entries.get(path), limit)))
 
     worktree_manifest = dict(capture["worktree_manifest"])
     for path in worktree_paths:
@@ -510,20 +528,19 @@ def _scan_capture(capture: dict[str, tuple[object, ...]]) -> list[tuple[str, str
         if output_kind:
             findings.append((path, output_kind))
         size = int(signature[4])
-        if size > MAX_FILE_BYTES:
+        limit = _file_limit(path, head_entries)
+        if size > limit:
             findings.append((path, "file-size-limit"))
             continue
-        content, error = _read_worktree_file(path, signature)
+        total += size
+        if total > MAX_TOTAL_BYTES:
+            return findings + [("<change-set>", "total-size-limit")]
+        content, error = _read_worktree_file(path, signature, limit)
         if error:
             findings.append((path, error))
             continue
         assert content is not None
-        total += len(content)
-        contents.append((path, content, _baseline_content(stage_zero.get(path))))
-
-    if total > MAX_TOTAL_BYTES:
-        findings.append(("<change-set>", "total-size-limit"))
-        return findings
+        contents.append((path, content, _baseline_content(stage_zero.get(path), limit)))
 
     for path, content, baseline in contents:
         for finding in _content_findings(path, content, baseline):

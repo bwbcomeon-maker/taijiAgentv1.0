@@ -16724,7 +16724,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/security/profile":
         try:
-            return j(handler, set_security_profile(body.get("profile", "")))
+            if not isinstance(body, dict) or set(body) - {"profile", "capabilities"}:
+                raise ValueError("security settings accept only profile and capabilities")
+            if "capabilities" in body and not isinstance(body["capabilities"], dict):
+                raise ValueError("capabilities must be an object of boolean choices")
+            return j(handler, set_security_profile(body.get("profile", ""), capabilities=body.get("capabilities")))
         except PermissionError as e:
             from api.product_contract import attach_product_error
 

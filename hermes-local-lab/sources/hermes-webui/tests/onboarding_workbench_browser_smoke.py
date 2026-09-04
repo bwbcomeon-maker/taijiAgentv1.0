@@ -663,12 +663,23 @@ def main() -> int:
                             raise AssertionError(
                                 f"narrow onboarding Escape collapsed the V3 workbench at {width}px"
                             )
-                        _wait_until(
-                            lambda: joint_page.evaluate(
-                                "document.activeElement && document.activeElement.matches('#expertTeamV3Workbench [data-et3-action=\"close-workbench\"]')"
-                            ),
-                            f"narrow workbench close focus after onboarding Escape at {width}px",
-                        )
+                        try:
+                            _wait_until(
+                                lambda: joint_page.evaluate(
+                                    "document.activeElement && document.activeElement.matches('#expertTeamV3Workbench [data-et3-action=\"close-workbench\"]')"
+                                ),
+                                f"narrow workbench close focus after onboarding Escape at {width}px",
+                            )
+                        except AssertionError:
+                            print("focus diagnostic=" + json.dumps(joint_page.evaluate("""() => {
+                              const describe=el=>el?{tag:el.tagName,id:el.id,action:el.dataset.et3Action,
+                                display:getComputedStyle(el).display,visibility:getComputedStyle(el).visibility,
+                                rects:el.getClientRects().length,disabled:el.disabled}:null;
+                              return {width:innerWidth,active:describe(document.activeElement),
+                                close:describe(document.querySelector('#expertTeamV3Workbench [data-et3-action="close-workbench"]')),
+                                resume:describe(document.querySelector('#onboardingResumeBtn'))};
+                            }""")), flush=True)
+                            raise
                     if joint_errors:
                         raise AssertionError("joint onboarding/V3 browser errors: " + " | ".join(joint_errors))
                     if evidence_dir:
