@@ -364,6 +364,7 @@ def run_engine(args: list[str], *, cwd: Path | None = None) -> subprocess.Comple
         cwd=str(cwd or engine_root()),
         env=child_env,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=180,
         check=False,

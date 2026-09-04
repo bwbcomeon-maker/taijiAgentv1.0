@@ -322,7 +322,7 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         ):
             with self.subTest(literal=literal):
                 self.assertIn(literal, stage)
-        self.assertNotIn("$session.tools.npm.path", stage)
+        self.assertIn("$session.tools.npm.path", stage)
         self.assertNotIn("$session.tools.python.path", stage)
         self.assertNotIn("Copy-Item -LiteralPath $pythonSource -Destination $pythonDestination -Recurse -Force", stage)
         self.assertNotIn("Push-Location $desktopRoot", stage)
@@ -427,7 +427,8 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("ELECTRON_RUN_AS_NODE", build)
         self.assertIn("-m taiji_runtime.main --help", build)
         self.assertIn("PAYLOAD_MENU_POLICY_OK", build)
-        self.assertEqual((stage + build).count("ci --offline --ignore-scripts --no-audit"), 1)
+        # Desktop check plus DOCX assembly; each lock is installed exactly once.
+        self.assertEqual((stage + build).count("ci --offline --ignore-scripts --no-audit"), 2)
 
     def test_stage_extracts_electron_with_long_path_safe_zip_streams(self):
         stage = read_script(STAGE)

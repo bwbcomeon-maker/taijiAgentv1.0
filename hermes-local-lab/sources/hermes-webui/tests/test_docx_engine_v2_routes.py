@@ -103,6 +103,8 @@ def test_docx_node_identity_and_child_environment(monkeypatch, tmp_path, install
         docx_engine_v2.run_engine(["unused.js"])
         assert len(calls) == 2
         assert calls[-1][0][0] == str(node)
+        # Node JSON is UTF-8, including Chinese template names on GBK Windows.
+        assert calls[-1][1].get("encoding") == "utf-8"
         assert calls[-1][1]["env"]["PATH"].split(":")[0] == str(node.parent)
 
 

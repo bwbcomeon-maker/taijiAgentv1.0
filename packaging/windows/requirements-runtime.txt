@@ -1,0 +1,3 @@
+# Windows account lookup / file locking; same version as Agent uv.lock.
+# Install into private Python before cache observation, never during BUILD.
+pywin32==311; sys_platform == 'win32'

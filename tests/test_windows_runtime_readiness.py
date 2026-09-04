@@ -16,7 +16,8 @@ def ready_runtime():
         "python": {"exit_code": 0, "output": json.dumps({
             "version": [3, 11, 9], "bits": 64,
             "imports": {name: True for name in (
-                "aiohttp", "fastapi", "uvicorn", "yaml", "cryptography", "psutil", "pypdf"
+                "aiohttp", "fastapi", "uvicorn", "yaml", "cryptography", "psutil", "pypdf",
+                "win32api", "win32profile", "win32security", "win32file"
             )},
         })},
         "iscc": {"exit_code": 0, "output": "Inno Setup 6 Command-Line Compiler"},
@@ -24,6 +25,14 @@ def ready_runtime():
 
 
 class WindowsRuntimeReadinessTests(unittest.TestCase):
+    def test_missing_windows_account_api_is_rejected(self):
+        payload = ready_runtime()
+        facts = json.loads(payload['python']['output'])
+        facts['imports']['win32api'] = False
+        payload['python']['output'] = json.dumps(facts)
+        with self.assertRaises(PipelineError):
+            windows_ssh.parse_runtime_probe(json.dumps(payload))
+
     def test_supported_runtime_is_accepted(self):
         self.assertEqual(windows_ssh.parse_runtime_probe(json.dumps(ready_runtime())), ready_runtime())
 

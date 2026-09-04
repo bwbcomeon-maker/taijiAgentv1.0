@@ -36,6 +36,8 @@ function resolveWindowsRuntimeLayout({ installRoot, localAppData }) {
     labRoot,
     pythonRoot,
     pythonExe: path.win32.join(pythonRoot, "python.exe"),
+    nodeExe: path.win32.join(labRoot, "runtime", "node", "node.exe"),
+    docxRoot: path.win32.join(labRoot, "sources", "docx-engine-v2"),
     sitePackages: path.win32.join(pythonRoot, "Lib", "site-packages"),
     agentRoot: path.win32.join(labRoot, "sources", PRIVATE_AGENT_SEGMENT),
     webuiRoot: path.win32.join(labRoot, "sources", PRIVATE_WEBUI_SEGMENT),
@@ -70,6 +72,10 @@ function windowsRuntimeCommands(layout) {
 function requiredWindowsRuntimeFiles(layout) {
   return [
     layout.pythonExe,
+    layout.nodeExe,
+    path.win32.join(layout.docxRoot, "src", "cli", "list-templates.js"),
+    path.win32.join(layout.docxRoot, "template-registry.json"),
+    path.win32.join(layout.docxRoot, "node_modules", "@resvg", "resvg-js-win32-x64-msvc", "resvgjs.win32-x64-msvc.node"),
     path.win32.join(layout.agentRoot, "taiji_runtime", "main.py"),
     path.win32.join(layout.webuiRoot, "server.py"),
     layout.packagedConfig,
@@ -86,6 +92,11 @@ function buildWindowsRuntimeEnvironment({
 }) {
   const env = { ...baseEnv };
   deleteLicensePathOverrides(env);
+  for (const key of Object.keys(env)) {
+    if (["TAIJI_DOCX_ENGINE_V2_ROOT", "TAIJI_DOCX_BUILTIN_ROOT", "TAIJI_DOCX_RUNTIME_HOME"].includes(key.toUpperCase())) {
+      delete env[key];
+    }
+  }
   const systemRoot = requireAbsoluteWindowsPath("baseEnv.SystemRoot", baseEnv.SystemRoot);
   const accountHome = requireAbsoluteWindowsPath(
     "baseEnv.TAIJI_ACCOUNT_HOME",
@@ -106,6 +117,9 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_AGENT_WEBUI_DIR: layout.webuiRoot,
     TAIJI_AGENT_PYTHON: layout.pythonExe,
     TAIJI_WEBUI_PYTHON: layout.pythonExe,
+    TAIJI_DOCX_ENGINE_V2_ROOT: layout.docxRoot,
+    TAIJI_DOCX_BUILTIN_ROOT: layout.docxRoot,
+    TAIJI_DOCX_RUNTIME_HOME: path.win32.join(layout.runtimeHome, "docx-engine-v2"),
     TAIJI_WEBUI_AGENT_DIR: layout.agentRoot,
     [`${LEGACY_ENV_PREFIX}_WEBUI_PYTHON`]: layout.pythonExe,
     [`${LEGACY_ENV_PREFIX}_WEBUI_AGENT_DIR`]: layout.agentRoot,
@@ -136,7 +150,7 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_DESKTOP_ONLY: "1",
     TAIJI_ACCOUNT_HOME: accountHome,
     TERMINAL_CWD: layout.workspace,
-    PATH: [path.win32.dirname(layout.pythonExe), path.win32.join(systemRoot, "System32")].join(";"),
+    PATH: [path.win32.dirname(layout.nodeExe), path.win32.dirname(layout.pythonExe), path.win32.join(systemRoot, "System32")].join(";"),
     TMP: layout.tmpDir,
     TEMP: layout.tmpDir,
     TMPDIR: layout.tmpDir,

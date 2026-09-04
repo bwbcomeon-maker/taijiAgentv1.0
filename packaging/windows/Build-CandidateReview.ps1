@@ -404,6 +404,8 @@ print("PAYLOAD_MENU_POLICY_OK")
     }
     throw 'payload private python import/menu gate failed'
   }
+  # Helpers come from the frozen source archive, not an unbound host checkout.
+  & (Join-Path $session.paths.source_root 'packaging\windows\Test-DocxPayload.ps1') -PayloadRoot $PayloadRoot -ScratchRoot $StagingRoot
 }
 
 Invoke-FormalCheck -Id "payload-hygiene-closure" -Action {

@@ -23,6 +23,14 @@
       "required_members": ["python.exe", "python311._pth"],
       "type": "directory",
       "version": "3.11"
+    },
+    {
+      "architecture": "x64",
+      "id": "private-node-runtime",
+      "relative_path": "node-v22.23.1-win-x64",
+      "required_members": ["node.exe", "npm.cmd", "node_modules/npm/bin/npm-cli.js", "LICENSE"],
+      "type": "directory",
+      "version": "22.23.1"
     }
   ],
   "schema": "taiji-windows-cache-requirements/v1",

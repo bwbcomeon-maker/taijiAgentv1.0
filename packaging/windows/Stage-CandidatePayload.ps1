@@ -453,6 +453,11 @@ $sharedCacheAccessRoot = ConvertTo-ExtendedPath $sharedCacheRoot
 $npmObservation = Get-ObservationEntry -Observation $observation -Id 'npm-cache'
 $electronObservation = Get-ObservationEntry -Observation $observation -Id 'electron-39.8.10-win32-x64'
 $pythonObservation = Get-ObservationEntry -Observation $observation -Id 'private-python-runtime'
+$nodeObservation = Get-ObservationEntry -Observation $observation -Id 'private-node-runtime'
+if ([string]$nodeObservation.type -cne 'directory' -or
+    [string]$nodeObservation.relative_path -cne 'node-v22.23.1-win-x64') {
+  throw 'Node cache observation contract drifted before staging'
+}
 if ([string]$npmObservation.type -cne 'directory' -or
     [string]$npmObservation.relative_path -cne 'npm' -or
     [string]$electronObservation.type -cne 'regular-file' -or
@@ -510,6 +515,40 @@ $payloadSourcesRoot = Join-PathText $payloadRoot 'hermes-local-lab\sources'
 Copy-ProductSourceChildren -Source $agentSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-agent')
 Copy-ProductSourceChildren -Source $webuiSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-webui')
 
+# Only frozen engine source and templates; never controller node_modules.
+$docxSource = Join-PathText $sourceRoot 'hermes-local-lab\sources\docx-engine-v2'
+$docxDestination = Join-PathText $payloadSourcesRoot 'docx-engine-v2'
+New-Item -ItemType Directory -Path $docxDestination -Force | Out-Null
+foreach ($name in @('src', 'templates', 'template-registry.json', 'package.json', 'package-lock.json')) {
+  Copy-Item -LiteralPath (Join-PathText $docxSource $name) -Destination (Join-PathText $docxDestination $name) -Recurse -Force
+}
+$nodeSource = Join-PathText $sharedCacheAccessRoot 'node-v22.23.1-win-x64'
+$nodeDestination = Join-PathText $payloadRoot 'hermes-local-lab\runtime\node'
+New-Item -ItemType Directory -Path $nodeDestination -Force | Out-Null
+foreach ($name in @('node.exe', 'LICENSE')) {
+  $source = Join-PathText $nodeSource $name
+  Assert-CacheFile $source 'private Node runtime'
+  $expected = @($nodeObservation.members | Where-Object { [string]$_.path -ceq $name })
+  $destination = Join-PathText $nodeDestination $name
+  Copy-Item -LiteralPath $source -Destination $destination -Force
+  if ($expected.Count -ne 1 -or [int64]$expected[0].bytes -ne (Get-Item -LiteralPath $destination).Length -or
+      [string]$expected[0].sha256 -cne (Get-Sha256 $destination)) {
+    throw 'Node payload identity drifted from cache observation'
+  }
+}
+# npm operates only on the per-run mutable cache; native modules are selected by Windows.
+$previousPath = $env:PATH
+Push-Location ($docxDestination -replace '^\\\\\?\\', '')
+try {
+  $env:PATH = ([string]$session.tools.node.path | Split-Path -Parent) + ';' + $previousPath
+  & $session.tools.npm.path ci --offline --ignore-scripts --no-audit --no-fund --cache ($stagingNpmCache -replace '^\\\\\?\\', '')
+  if ($LASTEXITCODE -ne 0) { throw 'DOCX offline npm ci failed' }
+} finally {
+  $env:PATH = $previousPath
+  Pop-Location
+}
+Assert-RegularFile (Join-PathText $docxDestination 'node_modules\@resvg\resvg-js-win32-x64-msvc\resvgjs.win32-x64-msvc.node') 'Windows DOCX native renderer'
+
 $pythonSource = Join-PathText $sharedCacheAccessRoot 'python-runtime'
 $pythonDestination = Join-PathText $payloadRoot 'hermes-local-lab\runtime\python'
 Assert-CacheFile (Join-PathText $pythonSource 'python.exe') 'python runtime'
@@ -558,11 +597,14 @@ $pthText = @(
 ) -join [char]10
 Write-Utf8Text -Path $pthPath -Text ($pthText + [char]10)
 
-$forbiddenDirectories = @('.git', '.ssh', '.gnupg', '.aws', '__pycache__', 'node_modules')
+$forbiddenDirectories = @('.git', '.ssh', '.gnupg', '.aws', '__pycache__')
+$docxModulesPrefix = (Join-PathText $docxDestination 'node_modules') + '\'
 # payload hygiene patterns include *.db, *.sqlite, *.sqlite3, *.pyc, and *.pyo.
 $forbiddenExtensions = @('.db', '.sqlite', '.sqlite3', '.pyc', '.pyo')
 foreach ($item in @(Get-ChildItem -LiteralPath $payloadRoot -Force -Recurse)) {
-  if ($item.Name -in $forbiddenDirectories -or $item.Extension -in $forbiddenExtensions -or
+  $allowedDocxModules = ($item.FullName + '\').StartsWith($docxModulesPrefix, [StringComparison]::OrdinalIgnoreCase)
+  if (($item.Name -eq 'node_modules' -and -not $allowedDocxModules) -or
+      $item.Name -in $forbiddenDirectories -or $item.Extension -in $forbiddenExtensions -or
       $item.Name -eq '.env' -or $item.Name -like '.env.*' -or
       ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType) {
     throw "payload-hygiene-closure failed: $($item.FullName)"

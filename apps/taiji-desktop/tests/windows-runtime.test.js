@@ -46,6 +46,10 @@ test("Windows runtime checks private files instead of shell scripts", () => {
   const required = requiredWindowsRuntimeFiles(layout);
   assert.deepEqual(required, [
     layout.pythonExe,
+    layout.nodeExe,
+    path.win32.join(layout.docxRoot, "src", "cli", "list-templates.js"),
+    path.win32.join(layout.docxRoot, "template-registry.json"),
+    path.win32.join(layout.docxRoot, "node_modules", "@resvg", "resvg-js-win32-x64-msvc", "resvgjs.win32-x64-msvc.node"),
     path.win32.join(layout.agentRoot, "taiji_runtime", "main.py"),
     path.win32.join(layout.webuiRoot, "server.py"),
     layout.packagedConfig,
@@ -80,6 +84,8 @@ test("Windows environment is private and omits license path overrides", () => {
       SystemRoot: "C:\\Windows",
       PRESERVE_ME: "yes",
       TAIJI_ACCOUNT_HOME: "C:\\Users\\Customer",
+      TAIJI_DOCX_RUNTIME_HOME: "D:\\old-docx",
+      taiji_docx_runtime_home: "D:\\other-docx",
       taiji_license_file: "C:\\poisoned\\license.jwt",
       TaIjI_LiCeNsE_sTaTe_FiLe: "C:\\poisoned\\state.json",
     },
@@ -112,7 +118,12 @@ test("Windows environment is private and omits license path overrides", () => {
   );
   assert.equal(env.TMPDIR, layout.tmpDir);
   assert.equal(env.PRESERVE_ME, "yes");
-  assert.equal(env.PATH, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\python;C:\\Windows\\System32");
+  assert.equal(layout.nodeExe, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\node\\node.exe");
+  assert.equal(env.TAIJI_DOCX_ENGINE_V2_ROOT, layout.docxRoot);
+  assert.equal(env.TAIJI_DOCX_BUILTIN_ROOT, layout.docxRoot);
+  assert.equal(env.TAIJI_DOCX_RUNTIME_HOME, path.win32.join(layout.runtimeHome, "docx-engine-v2"));
+  assert.equal(env.taiji_docx_runtime_home, undefined);
+  assert.equal(env.PATH, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\node;C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\python;C:\\Windows\\System32");
 });
 
 test("Windows environment requires an absolute system account home", () => {

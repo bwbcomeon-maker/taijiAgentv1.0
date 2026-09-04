@@ -8,7 +8,8 @@ from ..core.errors import PipelineError
 
 
 RUNTIME_SCHEMA = "taiji-windows-runtime-probe/v1"
-PYTHON_IMPORTS = ("aiohttp", "fastapi", "uvicorn", "yaml", "cryptography", "psutil", "pypdf")
+PYTHON_IMPORTS = ("aiohttp", "fastapi", "uvicorn", "yaml", "cryptography", "psutil", "pypdf",
+                  "win32api", "win32profile", "win32security", "win32file")
 
 
 def runtime_probe_script(target):

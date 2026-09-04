@@ -38,9 +38,26 @@ Windows adapter 已实现以下能力；每次执行仍须分别记录本地合�
 
 SSH 配置必须使用核对过的主机密钥和 `StrictHostKeyChecking yes`；网络地址变化后重新确认主机身份。`--ssh-config` 是全局参数，放在 `doctor`/`build` 之前。
 
-在线预检先实际执行目标配置指定的 Node、npm、私有 Python 和 Inno 帮助探针。Node 必须是 22/24 x64，Python 必须是 3.11 x64，并成功导入 `aiohttp`、`fastapi`、`uvicorn`、`yaml`、`cryptography`、`psutil`、`pypdf`。失败返回 `WINDOWS_RUNTIME_NOT_READY`，不进入耗时缓存扫描；通过后才执行既有 NTFS、空间和缓存哈希检查。Inno 帮助响应不等于真实编译通过。
+在线预检先实际执行目标配置指定的 Node、npm、私有 Python 和 Inno 帮助探针。Node 必须是 22/24 x64，Python 必须是 3.11 x64，并成功导入 `aiohttp`、`fastapi`、`uvicorn`、`yaml`、`cryptography`、`psutil`、`pypdf` 以及 `win32api`、`win32profile`、`win32security`、`win32file`。失败返回 `WINDOWS_RUNTIME_NOT_READY`，不进入耗时缓存扫描；通过后才执行既有 NTFS、空间和缓存哈希检查。Inno 帮助响应不等于真实编译通过。
 
-`BUILDER_READY` 只表示这些构建环境检查通过，不保证 npm 缓存满足新锁文件，也不表示负载功能完整。当前 Windows 负载尚缺 DOCX 引擎与私有 Node 的装配/启动闭包；详细解决顺序见 [修复计划](../superpowers/plans/2026-09-04-windows-build-readiness.md)。
+`BUILDER_READY` 只表示这些构建环境检查通过，不保证 npm 缓存满足新锁文件，也不表示负载功能完整。当前 Stage 会装配 DOCX 引擎和私有 Node；编译前实际生成 DOCX 才能证明该 run 的功能闭包。实施记录见 [修复计划](../superpowers/plans/2026-09-04-windows-build-readiness.md)。
+
+### 2.2 依赖准备与回退（必须另有主机写入授权）
+
+- Node 固定为官方 `node-v22.23.1-win-x64.zip`，SHA256 `7df0bc9375723f4a86b3aa1b7cc73342423d9677a8df4538aca31a049e309c29`。从 [官方校验表](https://nodejs.org/dist/v22.23.1/SHASUMS256.txt) 核验后解压到 `D:\tw\cache\node-v22.23.1-win-x64`；`node.exe` 摘要应为 `f8d162c0641dcee512132f3bcf8a68169c7ecb852efd8e1a46c9fec5a0f469ed`。只复制 node.exe 和 LICENSE 到产品，npm 留在构建环境。
+- Windows 不能下载时，由 Mac 下载相同官方文件、校验并经已核实 SSH 传入；不能以关闭 TLS/主机密钥检查解决网络问题。
+- Python 以当前 Agent `pyproject.toml`、WebUI `requirements.txt` 和 Windows `requirements-runtime.txt` 为准。额外 Windows 必需 `pywin32==311`，不能因七个通用模块可导入就判完整；该版本与 Agent `uv.lock` 一致。检查发行包依赖一致性、真实 imports 和 `ZoneInfo('Asia/Shanghai')`。私有 Python 不要求安装 pip；可用临时 pip wheel 做离线 `--target <private-python>/Lib/site-packages --no-compile` 安装，安装工具不进入负载。
+- `pywin32-311-cp311-cp311-win_amd64.whl` SHA256：`3ce80b34b22b17ccbd937a6e78e7225d80c52f5ab9940fe0506a1a16f3dab503`；不运行系统级 postinstall、不把 DLL 复制到 System32。
+- 从绑定提交导出 Desktop 和 DOCX 的 package.json/package-lock.json 到不同 scratch 目录，各执行私有 npm `ci --ignore-scripts --no-audit --no-fund --cache D:\tw\cache\npm` 准备，再执行相同命令加 `--offline` 复验。必须在 Windows 装配 DOCX native resvg，禁止复制 Mac node_modules。
+- 独立版本目录先复验再切换目标配置；替换存在的运行环境前保留明确备份。缓存变化后所有旧 observation/plan 作废，clean commit 后重新 doctor/plan/BUILD。不要删除旧 Node、旧制品或归属不明缓存。
+
+### 2.3 DOCX 负载与构建门禁
+
+Stage 从冻结源码复制 DOCX 的 `src`、`templates`、registry、package 和 lock，用 run 私有 npm cache 离线装配，再生成 manifest。只允许引擎目录内的 node_modules；其他凭据、缓存、链接和字节码禁令不变。Node 复制字节与 cache observation 比较。
+
+Windows runtime 显式绑定私有 Node PATH、DOCX builtin/source 和用户 runtime 模板目录，覆盖继承的旧 DOCX 环境变量。Python→Node JSON 显式 UTF-8，避免中文 Windows 默认 GBK 解码失败。
+
+`payload-import-menu-policy` 在原有七项正式检查内追加 `Test-DocxPayload.ps1`，helper 来自冻结源码。它在独立 scratch 断言 Windows candidate profile、私有 Node 选择和模块来源，枚举模板并生成含表和图的文档，要求成功 JSON、质量/重放状态和非空有效 DOCX ZIP。临时输出在退出时清理，不修改 payload，也不启动产品/Provider。历史 FETCH_PENDING 七项合同不变。
 
 ## 3. Windows 流程合同
 

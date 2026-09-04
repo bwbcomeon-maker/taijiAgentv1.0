@@ -11,7 +11,7 @@
 ## 来源与授权
 
 - 基线：正式仓库 clean `main@4fb50be325a4f961dd9ad1c728bdb616de33d29e`；本任务为唯一写入者。
-- 当前授权：检查与源码修复；主机只读检查。下载/新增独立依赖另行确认；正式制包仍须绑定修复后 clean commit 并通过 BUILD 确认。
+- 当前授权：用户已明确允许 Windows 下载、安装必要环境/依赖及冲突替换，并允许 Mac 下载后传入；正式制包仍须绑定修复后 clean commit 并通过 BUILD 确认。
 - 不做：系统 Node 替换、旧缓存删除、真实配置迁移、安装/启动产品、GUI/业务验收、签名、Tag、Release。
 
 ## 已实时验证的缺口
@@ -30,26 +30,26 @@
 - [x] `online_doctor()` 先验证运行探针，再保留既有缓存观察/schema/哈希流程；不改变历史 run 的 fetch 恢复协议。
 - [x] 执行 Windows 聚焦回归，记录 RED/GREEN；当前 Windows 探针准确报告 Node 20 阻断，详见验证台账。
 
-## Task 2：准备独立、可回退的依赖环境（需主机准备授权）
+## Task 2：准备独立、可回退的依赖环境（已取得主机准备授权）
 
-- [ ] 新建版本化 Node 22 制包缓存，下载官方 Windows x64 包并校验官方 SHA256；不覆盖系统 Node 20。
-- [ ] 从当前源码的依赖声明确定 Python 必需模块；不因通用检查列出 `python-docx` 就安装它。先核对旧 Python，再按缺项准备独立 runtime，执行 imports 和依赖一致性检查。
-- [ ] 用当前 Desktop 和 DOCX 的 package-lock 分别准备 npm 缓存；在独立 scratch 目录执行 `npm ci --offline --ignore-scripts --no-audit`，证明脱网可复建，尤其核对 Windows resvg 原生模块。
-- [ ] 保存工具版本、源文件/lock 摘要、缓存观察和准备命令；仅在全部通过后切换专用目标配置，保留旧目录作为回退。缓存准备不能自动进入制包。
+- [x] 新建版本化 Node 22.23.1 制包缓存，Mac 下载官方 Windows x64 包并校验官方 SHA256后传入；不覆盖系统 Node 20。
+- [x] 18 项 Python core 版本匹配、上海时区通过；实际授权模块导入发现缺少 pywin32，按 uv.lock 的 311 版本先在独立 runtime 离线安装并验证，再补入共享缓存。未安装 python-docx/pip 到产品。
+- [x] Desktop 和 DOCX 两套锁分别完成 Windows 在线准备及离线 ci，Windows resvg 原生模块与实际图表生成通过。
+- [x] 工具版本、lock 摘要和准备方法进入手册/台账，目标改为私有 Node；旧 Node 保留。缓存变化后的完整 observation 留到 clean commit 重新生成，不复用旧计划。
 
 ## Task 3：修复完整负载闭包
 
 **Files:** `packaging/windows/cache-requirements.json`、`Stage-CandidatePayload.ps1`、`Build-CandidateReview.ps1`、`apps/taiji-desktop/src/windows-runtime.js` 及对应合同/运行测试。
 
-- [ ] 增加缺少 DOCX 引擎、私有 node.exe、Windows 原生依赖时失败的回归测试。
-- [ ] Stage 从冻结源码复制 DOCX 引擎、模板和 registry；从已观察的固定缓存复制 Node，并用锁文件在 run 私有缓存内离线装配 DOCX node_modules。
-- [ ] 仅允许 DOCX 指定目录下的 node_modules，继续拒绝其他位置残留、链接、凭据和缓存；装配完再生成 payload manifest。
-- [ ] Windows 运行环境显式指定私有 Node 和 DOCX 路径，不依赖构建机/用户 PATH；保留 Linux 现有版本约束。
-- [ ] 在 Inno 编译前，用负载中的 Python/Node 执行模板枚举和隔离 DOCX 生成，要求退出码、完整成功 JSON、非空有效 ZIP/DOCX 一致；不启动产品和真实 Provider。
+- [x] 增加 DOCX、私有 node.exe、Windows 原生依赖和虚假成功的回归测试。
+- [x] Stage 从冻结源码复制引擎/模板/registry，按缓存观察校验 Node 字节，run 私有 npm cache 离线装配依赖；真实 PowerShell 5.1执行新增装配区段通过。
+- [x] 仅允许 DOCX 目录内 node_modules，保留其他禁令，装配后生成 manifest；新增区段实际卫生扫描通过。
+- [x] Windows runtime 固定 Node/DOCX和用户模板库，消除继承旧模板目录；保留 Linux 版本约束。实际发现 UTF-8/GBK 通信缺陷并修复。
+- [x] Inno 前原有七项检查内添加 Python→Node模板枚举和有效DOCX生成检查；隔离真机生成140842字节含图表DOCX通过。完整Stage/Inno执行仍属于后续 BUILD，不以区段测试冒充。
 
 ## Task 4：收口与独立交付门禁
 
-- [ ] 更新 Windows 手册：连接入口、预检含义、依赖准备/回退、错误分类、真实历史与当轮证据。
+- [x] 更新 Windows 手册：连接入口、预检含义、依赖准备/回退、错误分类、真实历史与当轮证据。
 - [ ] 聚焦测试后运行一次 `scripts/verify.sh --full`，固定已准备的 Node 22/24；只读 Sol 审核完整暂存内容，按项目规则 commit/fetch/push。
 - [ ] 用户授权修复后 clean commit 的 BUILD 才制作新 EXE，记录 source/payload/installer 摘要和 fetch 结果。
 - [ ] 安装、升级、卸载、桌面业务验收、生产授权和签名各自独立核对授权；全部完成前不得标为正式交付成熟。

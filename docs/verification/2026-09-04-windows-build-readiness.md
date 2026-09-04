@@ -39,10 +39,41 @@ Python 探针用 Base64 编码脚本解决 PowerShell 5.1 原生参数引号丢�
 
 ## 未完成与下一步
 
-1. 独立 Node 22 和 npm 锁文件缓存准备尚待主机写入/下载授权；不替换全局 Node、不删除旧缓存。
-2. DOCX 引擎、私有 Node、Windows 原生依赖及装包/启动/生成门禁尚未实现，详见修复计划；不是升级构建机即可解决。
+1. 第一阶段当时未取得依赖准备授权；后续已取得并执行，见下方第二阶段记录。
+2. 第一阶段尚缺 DOCX 装配闭包；第二阶段已实现和隔离验证，完整 Stage/Inno 仍需 clean source 的 BUILD。
 3. 修复后 clean commit 的候选构建、真实安装/升级/卸载、桌面业务、生产授权、签名和发布均未执行。
 4. 当前成果是预检修复，不是“Windows 完整交付环境已成熟”。
+
+## 第二阶段：已授权的依赖准备与负载闭包修复
+
+来源：`main@beeda70e4c4df9000539cd52e93665815684e842` 加本轮明确工作树改动，主 agent 唯一写入，Sol 只读预审。用户明确允许 Windows 下载/安装所需依赖、冲突替换，并允许 Mac 下载后传入。没有执行产品安装、系统 Node 替换、签名、发布或真实 BUILD。
+
+### 已实时验证的主机准备
+
+- 官方 Node 22.23.1 x64（npm 10.9.8）在独立版本目录安装。Windows 直连迟迟未返回，Mac 官方下载/校验后 SSH 传入成功；原直连后来完成，最终执行文件摘要仍与官方一致。旧 Node20 保留。
+- Desktop lock SHA256 `f7106ea15c112100ae305a3675400013486ea2c808868784d4a2bfbe59db2819`、DOCX lock SHA256 `66b966028f1d0522950dcbaf46bd092133d1b8c680522e0363e2ff3b08e4b28e`；Windows 分别在线准备和 `npm ci --offline --ignore-scripts --no-audit --no-fund` 成功，安装71/18包。
+- Python 3.11.9 x64：18项核心依赖版本全部匹配，Asia/Shanghai可用。运行时不带pip，最初`pip check`无法运行；改用`importlib.metadata`逐个核对已安装发行包的生效依赖，结果无缺失/冲突，未为检查而把pip装进产品。
+- 实际 Python→DOCX 调用发现授权模块依赖 `win32api` 缺失，导致诊断层 fail-closed 进入production分支。未绕过授权判断；按现有uv.lock固定的pywin32 311从官方PyPI在Mac下载，验证wheel SHA后先装隔离Python、功能通过后补入共享私有Python。未做系统postinstall、未改System32。
+- 共享环境新探针实际通过 Node/npm/Python/Inno；11个Python imports含4个win32模块均为true。该轻量结果不代表全量缓存观察或CLI clean-source门禁通过。
+- 最终独立主机全量观察返回`BUILDER_READY`，blockers为空，4类cache均存在。requirements SHA=`67fc1651c0f0c4f3c7543b35594df68f7e5df84887af5f04f42933b028055477`，observation SHA=`304e8ffc71deac2cd3d62526c1325866f1f1f73cfd7753f77401d0537390aeec`。迟到直连下载的重复Node已移出cache保留备份，最终Node目录99503183 bytes。该观察是诊断证据，不作为未提交源码的BUILD许可。
+
+### 已实时验证的修复
+
+- Windows runtime固定私有Node和DOCX模板目录；预审发现继承`TAIJI_DOCX_RUNTIME_HOME`可串入旧模板库，新增污染回归RED后显式覆盖大小写变体。
+- Stage新增区段在真实PowerShell5.1的全新scratch中执行：离线装配18包、Node字节核对、Windows resvg文件检查、白名单卫生扫描，返回`REAL_STAGE_DOCX_AND_HYGIENE_OK`。只执行新增区段，不冒充完整Stage/manifest/Inno验证。
+- 实际Node模板输出为UTF-8，Windows Python默认GBK造成`UnicodeDecodeError`；API进程通信改为显式UTF-8，版本/生产路径约束不变。回归3项RED后通过，受影响DOCX API完整60项PASS。
+- 用隔离源码/私有Python/私有Node运行`docx_payload_smoke.py`，断言Windows candidate profile、实际模块和Node来源，经Python API枚举8模板并生成含图表的DOCX，140842 bytes，成功JSON、质量/重放状态及ZIP成员检查通过。未打开Word/WPS或浏览器，不是文档视觉验收。
+- 新增正式门禁helper从冻结源码读取，保留原七项formal checks和历史fetch协议；在Inno前验证DOCX，临时生成目录自动清理。
+- 实际PowerShell包装器同样通过；对9626个DOCX/runtime文件进行生成前后摘要比较完全一致。反向真机测试证明Node观察摘要篡改、白名单外node_modules均被阻断。
+
+### 第二阶段本地验证与边界
+
+- Windows聚焦162项PASS，Desktop runtime污染路径回归6项PASS；新增装配和虚假成功测试先RED再GREEN。
+- Agent全量注册范围采用同一个`run_tests_parallel.py`，空环境+独立runtime/account目录，256项PASS、5 skipped；避免旧包装器丢弃隔离变量而触及日常凭据。
+- WebUI全量注册范围含bootstrap/coexistence：1027项PASS（1项audioop弃用warning）。
+- `scripts/verify.sh --full`：根目录1332项（3 skipped）、Desktop79项、DOCX278项通过；随后Agent阶段23项因沙箱禁止socket bind失败，原始退出1，不记为一键全量PASS。以上相同注册范围的隔离Agent/WebUI续跑已补齐；WebUI runtime lint通过。全量启动后补入的pywin32、UTF-8与模板目录修复另由最终162项Windows、60项DOCX API和6项runtime聚焦覆盖。临时日志位于Mac `/private/tmp/windows-phase2-*.log`。
+- 标准CLI doctor在工作树编辑期间正确以`WORKTREE_NOT_CLEAN`停止。未放宽该门禁；环境探针属于独立只读诊断，clean commit后才能形成新的正式计划和BUILD绑定。
+- 保留本轮Windows依赖准备/隔离复验目录，未清理旧制品或归属不明目录。缓存变化后不能使用历史observation。
 
 ## 提交与推送边界
 
