@@ -192,8 +192,8 @@
   <aside class="taiji-brand-sidebar" aria-label="太极智能体主导航">
     <div class="taiji-brand-head">
       <img class="taiji-brand-logo" src="static/assets/taiji/logo/logo-mark.png" alt="太极智能体 Logo" width="118" height="118">
-      <div class="taiji-brand-title">太极智能体</div>
-      <div class="taiji-brand-subtitle">企业级本地智能助理</div>
+      <div class="taiji-brand-title">国网空天智能体</div>
+      <div class="taiji-brand-subtitle">空间数据运检智能体</div>
     </div>
     <nav class="taiji-brand-nav" aria-label="太极智能体功能导航">
       <button class="taiji-nav-item is-active" type="button" data-taiji-panel="chat" onclick="taijiHomeSelectNav(this)">
@@ -268,7 +268,7 @@
   <main class="taiji-main-workspace" aria-label="太极智能体主工作区">
     <div class="taiji-workspace-brand-pill" aria-hidden="true">
       <img src="static/assets/taiji/logo/logo-mark.png" alt="" width="32" height="32">
-      <span>太极智能体</span>
+      <span>国网空天智能体</span>
     </div>
     <section class="taiji-hero" aria-label="智能体快捷入口">
       <img class="taiji-hero-logo" src="static/assets/taiji/logo/logo-mark.png" alt="太极智能体 Logo" width="128" height="128">
@@ -755,7 +755,7 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" placeholder="输入消息给 taiji Agent…" aria-label="输入消息"></textarea>
+        <textarea id="msg" rows="1" placeholder="输入消息给 Agent…" aria-label="输入消息"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" class="file-input-visually-hidden" tabindex="-1" aria-hidden="true" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.xls,.xlsx,.ppt,.pptx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
@@ -1444,7 +1444,7 @@
             <div class="settings-field">
               <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
-              <input type="text" id="settingsBotName" placeholder="taiji Agent" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <input type="text" id="settingsBotName" placeholder="Agent" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
             <div id="settingsPreferencesAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
@@ -2322,13 +2322,14 @@
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
           </div>
           <div class="settings-pane" id="settingsPaneAbout">
-            <div class="settings-about-shell" aria-label="太极智能体桌面版关于信息">
+            <div class="settings-about-shell" aria-label="国网空天智能体桌面版关于信息">
               <div class="settings-about-card">
                 <div class="settings-about-hero">
                   <img class="settings-about-logo" src="static/assets/taiji/logo/logo-mark.png" alt="" width="96" height="96">
                 </div>
                 <div class="settings-about-body">
-                  <div class="settings-about-product-name">太极智能体 桌面版</div>
+                  <div class="settings-about-product-name">国网空天智能体</div>
+                  <div class="settings-about-product-detail"><span>空间数据运检智能体</span><span class="settings-about-edition">桌面版</span></div>
                   <div class="settings-about-subtitle">乾元版 v0.1.7743</div>
                   <div class="settings-about-copy" id="settingsAboutDescription"></div>
                 </div>

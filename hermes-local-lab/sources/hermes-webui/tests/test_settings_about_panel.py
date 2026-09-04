@@ -98,10 +98,14 @@ def test_about_panel_uses_native_product_sheet_structure():
         'class="settings-about-body"',
         'id="settingsAboutDescription"',
         'static/assets/taiji/logo/logo-mark.png',
-        "太极智能体 桌面版",
+        "国网空天智能体",
+        "空间数据运检智能体",
+        'class="settings-about-edition">桌面版',
         "乾元版 v0.1.7743",
     ):
         assert expected in about_html
+
+    assert "太极智能体 桌面版" not in about_html
 
     for removed in (
         'class="settings-about-footer"',

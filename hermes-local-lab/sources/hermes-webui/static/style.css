@@ -4113,6 +4113,8 @@ main.main > #mainPlugin{display:none;}
 .settings-about-logo{display:block;width:84px;height:84px;object-fit:contain;filter:drop-shadow(0 16px 22px rgba(11,113,189,.2));}
 .settings-about-body{position:relative;padding:0 clamp(30px,5vw,60px) 34px;text-align:center;}
 .settings-about-product-name{margin-top:16px;color:#06284f;font-size:clamp(28px,3vw,34px);font-weight:850;line-height:1.12;letter-spacing:0;}
+.settings-about-product-detail{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:10px;margin-top:12px;color:#49657d;font-size:17px;font-weight:550;line-height:1.5;}
+.settings-about-edition{padding:2px 9px;border:1px solid rgba(8,137,153,.2);border-radius:6px;background:rgba(8,137,153,.06);color:#087d8b;font-size:12px;font-weight:600;white-space:nowrap;}
 .settings-about-subtitle{margin-top:8px;color:#61778f;font-size:14px;font-weight:750;line-height:1.4;}
 .settings-about-copy{margin:30px auto 0;max-width:540px;color:#15375f;font-size:18px;line-height:1.78;text-align:left;white-space:pre-line;}
 
@@ -10150,7 +10152,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   }
   :root[data-skin="taiji-light-glass"] .taiji-home-shell .taiji-brand-title{
     color:var(--taiji-ui-heading)!important;
-    font-size:26px!important;
+    font-size:24px!important;
     font-weight:760!important;
     line-height:1.14!important;
     letter-spacing:0!important;

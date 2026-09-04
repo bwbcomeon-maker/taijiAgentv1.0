@@ -36,8 +36,8 @@ class TestComposerPlaceholderProfile:
         m = re.search(r'function assistantDisplayName\(\)\{.*?\n\}', src, re.DOTALL)
         assert m, "assistantDisplayName function must exist"
         body = m.group(0)
-        assert "window._botName||'taiji Agent'" in body, \
-            "assistantDisplayName must use window._botName or 'taiji Agent' for the default profile"
+        assert "window._botName||'Agent'" in body, \
+            "assistantDisplayName must use window._botName or 'Agent' for the default profile"
 
     def test_chat_surfaces_use_shared_assistant_display_name(self):
         """Chat rows, titles, notifications, and cancel copy must honor profile overrides."""
@@ -92,7 +92,7 @@ class TestComposerPlaceholderProfile:
         m = re.search(r'function applyBotName\(\)\{.*?\n\}', src, re.DOTALL)
         assert m, "applyBotName function must exist"
         body = m.group(0)
-        assert "composerName=/^taiji Agent$/i.test" in body
-        assert "?'太极智能体':name" in body
+        assert "composerName=name" in body
+        assert "?'太极智能体':name" not in body
         assert "msg.placeholder='输入消息给 '+composerName+'\\u2026';" in body, \
             "applyBotName must set composer placeholder to the resolved Chinese-facing assistant name"

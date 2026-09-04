@@ -13,7 +13,7 @@ function _sessionMediaPathUrl(path,{inline=false,download=false}={}){
 
 function productDisplayName(name){
   const value=String(name||'').trim();
-  return /^(hermes|hermes agent|hermes webui)$/i.test(value)?'taiji Agent':(value||'taiji Agent');
+  return /^(hermes|hermes agent|hermes webui|taiji\s*agent)$/i.test(value)?'Agent':(value||'Agent');
 }
 
 function assistantDisplayName(){
@@ -21,7 +21,7 @@ function assistantDisplayName(){
     const profileName=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
     return productDisplayName(profileName);
   }
-  const name=window._botName||'taiji Agent';
+  const name=window._botName||'Agent';
   return productDisplayName(name);
 }
 

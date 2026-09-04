@@ -1936,7 +1936,7 @@ function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
-  const composerName=/^taiji Agent$/i.test(String(name||'').trim())?'太极智能体':name;
+  const composerName=name;
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
