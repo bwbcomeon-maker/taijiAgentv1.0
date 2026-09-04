@@ -382,7 +382,7 @@ def test_source_skip_override_setup_cannot_persist_completion(monkeypatch):
     status.assert_called_once_with(allow_config_auto_complete=False)
 
 
-def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(monkeypatch, tmp_path):
+def test_installed_preflight_accepts_both_supported_profiles_and_requires_restart(monkeypatch, tmp_path):
     import api.onboarding as onboarding
 
     ready_license = onboarding._setup_item(
@@ -410,9 +410,12 @@ def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(m
         lambda: {"mode": "restricted", "profile": "local_controlled"},
     )
 
-    blocked = onboarding.get_setup_status()
-    assert blocked["overall_ready"] is False
-    assert next(item for item in blocked["items"] if item["id"] == "security")["ready"] is False
+    local_ready = onboarding.get_setup_status()
+    assert local_ready["overall_ready"] is True
+    local_security = next(item for item in local_ready["items"] if item["id"] == "security")
+    assert local_security["ready"] is True
+    assert "本机调试" in local_security["reason"]
+    assert "可信" in local_security["reason"]
 
     monkeypatch.setattr(
         onboarding,
@@ -430,6 +433,32 @@ def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(m
     assert pending["overall_ready"] is False
     security = next(item for item in pending["items"] if item["id"] == "security")
     assert "重新打开" in security["reason"]
+    assert "需要使用企业安全" not in security["reason"]
+
+    for profile in ("strict", "local_controlled"):
+        monkeypatch.setattr(onboarding, "build_security_status_payload",
+                            lambda profile=profile: {"mode": "restricted", "profile": profile, "restart_required": True})
+        assert onboarding.get_setup_status()["overall_ready"] is False
+
+    for mode, profile in (("full", "full"), ("full", "local_controlled"),
+                          ("restricted", "custom_restricted"), ("restricted", "unknown")):
+        monkeypatch.setattr(onboarding, "build_security_status_payload",
+                            lambda mode=mode, profile=profile: {"mode": mode, "profile": profile})
+        result = onboarding.get_setup_status()
+        assert result["overall_ready"] is False
+        item = next(item for item in result["items"] if item["id"] == "security")
+        assert "无法识别" in item["reason"]
+
+    def unavailable_security():
+        raise RuntimeError("private diagnostic")
+
+    monkeypatch.setattr(onboarding, "build_security_status_payload", unavailable_security)
+    result = onboarding.get_setup_status()
+    item = next(item for item in result["items"] if item["id"] == "security")
+    assert result["overall_ready"] is False
+    assert item["status"] == "unavailable"
+    assert "重新检查" in item["reason"]
+    assert "private diagnostic" not in item["reason"]
 
 
 def test_agent_discovery_accepts_sourceless_installed_entrypoint(monkeypatch, tmp_path):

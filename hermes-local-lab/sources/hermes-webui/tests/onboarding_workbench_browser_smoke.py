@@ -102,7 +102,7 @@ def _setup_status(*, ready: bool) -> dict:
             "工作区可访问。" if ready else "尚未选择可写工作区。",
             {"id": "choose_workspace", "label": "选择工作区", "target_step": "workspace"},
         ),
-        "security": (True, "开发模式安全策略可用。", None),
+        "security": (True, "已启用本机调试模式。允许终端和代码执行，请仅在可信环境中使用。", None),
     }
     items = []
     for item_id in SETUP_ITEM_IDS:
@@ -124,7 +124,7 @@ def _setup_status(*, ready: bool) -> dict:
         )
     return {
         "schema_version": "taiji-setup-status/v1",
-        "installed_production": False,
+        "installed_production": True,
         "overall_ready": all(item["ready"] for item in items),
         "items": items,
     }
@@ -721,6 +721,10 @@ def main() -> int:
                     )
                     if actual_ids != list(SETUP_ITEM_IDS):
                         raise AssertionError(f"unstable setup item IDs: {actual_ids}")
+                    security_row = page.locator('[data-setup-check="security"]')
+                    assert "本机调试" in security_row.inner_text()
+                    assert "可信环境" in security_row.inner_text()
+                    assert "需要处理" not in security_row.inner_text()
                     page.locator("#onboardingWorkbenchTitle").wait_for()
                     # ManagedDialog applies its initial focus on the next animation
                     # frame.  Do not start the probe interaction until that open

@@ -200,14 +200,20 @@ def get_setup_status(*, config: dict | None = None, imports_ok: bool | None = No
         mode = str(security.get("mode") or "").strip().lower()
         profile = str(security.get("profile") or "").strip().lower()
         if installed_production:
-            security_ready = mode == "restricted" and profile == "strict" and not security.get("restart_required")
-            security_reason = (
-                "已启用企业安全模式。"
-                if security_ready
-                else "正式安装需要使用“企业安全”模式。请打开安全设置，选择“企业安全”，保存后关闭并重新打开应用。"
+            security_ready = (
+                mode == "restricted"
+                and profile in {"strict", "local_controlled"}
+                and not security.get("restart_required")
             )
+            security_reason = "安全策略无法识别，请打开安全设置，选择企业安全或本机调试，保存后关闭并重新打开应用。"
             if security.get("restart_required"):
-                security_reason = "安全配置已保存但尚未生效，请关闭并重新打开应用后再检查；正式安装需要使用企业安全模式。"
+                security_reason = "安全配置已保存但尚未生效，请关闭并重新打开应用后再检查。"
+            elif security_ready:
+                security_reason = (
+                    "已启用企业安全模式。"
+                    if profile == "strict"
+                    else "已启用本机调试模式。允许终端和代码执行，请仅在可信环境中使用。"
+                )
         else:
             security_ready = mode in {"restricted", "full"} and profile in {
                 "strict",
