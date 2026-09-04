@@ -379,15 +379,16 @@ class TestIndexHTMLBadge:
             'The badge should be a neutral placeholder; JS populates it at runtime.'
         )
 
-    def test_badge_element_still_present(self):
-        """System version badge spans must still be in the DOM for both WebUI and Agent pills."""
+    def test_system_header_removed_and_diagnostics_retained(self):
+        """Internal version metadata no longer occupies the system page header."""
         html = self._read_html()
-        assert 'settings-webui-version-badge' in html, (
-            'WebUI badge element missing from index.html'
-        )
-        assert 'settings-agent-version-badge' in html, (
-            'Agent badge element missing from index.html'
-        )
+        assert 'settings-webui-version-badge' not in html
+        assert 'settings-agent-version-badge' not in html
+        assert 'id="checkUpdatesBlock"' not in html
+        assert 'data-i18n="settings_section_system_title"' not in html
+        assert 'id="productDiagnosticsCard"' in html
+        assert 'id="btnRefreshProductDiagnostics"' in html
+        assert 'id="btnExportProductDiagnostics"' in html
 
 
 # ---------------------------------------------------------------------------
