@@ -78,3 +78,13 @@ Python 探针用 Base64 编码脚本解决 PowerShell 5.1 原生参数引号丢�
 ## 提交与推送边界
 
 当前 staged 第一阶段修复接受 Sol 五视图最终审核后才允许本地提交。基线已有上个任务提交 `4fb50be3` 未推送，该任务的推送审批尚未取得用户回复；本轮不借新提交绕过此前的推送审批。不存在远端领先（本次 fetch 后本地领先 1）。后续推送需一并确认前置提交边界，不能把本地提交写成已推送。
+
+## 第三阶段：首轮真实 BUILD 与扩展路径修复
+
+- 上述推送边界是历史时点：用户随后批准，三个提交已正常推送，`main`、`origin/main`、GitHub 均核对为 `a6eb85f87dfdbff6b8f0edcbf169a400f607a98d`，pull 显示 Already up to date。
+- 用户确认 `BUILD` 后执行 run `20260904T145200Z-6d2eaaa52795-a6eb85f8`，绑定 clean `main@a6eb85f8`、版本1.0.2、Windows x64。输入校验、传输、远端输入复核和完整 Stage 成功；Desktop 离线71包、Electron win32 x64正式检查通过。
+- run 在 `payload-import-menu-policy` 失败，controller 类别为 `WINDOWS_INNO_FAILED`，Inno 实际未开始。异常是 `Build-CandidateReview.ps1` 调用 helper 时 `Join-Path` 无法解析 `source_root` 的 `\\?\` 前缀。npm 的 boolean 弃用提示并非此次阻断根因，该项正式检查已PASS。
+- 第一处改为 .NET 路径组合后，实际执行到 helper，暴露其 `$PSScriptRoot` 同样携带扩展前缀；第二处也改为 `[IO.Path]::Combine`。未删除长路径支持、未放宽检查、未改缓存或产品依赖。
+- 本地新增路径合同先RED再GREEN；Windows从修复脚本AST提取实际调用，在独立 `\\?\` 源码路径执行本轮真实payload：8模板、140842 bytes DOCX，`WINDOWS_PAYLOAD_DOCX_OK` 和 `EXTENDED_SOURCE_PATH_DOCX_GATE_OK`。失败run的冻结源码、日志、payload原样保留，没有覆写或重跑该run。
+- 修复后Windows聚焦163项PASS。`scripts/verify.sh --full` 根目录1334项（3 skipped）、Desktop79项、DOCX278项PASS；Agent有23项因本地socket权限失败，原始退出1，不记一键全量PASS。相同注册范围采用空环境、临时runtime和同一runner，Agent256项PASS；WebUI1027项PASS（1项audioop弃用warning），runtime lint通过。日志保留在Mac `/private/tmp/windows-path-*.log`。
+- 本次局部通过不能升级为 Installer 成功；新提交需重新生成计划并取得 `BUILD`，不自动安装、签名或发布。

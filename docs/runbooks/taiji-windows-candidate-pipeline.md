@@ -59,6 +59,8 @@ Windows runtime 显式绑定私有 Node PATH、DOCX builtin/source 和用户 run
 
 `payload-import-menu-policy` 在原有七项正式检查内追加 `Test-DocxPayload.ps1`，helper 来自冻结源码。它在独立 scratch 断言 Windows candidate profile、私有 Node 选择和模块来源，枚举模板并生成含表和图的文档，要求成功 JSON、质量/重放状态和非空有效 DOCX ZIP。临时输出在退出时清理，不修改 payload，也不启动产品/Provider。历史 FETCH_PENDING 七项合同不变。
 
+冻结源码的 `source_root` 使用 Windows `\\?\` 扩展路径。PowerShell 5.1 的 `Join-Path` 不支持该 drive 解析；调用 helper 及 helper 定位同目录 Python 脚本时使用 `[IO.Path]::Combine` 保留扩展路径，不剥离长路径前缀。`WINDOWS_INNO_FAILED` 也可能来自编译前正式检查，必须读取 `logs/inno.stderr.log` 与 `remote-build.log` 定位，不能仅凭类别判断编译器故障。
+
 ## 3. Windows 流程合同
 
 候选 run 绑定 clean `main` source、target config SHA、asset provenance SHA、输入三件套和唯一 local/remote run。离线 cache 由 requirements SHA、每轮 observation SHA 和 host facts SHA 绑定；共享 cache 只读，缺项只能阻断为 `WINDOWS_CACHE_MISSING`，不能自动下载或安装依赖。
@@ -84,7 +86,7 @@ run-state.json
 | 层级 | 能证明 | 当前状态 |
 | --- | --- | --- |
 | Source | 控制器 source branch/commit/tree、版本和 selected asset 来源绑定 | 有本地及历史真实 run 证据；每轮重新绑定 |
-| Payload | 真实 Windows payload 内容、cache 复制和闭包结果 | 历史 run 有证据；最新完整功能负载未验证 |
+| Payload | 真实 Windows payload 内容、cache 复制和闭包结果 | `a6eb85f8` 真实 Stage 完成；DOCX 调用路径修复后局部复验通过，完整正式门禁待新 run |
 | Installer | 真实 Inno 编译、EXE bytes/PE/版本/AuthentiCode | 历史候选 EXE 有记录；当前修复后候选未构建 |
 | Installed Runtime | 指定 Windows 主机上的安装、进程、端口、配置和卸载/升级 | 未验证；未安装 |
 | Interactive Acceptance | 用户桌面会话中的启动、菜单、Logo、交互和业务流程 | 未验证；未启动、未做 GUI 验收 |

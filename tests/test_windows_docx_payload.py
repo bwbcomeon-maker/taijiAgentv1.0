@@ -54,6 +54,16 @@ class WindowsDocxPayloadTests(unittest.TestCase):
         self.assertLess(build.index('Test-DocxPayload.ps1'), build.index('Invoke-FormalCheck -Id "inno-compile"'))
         self.assertEqual(build.count('Invoke-FormalCheck -Id '), 7)
 
+    def test_docx_helper_paths_do_not_use_powershell_drive_resolution(self):
+        build = (ROOT / 'packaging/windows/Build-CandidateReview.ps1').read_text()
+        helper = (ROOT / 'packaging/windows/Test-DocxPayload.ps1').read_text()
+        # source_root and the invoked helper's PSScriptRoot can both start
+        # with \\?\; PowerShell 5.1 Join-Path rejects that drive syntax.
+        self.assertIn("[IO.Path]::Combine([string]$session.paths.source_root, 'packaging\\windows\\Test-DocxPayload.ps1')", build)
+        self.assertIn("[IO.Path]::Combine($PSScriptRoot, 'docx_payload_smoke.py')", helper)
+        self.assertNotIn('Join-Path $session.paths.source_root', build)
+        self.assertNotIn('Join-Path $PSScriptRoot', helper)
+
 
 if __name__ == '__main__':
     unittest.main()
