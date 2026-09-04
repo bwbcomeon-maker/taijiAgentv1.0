@@ -712,6 +712,7 @@ def main() -> int:
                     page.goto(base_url + "/", wait_until="domcontentloaded")
                     overlay = page.locator("#onboardingOverlay")
                     overlay.wait_for(state="visible")
+                    assert page.locator("#onboardingSteps, .onboarding-step").count() == 0
                     _wait_until(
                         lambda: page.locator(".onboarding-check-row").count() == 4,
                         "four desktop setup rows",

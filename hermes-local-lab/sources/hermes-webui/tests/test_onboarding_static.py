@@ -111,15 +111,15 @@ def test_first_check_action_names_the_next_step():
     assert "key==='system'?'进入配置'" in sync_body
 
 
-def test_onboarding_steps_and_mobile_actions_follow_semantic_dom_order():
+def test_onboarding_sidebar_omits_step_list_and_preserves_mobile_action_order():
     html = read("static/index.html")
     js = read("static/onboarding.js")
     css = read("static/style.css")
 
     assert 'id="onboardingTitle" tabindex="-1"' in html
-    assert 'id="onboardingSteps" role="list"' in html
-    assert "item.setAttribute('role','listitem')" in js
-    assert "item.setAttribute('aria-current','step')" in js
+    assert 'id="onboardingSteps"' not in html
+    assert 'id="onboardingLead"' in html
+    assert "steps:['system','setup','workspace','password','finish']" in js
     assert ".onboarding-actions{flex-direction:column;}" in css
     assert ".onboarding-actions{flex-direction:column-reverse;}" not in css
 
