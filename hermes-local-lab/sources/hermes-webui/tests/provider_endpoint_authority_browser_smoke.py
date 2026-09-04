@@ -412,10 +412,10 @@ def _run_smoke() -> None:
 
                     select_settings_section("models")
                     page.locator("#modelConfigMainModelName").wait_for(state="visible", timeout=10000)
-                    expect(page.locator("#modelConfigDraftStatus")).to_contain_text("检测到未保存草稿", timeout=5000)
+                    expect(page.locator("#modelConfigMainModelName")).to_have_text("glm-5", timeout=10000)
+                    expect(page.locator("#modelConfigDraftStatus")).not_to_contain_text("未保存草稿")
                     page.locator("#btnReloadAllModelConfig").click()
-                    page.locator("#appDialogConfirm").wait_for(state="visible", timeout=5000)
-                    page.locator("#appDialogConfirm").click()
+                    expect(page.locator("#modelConfigDraftStatus")).to_contain_text("已刷新", timeout=10000)
                     expect(page.locator("#modelConfigMainEndpointValue")).to_have_text(BIGMODEL_URL, timeout=10000)
                     expect(page.locator("#modelConfigMainEndpointNotice")).to_contain_text("检测到旧版地址覆盖", timeout=5000)
                     assert DEEPSEEK_URL not in page.locator("#settingsPaneModels").inner_text()

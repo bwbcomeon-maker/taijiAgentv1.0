@@ -7438,6 +7438,8 @@ async function loadProvidersPanel(){
   const empty=$('providersEmpty');
   if(!list) return;
   try{
+    const modelBaselineAtStart=JSON.stringify(_modelConfigData);
+    const modelLoadAtStart=_modelConfigLoadGeneration;
     const modelConfigPromise=api('/api/model-config').catch(()=>null);
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
@@ -7448,7 +7450,13 @@ async function loadProvidersPanel(){
     const quotaCard=_buildProviderQuotaCard(quota);
     if(quotaCard) list.appendChild(quotaCard);
     if(modelConfig){
-     if(!_modelConfigData||!_modelConfigHasUnsavedChanges()) _modelConfigData=modelConfig;
+     // Shared configuration is also used by provider editors. Keep the form and
+     // cache in sync, but never apply an older read over newer state or drafts.
+     if(modelLoadAtStart===_modelConfigLoadGeneration
+       &&modelBaselineAtStart===JSON.stringify(_modelConfigData)
+       &&!_pendingMainModelConfigReconciliation
+       &&!(($('btnSaveMainModel')||{}).disabled)
+       &&!_modelConfigHasUnsavedChanges()) _renderModelConfigPanel(modelConfig);
      _renderProviderImageGenSettings(modelConfig);
     }else{
      _renderProviderImageGenSettings(_modelConfigData);
@@ -11213,7 +11221,7 @@ function _modelConfigMainHasUnsavedChanges(){
  if(!_modelConfigData) return false;
  const saved=_modelConfigData.main||{};
  const selectedProvider=String((($('modelConfigProvider')||{}).value)||'').trim();
- return selectedProvider!==String(saved.provider||'').trim()
+ return selectedProvider!==String(saved.provider||'custom').trim()
   || String((($('modelConfigModel')||{}).value)||'').trim()!==String(saved.model||'').trim()
   || (selectedProvider==='custom'&&String((($('modelConfigBaseUrl')||{}).value)||'').trim().replace(/\/$/,'')!==String(saved.base_url||'').trim().replace(/\/$/,''))
   || !!String((($('modelConfigApiKey')||{}).value)||'').trim();
@@ -11376,7 +11384,7 @@ function _mainModelConfigSaveResultIsUncertain(error){
  return !!(error&&(error.timeout===true||error.name==='TimeoutError'||(Number.isFinite(status)&&status>=500)||(error.name==='TypeError'&&!error.status)));
 }
 
-function _applyAuthoritativeMainModelConfig(data){
+function _applyAuthoritativeMainModelConfig(data,options){
  if(!data||!data.main) return null;
  if(!_modelConfigData) _modelConfigData={};
  if(data.profile) _modelConfigData.profile=data.profile;
@@ -11390,10 +11398,12 @@ function _applyAuthoritativeMainModelConfig(data){
  const providerInput=$('modelConfigProvider');
  const modelInput=$('modelConfigModel');
  const baseInput=$('modelConfigBaseUrl');
- if(providerInput) providerInput.value=main.provider||'';
- if(modelInput) modelInput.value=main.model||'';
- if(baseInput) baseInput.value=main.base_url||'';
- _syncMainModelConfigControls();
+ if(!(options&&options.preserveDraft)){
+  if(providerInput) providerInput.value=main.provider||'';
+  if(modelInput) modelInput.value=main.model||'';
+  if(baseInput) baseInput.value=main.base_url||'';
+  _syncMainModelConfigControls();
+ }
  _renderModelConfigFocusSummary(_modelConfigData);
  return main;
 }
@@ -11440,19 +11450,26 @@ function _clearPendingMainModelConfigReconciliation(expected){
 async function _reconcileMainModelConfigSave(expected){
  try{
   const data=await api('/api/model-config',{timeoutToast:false});
-  const main=_applyAuthoritativeMainModelConfig(data);
+  // A receipt acknowledges the submitted values, not edits made after that save.
+  const currentDraft={provider:(($('modelConfigProvider')||{}).value||''),
+   model:(($('modelConfigModel')||{}).value||''),base_url:(($('modelConfigBaseUrl')||{}).value||''),
+   key_status:{configured:true}};
+  const preserveDraft=!_mainModelConfigMatchesExpected(currentDraft,expected)
+   || !!String((($('modelConfigApiKey')||{}).value)||'').trim();
+  const draftNotice=preserveDraft?' 新编辑的草稿已保留，尚未保存。':'';
+  const main=_applyAuthoritativeMainModelConfig(data,{preserveDraft});
   if(!_mainModelConfigReceiptMatches(data,expected)||!_mainModelConfigMatchesExpected(main,expected)){
    _clearPendingMainModelConfigReconciliation(expected);
-   const message='本机权威状态未确认本次保存；请求可能未提交或配置已被后续更新，请检查后重试。';
+   const message='本机权威状态未确认本次保存；请求可能未提交或配置已被后续更新，请检查后重试。'+draftNotice;
    _setMainModelConfigSaveState('failed',message);
    if(typeof showToast==='function') showToast(message,5000,'error');
    return {state:'failed',data};
   }
   _clearPendingMainModelConfigReconciliation(expected);
   const refreshing=!!(main&&main.runtime_refresh_pending);
-  _setMainModelConfigSaveState(refreshing?'refreshing':'applied',refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型已配置，尚未验证。');
+  _setMainModelConfigSaveState(refreshing?'refreshing':'applied',(refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型已配置，尚未验证。')+draftNotice);
   if(typeof populateModelDropdown==='function') populateModelDropdown();
-  if(!refreshing){
+  if(!refreshing&&!preserveDraft){
    toggleModelConfigSection('modelConfigMainEdit',false);
    if(typeof showToast==='function') showToast('主模型已配置，尚未验证。');
   }
@@ -11494,14 +11511,14 @@ async function loadModelConfigPanel(force,options){
    _setModelConfigDraftStatus('检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。');
    return _modelConfigData;
   }
-  _renderModelConfigPanel(_modelConfigData);
-  _loadModelConfigAuxiliaryModels();
-  return _modelConfigData;
  }
  const dirtyBeforeLoad=_modelConfigHasUnsavedChanges();
  if(force&&dirtyBeforeLoad&&!opts.skipDirtyConfirm){
   const confirmed=await showConfirmDialog({title:'刷新并放弃未保存草稿？',message:'刷新后将使用服务器上的配置，当前编辑内容和未保存密钥会被清除。',confirmLabel:'刷新并放弃',danger:true,focusCancel:true});
-  if(!confirmed) return _modelConfigData;
+  if(!confirmed){
+   _setModelConfigDraftStatus('已取消刷新，未保存草稿已保留。');
+   return null;
+  }
   _clearModelConfigSecrets('all');
   _discardImageCapabilityProviderDrafts();
  }
@@ -11510,10 +11527,10 @@ async function loadModelConfigPanel(force,options){
  if(status&&!_modelConfigData) status.classList.add('loading');
  try{
   const data=await api('/api/model-config');
-  if(generation!==_modelConfigLoadGeneration) return _modelConfigData;
+  if(generation!==_modelConfigLoadGeneration) return null;
   if(hadLoadedConfig&&!opts.skipDirtyGuard&&_modelConfigDraftIdentity()!==draftIdentityAtStart){
    _setModelConfigDraftStatus('检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。');
-   return _modelConfigData;
+   return null;
   }
   _clearModelConfigSecrets('all');
   _renderModelConfigPanel(data);
@@ -11521,10 +11538,12 @@ async function loadModelConfigPanel(force,options){
   await _loadModelConfigAuxiliaryModels();
   return data;
  }catch(e){
-  if(generation!==_modelConfigLoadGeneration) return _modelConfigData;
+  if(generation!==_modelConfigLoadGeneration) return null;
   const active=$('modelConfigActive');
   if(active) active.textContent='加载失败';
+  _setModelConfigDraftStatus('刷新主模型状态失败：'+(e.message||e)+'。请重试。');
   if(typeof showToast==='function') showToast('加载模型配置失败：'+(e.message||e));
+  return null;
  }finally{
   if(status&&generation===_modelConfigLoadGeneration) status.classList.remove('loading');
  }
@@ -11701,6 +11720,9 @@ async function saveVisionConfig(){
 
 function _visionConfigHasUnsavedChanges(){
  const saved=(_modelConfigData&&_modelConfigData.vision)||{};
+ const rows=(_modelConfigData&&_modelConfigData.vision_providers)||[];
+ const initialProvider=String(saved.provider||(rows[0]||{}).id||'').trim();
+ const initialRow=rows.find(row=>String(row.id||'')===initialProvider)||{};
  const provider=(($('visionConfigProvider')||{}).value||'').trim();
  const model=(($('visionConfigModel')||{}).value||'').trim();
  const baseUrl=(($('visionConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'');
@@ -11716,9 +11738,9 @@ function _visionConfigHasUnsavedChanges(){
   ?_imageCapabilityEndpointValuesChanged('vision')
   :Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(endpointSaved[name]||''));
  return !!apiKey
-  || provider!==String(saved.provider||'').trim()
-  || model!==String(saved.model||'').trim()
-  || (compareBase&&baseUrl!==String(saved.base_url||'').trim().replace(/\/$/,''))
+  || provider!==initialProvider
+  || model!==String(saved.model||initialRow.default_model||'').trim()
+  || (compareBase&&baseUrl!==String(saved.endpoint_mode==='custom'||saved.provider!=='alibaba'?(saved.base_url||''):'').trim().replace(/\/$/,''))
   || credentialRef!==String(saved.credential_ref||'').trim()
   || endpointMode!==String(saved.endpoint_mode||'public').trim()
   || region!==String(saved.region||'cn-beijing').trim()
@@ -11825,19 +11847,22 @@ async function saveImageGenConfig(){
 
 function _imageGenConfigHasUnsavedChanges(){
  const saved=(_modelConfigData&&_modelConfigData.image_gen)||{};
+ const rows=(_modelConfigData&&_modelConfigData.image_gen_providers)||[];
+ const initialProvider=String(saved.provider||(rows[0]||{}).id||'').trim();
+ const initialRow=rows.find(row=>String(row.id||'')===initialProvider)||{};
  const options=saved.options||{};
  const endpointValues=_collectImageCapabilityEndpointValues('image');
  const endpointChanged=typeof _imageCapabilityEndpointValuesChanged==='function'
   ?_imageCapabilityEndpointValuesChanged('image')
   :Object.keys(endpointValues).some(name=>String(endpointValues[name]||'')!==String(options[name]||''));
  return (($('imageGenConfigApiKey')||{}).value||'').trim()!==''
-  || (($('imageGenConfigProvider')||{}).value||'').trim()!==String(saved.provider||'').trim()
-  || (($('imageGenConfigModel')||{}).value||'').trim()!==String(saved.model||'').trim()
+  || (($('imageGenConfigProvider')||{}).value||'').trim()!==initialProvider
+  || (($('imageGenConfigModel')||{}).value||'').trim()!==String(saved.model||initialRow.default_model||'').trim()
   || _imageCapabilityCredentialRef('image',(($('imageGenConfigProvider')||{}).value||'').trim())!==String(saved.credential_ref||'').trim()
   || (($('imageGenConfigEndpointMode')||{}).value||'workspace').trim()!==String(options.endpoint_mode||'workspace').trim()
   || (($('imageGenConfigRegion')||{}).value||'cn-beijing').trim()!==String(options.region||'cn-beijing').trim()
   || (($('imageGenConfigWorkspaceId')||{}).value||'').trim()!==String(options.workspace_id||'').trim()
-  || (($('imageGenConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'')!==String(options.base_url||'').trim().replace(/\/$/,'')
+  || (($('imageGenConfigBaseUrl')||{}).value||'').trim().replace(/\/$/,'')!==String(options.endpoint_mode==='custom'?(options.base_url||''):'').trim().replace(/\/$/,'')
   || endpointChanged;
 }
 

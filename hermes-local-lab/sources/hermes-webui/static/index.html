@@ -2460,6 +2460,7 @@
     }
   };
   let imageCapabilityData=null;
+  let modelConfigRefreshInFlight=false;
   let imageCapabilityOperationGeneration=0;
   let imageCapabilityBusy=false;
   let imageCapabilityRequestInFlight=false;
@@ -2826,13 +2827,11 @@
     imageCapabilityBusy=!!busy;
     const center=imageCapabilityElement('imageCapabilityCenter');
     const save=imageCapabilityElement('btnSaveVerifyImageCapabilityCenter');
-    const reloadAll=imageCapabilityElement('btnReloadAllModelConfig');
     if(center){
       center.setAttribute('aria-busy',String(!!busy));
       center.querySelectorAll('button,input,select').forEach(control=>{control.disabled=busy;});
     }
     if(save)save.setAttribute('aria-busy',String(!!busy));
-    if(reloadAll)reloadAll.disabled=!!busy;
   }
   function imageCapabilityRequest(url,options){
     if(typeof window.api==='function')return window.api(url,options);
@@ -3058,19 +3057,42 @@
     return imageCapabilityData;
   }
   async function refreshModelAndImageCapabilities(){
-    if(typeof window.reconcilePendingMainModelConfigSave==='function'){
-      const reconciliation=await window.reconcilePendingMainModelConfigSave();
-      if(reconciliation&&reconciliation.handled)return imageCapabilityData;
+    if(modelConfigRefreshInFlight)return;
+    const button=imageCapabilityElement('btnReloadAllModelConfig');
+    const report=message=>imageCapabilityText('modelConfigDraftStatus',message);
+    modelConfigRefreshInFlight=true;
+    if(button){button.disabled=true;button.setAttribute('aria-busy','true');}
+    report('正在刷新本机主模型状态…');
+    try{
+      if(typeof window.reconcilePendingMainModelConfigSave==='function'){
+        const reconciliation=await window.reconcilePendingMainModelConfigSave();
+        if(reconciliation&&reconciliation.handled)return imageCapabilityData;
+      }
+      if(typeof window.loadModelConfigPanel!=='function')throw new Error('模型配置页面尚未加载，请重试');
+      // Image verification may be slow; it must not block a local main-model read.
+      const main=await window.loadModelConfigPanel(true);
+      if(!main)return;
+      if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight){
+        report('主模型状态已刷新；图片能力操作尚未结束，请稍后再刷新图片状态。');
+        return main;
+      }
+      if(!(await imageCapabilityConfirmReload(true))){
+        report('主模型状态已刷新；图片能力刷新已取消，图片草稿已保留。');
+        return main;
+      }
+      report('主模型状态已刷新，正在读取图片能力状态…');
+      const result=await loadImageCapabilityCenter(true,{skipDirtyConfirm:true});
+      const center=imageCapabilityElement('imageCapabilityCenter');
+      report(center&&center.dataset.state==='error'
+        ?'主模型状态已刷新；图片能力读取失败，请重试。'
+        :'本机主模型和图片能力状态已刷新。');
+      return result;
+    }catch(error){
+      report('刷新本机状态失败：'+String((error&&error.message)||error||'未知错误')+'。请重试。');
+    }finally{
+      modelConfigRefreshInFlight=false;
+      if(button){button.disabled=false;button.removeAttribute('aria-busy');}
     }
-    if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight){
-      imageCapabilityText('imageCapabilityCenterStatusDetail','当前操作尚未结束，请完成后再刷新。');
-      return imageCapabilityData;
-    }
-    if(!(await imageCapabilityConfirmReload(true)))return imageCapabilityData;
-    if(typeof window.loadModelConfigPanel==='function'){
-      await window.loadModelConfigPanel(true);
-    }
-    return loadImageCapabilityCenter(true,{skipDirtyConfirm:true});
   }
   function imageCapabilityApplyVerificationResults(result){
     const rows=(result&&result.verification_results)||{};

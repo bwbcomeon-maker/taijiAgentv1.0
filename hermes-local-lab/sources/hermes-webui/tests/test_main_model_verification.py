@@ -1,6 +1,8 @@
 import io
 import json
+import re
 import urllib.error
+from http.server import BaseHTTPRequestHandler
 from types import SimpleNamespace
 
 import pytest
@@ -399,3 +401,57 @@ def test_main_model_check_rejects_cross_origin_browser_post(monkeypatch):
 
     assert result["status"] == 403
     assert "Cross-origin" in result["payload"]["error"]
+
+
+@pytest.mark.parametrize(
+    "body,length,csrf_ok,expected",
+    [(b"{}", "2", True, [200, 200]),
+     (b"{x", "2", True, [200, 200]),
+     (b"", "0", True, [200, 200]),
+     (b"{}", "2", False, [403]),
+     (b"{}", "invalid", True, [400]),
+     (b"{}", "-1", True, [400]),
+     (b"{}", str(20 * 1024 * 1024 + 1), True, [400])],
+)
+def test_main_check_preserves_http_request_boundaries(monkeypatch, body, length, csrf_ok, expected):
+    """Exercise the real route and JSON helpers on one in-memory HTTP/1.1 stream."""
+    from api import main_model_routes
+    from api.helpers import j
+
+    probes = []
+    monkeypatch.setattr("api.routes._check_csrf", lambda _handler: csrf_ok)
+    monkeypatch.setattr("api.routes._csrf_rejection_error", lambda _handler: "Cross-origin request rejected")
+    monkeypatch.setattr("api.model_config.check_main_model_connection", lambda: probes.append(True) or {"ok": True})
+
+    class MemorySocket:
+        def __init__(self, request):
+            self.input = io.BytesIO(request)
+            self.output = bytearray()
+
+        def makefile(self, *_args):
+            return self.input
+
+        def sendall(self, data):
+            self.output.extend(data)
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            main_model_routes.handle_main_model_post(self, SimpleNamespace(path=self.path))
+
+        def do_GET(self):
+            j(self, {"ok": True})
+
+        def log_message(self, *_args):
+            pass
+
+    request = (
+        b"POST /api/model-config/main/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: "
+        + length.encode() + b"\r\n\r\n" + body
+        + b"GET /api/model-config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    connection = MemorySocket(request)
+    Handler(connection, ("127.0.0.1", 1), object())
+    assert [int(code) for code in re.findall(rb"HTTP/1.1 (\d+)", connection.output)] == expected
+    assert len(probes) == (1 if expected[0] == 200 else 0)

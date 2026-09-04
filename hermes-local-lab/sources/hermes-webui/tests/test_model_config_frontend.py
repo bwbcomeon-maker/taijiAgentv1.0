@@ -975,6 +975,7 @@ const api=async(url,options)=>{
   authoritativeReadCount++;
   if(authoritativeReadCount===2){
    refreshBusyDuringGet={disabled:elements.btnReloadAllModelConfig.disabled,ariaBusy:elements.btnReloadAllModelConfig.attrs['aria-busy']||null};
+   if(scenario==='get_failure_then_edit_during_read')elements.modelConfigModel.value='new-draft';
   }
   if(scenario==='get_failure'||(scenario.startsWith('get_failure_then_')&&authoritativeReadCount===1)||scenario==='get_failure_then_failure'){
    throw new TypeError('authoritative read failed');
@@ -1012,12 +1013,18 @@ const helperNames=['_clearCapabilityProviderDraftSecrets','_clearModelConfigSecr
 const helperSource=helperNames.map(name=>extractFunc(name)).filter(Boolean).join('\n');
 eval(helperSource);
 if(typeof reconcilePendingMainModelConfigSave==='function')window.reconcilePendingMainModelConfigSave=reconcilePendingMainModelConfigSave;
+let modelConfigRefreshInFlight=false;
+const imageCapabilityElement=id=>elements[id]||null;
 eval(extractFunc('refreshModelAndImageCapabilities',indexSource));
 async function run(){
  await saveMainModelConfig();
+ if(scenario==='get_failure_then_new_draft'){
+  elements.modelConfigModel.value='new-draft';
+  elements.modelConfigApiKey.value='FAKE-new-draft';
+ }
  if(scenario.startsWith('get_failure_then_'))await refreshModelAndImageCapabilities();
  return {
-  apiCalls,postPayload,
+  apiCalls,postPayload,modelDraft:elements.modelConfigModel.value,
   expectedRequestId,postRequestId,postPayloadHasApiKey,mainRequestId:_modelConfigData.main_request_id||'',
   main:_modelConfigData.main,baseUrlDraft:elements.modelConfigBaseUrl.value,baseUrlError:elements.modelConfigBaseUrlError.textContent,baseUrlFocused:!!elements.modelConfigBaseUrl.focused,
   providers:_modelConfigData.providers,
@@ -1773,6 +1780,19 @@ def test_main_model_refresh_continues_pending_receipt_after_first_get_failure_wi
         "ariaBusy": "true",
     }
     assert result["button"] == {"disabled": False, "ariaBusy": None}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+@pytest.mark.parametrize("scenario", ["get_failure_then_new_draft", "get_failure_then_edit_during_read"])
+def test_pending_receipt_refresh_preserves_new_main_draft(tmp_path, scenario):
+    result = _run_main_model_reconciliation(tmp_path, scenario)
+    assert result["modelDraft"] == "new-draft"
+    assert result["main"]["model"] == "deepseek-chat"
+    assert result["closedCount"] == 0
+    assert "草稿" in result["status"]["text"]
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET", "GET"]
+    if scenario == "get_failure_then_new_draft":
+        assert result["mainSecret"] == "FAKE-new-draft"
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")

@@ -71,6 +71,21 @@ invalidates old evidence immediately.
 `Refresh local status` only rereads local state. It must never imply a Provider
 request or remote validation.
 
+The Settings refresh button owns its loading state independently of image
+verification/loading. It reads main-model state first and reports success,
+partial image results, cancellation, or failure beside the button. Concurrent
+clicks do not start duplicate refreshes. A provider summary read may initialize
+the shared configuration only together with its pristine form, and only if no
+newer model read, save reconciliation, or baseline update has intervened; it
+must not replace a form's baseline without rendering it. An untouched form rereads current server state when
+reopened. Rendered default choices are not user edits. Actual unsaved edits and
+secrets require explicit discard confirmation, and edits made after a pending
+save remain visible when its receipt is reconciled.
+
+The main-check POST route consumes its bounded request body before probing.
+CSRF rejection, invalid/oversized Content-Length, and body-read errors close the
+connection rather than leaving unread bytes for the next HTTP/1.1 request.
+
 ## Review invariants
 
 - A configured model is never rendered as green availability evidence.
