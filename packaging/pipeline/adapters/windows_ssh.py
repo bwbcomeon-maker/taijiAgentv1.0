@@ -20,6 +20,7 @@ from pathlib import Path
 from ..core.errors import PipelineError
 from ..core.models import canonical_json_sha256, validate_v2_state
 from ..core.state import RunStateStore
+from .windows_runtime_probe import parse_runtime_probe, runtime_probe_script
 
 
 SSH = "/usr/bin/ssh"
@@ -1223,6 +1224,7 @@ $signatureStatus = (Get-AuthenticodeSignature -FilePath $artifactPath).Status.To
         )
 
     def online_doctor(self):
+        parse_runtime_probe(self._run_powershell(runtime_probe_script(self.target)))
         payload = self._run_powershell(builder_probe_script(self.target))
         return parse_builder_probe(payload, self.target["minimum_free_gib"])
 

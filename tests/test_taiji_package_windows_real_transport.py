@@ -17,6 +17,7 @@ from packaging.pipeline.core.models import (
 )
 from packaging.pipeline.core.state import RunStateStore, recorded_stage
 from tests import windows_pipeline_fixtures
+from tests.test_windows_runtime_readiness import ready_runtime
 
 
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -276,6 +277,8 @@ class WindowsRealTransportTests(unittest.TestCase):
 
         def runner(argv):
             calls.append(argv)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(ready_runtime()), "")
             return subprocess.CompletedProcess(argv, 0, json.dumps({
                 "schema": "taiji-windows-builder-doctor/v1",
                 "architecture": "AMD64",
@@ -289,7 +292,7 @@ class WindowsRealTransportTests(unittest.TestCase):
             TARGET, ssh_config=None, command_runner=runner
         ).online_doctor()
         self.assertEqual(result["builder_status"], "BUILDER_READY")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0], "/usr/bin/ssh")
 
     def test_real_runner_keeps_windows_stderr_as_bytes(self):
@@ -305,7 +308,10 @@ class WindowsRealTransportTests(unittest.TestCase):
             ["/usr/bin/ssh"], 0, stdout=payload, stderr=b"\xd5\xce Windows warning"
         )
         with mock.patch.object(
-            windows_ssh.subprocess, "run", return_value=completed
+            windows_ssh.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess([], 0, json.dumps(ready_runtime()).encode(), b""),
+                completed,
+            ]
         ) as run:
             result = windows_ssh.WindowsSshTransport(
                 TARGET, ssh_config=None, command_runner=None
