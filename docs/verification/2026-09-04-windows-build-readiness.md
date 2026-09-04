@@ -88,3 +88,12 @@ Python 探针用 Base64 编码脚本解决 PowerShell 5.1 原生参数引号丢�
 - 本地新增路径合同先RED再GREEN；Windows从修复脚本AST提取实际调用，在独立 `\\?\` 源码路径执行本轮真实payload：8模板、140842 bytes DOCX，`WINDOWS_PAYLOAD_DOCX_OK` 和 `EXTENDED_SOURCE_PATH_DOCX_GATE_OK`。失败run的冻结源码、日志、payload原样保留，没有覆写或重跑该run。
 - 修复后Windows聚焦163项PASS。`scripts/verify.sh --full` 根目录1334项（3 skipped）、Desktop79项、DOCX278项PASS；Agent有23项因本地socket权限失败，原始退出1，不记一键全量PASS。相同注册范围采用空环境、临时runtime和同一runner，Agent256项PASS；WebUI1027项PASS（1项audioop弃用warning），runtime lint通过。日志保留在Mac `/private/tmp/windows-path-*.log`。
 - 本次局部通过不能升级为 Installer 成功；新提交需重新生成计划并取得 `BUILD`，不自动安装、签名或发布。
+
+## 第四阶段：新提交真实候选构建成功
+
+- 用户再次确认 `BUILD`，绑定 clean `main@a0e4b095bab609b2e6822c9e7b0da4d777114f90`，已与GitHub同步；run `20260904T151722Z-18373e08342b-a0e4b095`。此次修复源码、输入、缓存与独立run重新绑定，不复用前次失败run。
+- 2026-09-04 15:27:12 UTC 控制器退出0，状态 `CANDIDATE_BUILT`；输入校验、传输、远端输入复核、远端构建、review取回、本地交叉验证全部通过，failure为空。
+- 正式七项全部PASS：source-session-identity、offline-npm-ci、electron-win32-x64、payload-import-menu-policy（含实际DOCX生成）、payload-hygiene-closure、inno-compile、installer-pe-version-authenticode。
+- 制品 `TaijiAgent-Setup-1.0.2-win-x64.exe`，273209697 bytes，SHA256 `a73c08f71d45262538cef6fefdfc4ed776b607065307d37801c7a2615a11d5ef`；Mac取回文件再次独立计算摘要一致。FileVersion/ProductVersion均为1.0.2.0，AuthentiCode为 `NotSigned`。
+- 制品和七文件review保存在该run的本地state目录，远端日志独立取回；旧制品和失败run保留。此记录为构建后的文档更新，制品来源仍为上述 `a0e4b095`，不是后续文档提交。
+- 最高证据层为Installer：未安装、未启动产品、未做Windows桌面业务/升级/卸载验收，未验证production license，未签名、未发布。候选成功不等于正式交付完成。

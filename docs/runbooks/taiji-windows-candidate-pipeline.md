@@ -86,8 +86,8 @@ run-state.json
 | 层级 | 能证明 | 当前状态 |
 | --- | --- | --- |
 | Source | 控制器 source branch/commit/tree、版本和 selected asset 来源绑定 | 有本地及历史真实 run 证据；每轮重新绑定 |
-| Payload | 真实 Windows payload 内容、cache 复制和闭包结果 | `a6eb85f8` 真实 Stage 完成；DOCX 调用路径修复后局部复验通过，完整正式门禁待新 run |
-| Installer | 真实 Inno 编译、EXE bytes/PE/版本/AuthentiCode | 历史候选 EXE 有记录；当前修复后候选未构建 |
+| Payload | 真实 Windows payload 内容、cache 复制和闭包结果 | `a0e4b095` 真实 Stage 和七项正式检查通过，包含DOCX实际生成 |
+| Installer | 真实 Inno 编译、EXE bytes/PE/版本/AuthentiCode | `a0e4b095` 候选1.0.2已构建、取回并本地交叉验证；NotSigned，详见验证台账第四阶段 |
 | Installed Runtime | 指定 Windows 主机上的安装、进程、端口、配置和卸载/升级 | 未验证；未安装 |
 | Interactive Acceptance | 用户桌面会话中的启动、菜单、Logo、交互和业务流程 | 未验证；未启动、未做 GUI 验收 |
 
