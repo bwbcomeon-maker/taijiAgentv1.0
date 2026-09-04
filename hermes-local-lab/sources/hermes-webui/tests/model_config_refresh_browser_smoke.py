@@ -48,7 +48,7 @@ def main():
                 for width, height in ((1280, 900), (768, 900), (390, 844)):
                     context = browser.new_context(viewport={"width": width, "height": height})
                     page = context.new_page()
-                    errors, writes, blocked, pending = [], [], [], []
+                    errors, writes, blocked, pending, pending_checks = [], [], [], [], []
                     state = {"config": _model_config_fixture(), "fail": False, "hold_image": False, "reads": 0}
                     # An unconfigured capability can render a default choice without
                     # the user ever editing it. It must not become a main-page draft.
@@ -77,12 +77,24 @@ def main():
                         if path == "/api/model-config":
                             state["reads"] += 1
                             respond(route, {"error": "fixture unavailable"} if state["fail"] else state["config"], 503 if state["fail"] else 200)
+                        elif path == "/api/model-config/main/check":
+                            if state.get("hold_check"):
+                                pending_checks.append(route)
+                            elif state.get("check_error"):
+                                respond(route, {"error": "fixture check unavailable"}, 503)
+                            else:
+                                verification = {"state": "connection_verified"}
+                                state["config"]["main"]["verification"] = verification
+                                respond(route, {"verification": verification})
                         elif path == "/api/onboarding/status":
                             respond(route, {"completed": True, "settings": {}, "system": {}, "workspaces": {"items": []}, "setup": {"current": {}, "providers": []}})
                         elif path == "/api/providers":
                             respond(route, {"providers": state["config"]["providers"]})
-                        elif path == "/api/image-capabilities" and state["hold_image"]:
-                            pending.append(route)
+                        elif path == "/api/image-capabilities":
+                            if state["hold_image"]:
+                                pending.append(route)
+                            else:
+                                respond(route, state.get("image", {}))
                         elif path == "/api/provider/quota":
                             respond(route, {"status": "unsupported", "quota": None})
                         else:
@@ -109,6 +121,72 @@ def main():
                     button.click()
                     expect(page.locator("#modelConfigDraftStatus")).to_contain_text("已刷新")
                     expect(page.locator("#appDialogConfirm")).not_to_be_visible()
+
+                    # Status semantics use the real DOM and refresh control, not
+                    # a screenshot-only substitute for verification facts.
+                    hero = page.locator("#modelConfigHero")
+                    icon = hero.locator(".model-config-state-icon")
+                    for status, tone, symbol in (
+                        ("connection_verified", "ok", "✓"),
+                        ("chat_verified", "ok", "✓"),
+                        ("configured_unverified", "neutral", "i"),
+                        ("unsupported", "neutral", "i"),
+                        ("failed", "danger", "!"),
+                    ):
+                        state["config"]["main"]["verification"] = {"state": status}
+                        button.click()
+                        expect(hero).to_have_attribute("data-state", tone)
+                        expect(icon).to_have_text(symbol)
+                        expect(page.locator("#modelConfigMainStatusBadge")).to_have_attribute("data-state", tone)
+                        if status == "connection_verified":
+                            expect(page.locator("#modelConfigHeroTitle")).to_have_text("模型服务连接正常")
+                            expect(page.locator("#modelConfigHeroMessage")).to_contain_text("实际对话效果以会话结果为准")
+                            expect(icon).to_have_css("color", "rgb(20, 129, 74)")
+                        page.screenshot(path=str(evidence / f"{status}-{width}.png"), full_page=True)
+                        hero.screenshot(path=str(evidence / f"hero-{status}-{width}.png"))
+                    assert hero.locator("#visionConfigStatusBadge, #imageGenConfigStatusBadge").count() == 0
+                    for capability_status, tone in (("unconfigured", "neutral"), ("configured_unverified", "neutral"), ("verifying", "info"), ("failed", "danger"), ("verified", "ok")):
+                        state["image"] = {"capabilities": {key: {"enabled": capability_status != "unconfigured", "provider": "fixture", "model": "fixture-model", "verification": {"status": capability_status}} for key in ("vision", "image_generation")}}
+                        page.locator("#btnReloadImageCapabilityCenter").click()
+                        expect(page.locator("#imageCapabilityCenterStatus")).to_have_attribute("data-state", tone)
+                        for prefix in ("imageCapabilityVision", "imageCapabilityGeneration"):
+                            expect(page.locator(f"#{prefix}Verification")).to_be_visible()
+                            expect(page.locator(f"#{prefix}Verification")).to_have_attribute("data-state", tone)
+                        if capability_status in ("unconfigured", "failed"):
+                            page.locator('[data-image-capability="vision"]').screenshot(path=str(evidence / f"vision-{capability_status}-{width}.png"))
+                    # Static loading must not flash a success check or green card.
+                    page.evaluate("() => { const h=document.getElementById('modelConfigHero'); h.dataset.state='loading'; h.querySelector('.model-config-state-icon').textContent='↻'; }")
+                    expect(icon).to_have_css("color", "rgb(33, 100, 154)")
+                    button.click()
+                    state["config"]["main"]["key_status"]["configured"] = False
+                    button.click()
+                    expect(hero).to_have_attribute("data-state", "warn")
+                    expect(icon).to_have_text("!")
+                    state["config"]["main"]["key_status"]["configured"] = True
+                    button.click()
+                    check_button = page.locator("#btnCheckMainModelConnection")
+                    state["hold_check"] = True
+                    check_button.click()
+                    expect(hero).to_have_attribute("data-state", "info")
+                    expect(page.locator("#modelConfigHeroTitle")).to_have_text("正在检查模型服务连接")
+                    expect(check_button).to_be_disabled()
+                    page.screenshot(path=str(evidence / f"checking-{width}.png"), full_page=True)
+                    hero.screenshot(path=str(evidence / f"hero-checking-{width}.png"))
+                    state["hold_check"] = False
+                    for route in pending_checks:
+                        state["config"]["main"]["verification"] = {"state": "connection_verified"}
+                        respond(route, {"verification": {"state": "connection_verified"}})
+                    pending_checks.clear()
+                    expect(hero).to_have_attribute("data-state", "ok")
+                    state["check_error"] = True
+                    check_button.click()
+                    expect(hero).to_have_attribute("data-state", "danger")
+                    expect(page.locator("#modelConfigHeroTitle")).to_have_text("连接检查未完成")
+                    state["check_error"] = False
+                    check_button.focus()
+                    check_button.press("Enter")
+                    expect(hero).to_have_attribute("data-state", "ok")
+                    expect(check_button).to_be_enabled()
 
                     # Slow image state cannot disable or intercept main refresh.
                     state["hold_image"] = True
@@ -156,7 +234,8 @@ def main():
                     button.scroll_into_view_if_needed()
                     page.screenshot(path=str(evidence / f"success-{width}.png"), full_page=True)
                     assert not errors, errors
-                    assert not [path for path in writes if path != "/api/auth/passkeys"], writes
+                    assert writes.count("/api/model-config/main/check") == 3, writes
+                    assert not [path for path in writes if path not in ("/api/auth/passkeys", "/api/model-config/main/check")], writes
                     assert not blocked, blocked
                     results.append({"viewport": [width, height], "main_reads": state["reads"], "page_errors": errors, "writes": writes})
                     context.close()

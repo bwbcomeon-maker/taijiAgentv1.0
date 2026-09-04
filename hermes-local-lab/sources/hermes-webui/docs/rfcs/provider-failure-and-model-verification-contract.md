@@ -14,6 +14,23 @@ failure state.
 
 ## Error boundary
 
+### Model settings visual semantics
+
+`connection_verified` is a successful connection check: the main summary uses a
+small green check and explicitly says actual conversation results remain to be
+observed. Only `chat_verified` is described as a verified conversation.
+Configured-but-unchecked and unsupported checks use neutral information styling;
+checking, initial loading, and runtime refresh use blue progress styling. Missing
+required main configuration remains a warning; verification failure remains an
+error with recovery guidance. A check request failure is presented as an
+incomplete check, without mutating the previously saved verification fact.
+
+Optional vision/image configuration and verification badges live in their own
+capability cards, not the main-model hero. Unconfigured or unchecked optional
+capabilities are neutral; progress is informational and actual failures stay
+errors. This changes presentation only, not verification state persistence,
+Provider selection, credentials, or request semantics.
+
 Terminal Provider failures use `taiji.gateway.run-error.v1`. The boundary keeps
 only the fixed source/code/status/transport/retry/incident fields and a constant
 message. Raw Provider bodies, authorization headers, credentials, URLs containing

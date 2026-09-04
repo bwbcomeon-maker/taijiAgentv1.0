@@ -9664,9 +9664,9 @@ function _renderVisionConfigSummary(data){
  const verification=vision.verification||{};
  const status=String(verification.status||(configured?'configured_unverified':'unconfigured'));
  const stateMeta={
-  unconfigured:{label:'待配置',badge:'看图识别待配置',tone:'warn',summary:'需要选择支持视觉的模型并配置密钥。'},
-  configured_unverified:{label:'已配置，尚未验证',badge:'看图识别尚未验证',tone:'warn',summary:'配置已保存，请点击“测试识图”完成真实图片探测。'},
-  verifying:{label:'正在验证',badge:'看图识别正在验证',tone:'warn',summary:'正在使用无用户数据的安全测试图片检查当前配置。'},
+  unconfigured:{label:'可选，未配置',badge:'看图识别未配置',tone:'neutral',summary:'需要识别图片时，可选择支持视觉的模型并配置密钥。'},
+  configured_unverified:{label:'已配置，尚未验证',badge:'看图识别尚未验证',tone:'neutral',summary:'配置已保存，请点击“测试识图”完成真实图片探测。'},
+  verifying:{label:'正在验证',badge:'看图识别正在验证',tone:'info',summary:'正在使用无用户数据的安全测试图片检查当前配置。'},
   verified:{label:'已验证',badge:'看图识别已验证',tone:'ok',summary:'当前配置已通过真实图片探测。'},
   failed:{label:'验证失败',badge:'看图识别验证失败',tone:'danger',summary:'请检查网络、密钥、模型和账号状态后重试。'}
  };
@@ -9677,7 +9677,7 @@ function _renderVisionConfigSummary(data){
  _setModelConfigStatusBadge('visionConfigEffective',meta.label,meta.tone);
  _setModelConfigStatusBadge('visionConfigStatusBadge',meta.badge,meta.tone);
  const card=$('modelConfigVisionSummaryCard');
- if(card) card.dataset.state=status==='verified'?'ok':'warn';
+ if(card) card.dataset.state=meta.tone;
  _setModelConfigText('visionConfigSummary',meta.summary);
  _setModelConfigText('visionConfigVerificationStatus',String(verification.message||meta.summary));
  const testBtn=$('btnTestVisionConfig');
@@ -9698,9 +9698,9 @@ function _renderImageGenConfigSummary(data){
  const configured=!!(provider&&model&&(row.can_attempt===true||(row.key_status&&row.key_status.configured)));
  const status=String(verification.status||(configured?'configured_unverified':'unconfigured'));
  const stateMeta={
-  unconfigured:{label:'待配置',badge:'图片生成待配置',tone:'warn',summary:'需要选择生图模型并配置凭据。'},
-  configured_unverified:{label:'已配置，尚未验证',badge:'图片生成尚未验证',tone:'warn',summary:'配置已保存，请执行真实生图测试。'},
-  verifying:{label:'正在验证',badge:'图片生成正在验证',tone:'warn',summary:'正在执行最小真实生图测试，可能产生少量费用。'},
+  unconfigured:{label:'可选，未配置',badge:'图片生成未配置',tone:'neutral',summary:'需要生成图片时，可选择生图模型并配置凭据。'},
+  configured_unverified:{label:'已配置，尚未验证',badge:'图片生成尚未验证',tone:'neutral',summary:'配置已保存，请执行真实生图测试。'},
+  verifying:{label:'正在验证',badge:'图片生成正在验证',tone:'info',summary:'正在执行最小真实生图测试，可能产生少量费用。'},
   verified:{label:'已验证',badge:'图片生成已验证',tone:'ok',summary:'当前配置已通过真实生图测试。'},
   failed:{label:'验证失败',badge:'图片生成验证失败',tone:'danger',summary:'请检查网络、凭据、端点、模型和账号状态后重试。'}
  };
@@ -9711,7 +9711,7 @@ function _renderImageGenConfigSummary(data){
  _setModelConfigStatusBadge('imageGenConfigEffective',meta.label,meta.tone);
  _setModelConfigStatusBadge('imageGenConfigStatusBadge',meta.badge,meta.tone);
  const card=$('modelConfigImageSummaryCard');
- if(card) card.dataset.state=status==='verified'?'ok':'warn';
+ if(card) card.dataset.state=meta.tone;
  _setModelConfigText('imageGenConfigCardTitle',status==='verified'?'生成图片已验证':'生成图片');
  _setModelConfigText('imageGenConfigSummary',meta.summary);
  _setModelConfigText('imageGenConfigVerificationStatus',String(verification.message||meta.summary));
@@ -9723,7 +9723,8 @@ function _renderImageGenConfigSummary(data){
  _setImageGenConfigTestBusy(status==='verifying');
 }
 
-function _renderModelConfigFocusSummary(data){
+function _renderModelConfigFocusSummary(data,options){
+ const opts=options||{};
  const main=(data&&data.main)||{};
  const mainProvider=String(main.provider||'').trim();
  const mainModel=String(main.model||'').trim();
@@ -9735,12 +9736,14 @@ function _renderModelConfigFocusSummary(data){
  const verificationError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:{product_error:verification.product_error}}):null;
  const verificationState=mainConfigured?String(verification.state||'configured_unverified'):'unconfigured';
  let stateMeta;
- if(mainRefreshing) stateMeta={effective:'刷新中',badge:'主模型刷新中',tone:'warn',title:'主模型配置已保存，运行时正在刷新',message:'配置已写入本机，运行时状态尚未完成刷新。'};
+ if(opts.checking) stateMeta={effective:'检查中',badge:'正在检查连接',tone:'info',title:'正在检查模型服务连接',message:'正在检查服务连通性，不会发送对话内容。'};
+ else if(opts.checkError) stateMeta={effective:'检查未完成',badge:'连接检查请求失败',tone:'danger',title:'连接检查未完成',message:opts.checkError};
+ else if(mainRefreshing) stateMeta={effective:'刷新中',badge:'主模型刷新中',tone:'info',title:'主模型配置已保存，运行时正在刷新',message:'配置已写入本机，运行时状态尚未完成刷新。'};
  else if(verificationState==='chat_verified') stateMeta={effective:'对话已验证',badge:'最近对话验证成功',tone:'ok',title:'最近一次对话验证成功',message:'当前 Provider、模型和凭据指纹已经通过真实对话。'};
- else if(verificationState==='connection_verified') stateMeta={effective:'连接正常',badge:'主模型连接正常',tone:'warn',title:'模型服务连接正常',message:'对话能力待实际会话验证。'};
+ else if(verificationState==='connection_verified') stateMeta={effective:'连接正常',badge:'主模型连接正常',tone:'ok',title:'模型服务连接正常',message:'连接检查已通过，可以开始对话。实际对话效果以会话结果为准。'};
  else if(verificationState==='failed') stateMeta={effective:'验证失败',badge:'主模型验证失败',tone:'danger',title:verificationError?verificationError.title:'主模型连接检查失败',message:verificationError?verificationError.message:'请检查模型配置、账户或网络。'};
- else if(verificationState==='unsupported') stateMeta={effective:'暂不支持检查',badge:'已配置，无安全连接检查',tone:'warn',title:'主模型已配置',message:'当前 Provider 暂不支持非生成式连接检查，对话能力需由实际会话验证。'};
- else if(mainConfigured) stateMeta={effective:'已配置，尚未验证',badge:'主模型尚未验证',tone:'warn',title:'主模型已配置，尚未验证',message:'本机配置完整不代表远端模型可用，可点击“检查连接”。'};
+ else if(verificationState==='unsupported') stateMeta={effective:'暂不支持检查',badge:'已配置，无安全连接检查',tone:'neutral',title:'主模型已配置',message:'当前 Provider 暂不支持非生成式连接检查，对话能力需由实际会话验证。'};
+ else if(mainConfigured) stateMeta={effective:'尚未检查连接',badge:'主模型尚未检查连接',tone:'neutral',title:'主模型已配置，尚未检查连接',message:'本机配置完整不代表远端模型可用，可点击“检查连接”。'};
  else stateMeta={effective:'待配置',badge:'主模型待配置',tone:'warn',title:'主模型尚未配置完整',message:'请先完成主模型和 API 密钥配置，再开始新会话。'};
  _setModelConfigText('modelConfigMainModelName',mainModel||'未配置主模型');
  _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
@@ -9755,7 +9758,7 @@ function _renderModelConfigFocusSummary(data){
  if(hero){
   hero.dataset.state=stateMeta.tone;
   const icon=hero.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=stateMeta.tone==='ok'?'✓':(mainRefreshing?'↻':'!');
+  if(icon) icon.textContent=({ok:'✓',neutral:'i',info:'↻',warn:'!',danger:'!'})[stateMeta.tone];
  }
  _setModelConfigText('modelConfigHeroTitle',stateMeta.title);
  _setModelConfigText('modelConfigHeroMessage',stateMeta.message);
@@ -11553,15 +11556,18 @@ async function checkMainModelConnection(){
  const btn=$('btnCheckMainModelConnection');
  if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
  _setModelConfigDraftStatus('正在检查连接…不会发送对话内容。');
+ _renderModelConfigFocusSummary(_modelConfigData,{checking:true});
  try{
   const data=await api('/api/model-config/main/check',{method:'POST',body:'{}',timeoutToast:false,retryNetworkErrors:false});
   if(_modelConfigData&&_modelConfigData.main) _modelConfigData.main.verification=data.verification||{};
   _renderModelConfigFocusSummary(_modelConfigData||{main:{verification:data.verification||{}}});
   const state=String(data&&data.verification&&data.verification.state||'');
   const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:{product_error:data&&data.verification&&data.verification.product_error}}):null;
-  _setModelConfigDraftStatus(state==='connection_verified'?'连接正常，对话能力待实际会话验证。':state==='unsupported'?'当前 Provider 暂不支持安全连接检查。':productError?(productError.title+'：'+productError.message):'连接检查未通过，请根据页面提示处理。');
+  _setModelConfigDraftStatus(state==='connection_verified'?'连接检查已通过，可以开始对话。实际对话效果以会话结果为准。':state==='unsupported'?'当前 Provider 暂不支持安全连接检查。':productError?(productError.title+'：'+productError.message):'连接检查未通过，请根据页面提示处理。');
  }catch(error){
-  _setModelConfigDraftStatus('连接检查请求失败：'+(error&&error.message||error));
+  const message='连接检查请求失败：'+(error&&error.message||error)+'。请重试；此前检查结果未被修改。';
+  _setModelConfigDraftStatus(message);
+  _renderModelConfigFocusSummary(_modelConfigData,{checkError:message});
  }finally{
   if(btn){btn.disabled=false;btn.removeAttribute('aria-busy');}
  }

@@ -1061,10 +1061,11 @@ const _renderImageGenConfigSummary=()=>{};
 const _modelConfigImageProviderRow=()=>({});
 const _safeProductErrorEnvelope=({payload})=>payload&&payload.product_error?payload.product_error:null;
 eval(['_modelConfigKeyLabel','_setModelConfigText','_setModelConfigStatusBadge','_renderModelConfigFocusSummary','_setMainModelConfigSaveState'].map(extractFunc).join('\n'));
-function snapshot(main){
- _renderModelConfigFocusSummary({main,image_gen:{}});
+function snapshot(main,options){
+ _renderModelConfigFocusSummary({main,image_gen:{}},options);
  return {effective:elements.modelConfigMainEffective.textContent,badge:elements.modelConfigMainStatusBadge.textContent,
-  hero:elements.modelConfigHeroTitle.textContent,message:elements.modelConfigHeroMessage.textContent,state:elements.modelConfigHero.dataset.state};
+  hero:elements.modelConfigHeroTitle.textContent,message:elements.modelConfigHeroMessage.textContent,state:elements.modelConfigHero.dataset.state,
+  icon:icon.textContent,badgeTone:elements.modelConfigMainStatusBadge.dataset.state};
 }
 const stateMessages={};
 for(const state of ['saving','refreshing','reconciling','applied','failed']){
@@ -1072,6 +1073,8 @@ for(const state of ['saving','refreshing','reconciling','applied','failed']){
  stateMessages[state]={text:elements.modelConfigDraftStatus.textContent,state:elements.modelConfigDraftStatus.dataset.state};
 }
 process.stdout.write(JSON.stringify({
+ checking:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true}},{checking:true}),
+ unsupported:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},verification:{state:'unsupported'}}),
  pending:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},runtime_refresh_pending:true}),
  applied:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true}}),
  connection:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},verification:{state:'connection_verified'}}),
@@ -1222,6 +1225,22 @@ def test_model_config_settings_section_exists():
     assert 'data-settings-section="models"' in INDEX_HTML
     assert 'id="settingsPaneModels"' in INDEX_HTML
     assert "模型配置" in INDEX_HTML
+
+
+def test_model_status_initial_loading_and_optional_badge_placement():
+    hero = INDEX_HTML.split('id="modelConfigHero"', 1)[1].split('</section>', 1)[0]
+    assert 'data-state="loading"' in hero
+    assert 'aria-hidden="true">↻</span>' in hero
+    assert 'aria-hidden="true">✓</span>' not in hero
+    assert 'aria-live="polite" aria-atomic="true"' in hero
+    assert 'id="visionConfigStatusBadge"' not in hero
+    assert 'id="imageGenConfigStatusBadge"' not in hero
+    center = INDEX_HTML.split('<!-- image-capability-center:start -->', 1)[1].split('<!-- image-capability-center:end -->', 1)[0]
+    for status in ("imageCapabilityVisionVerification", "imageCapabilityGenerationVerification"):
+        assert f'id="{status}"' in center
+    assert 'id="legacyImageCapabilityControls"' not in center
+    for tone in ("neutral", "info", "loading"):
+        assert f'.model-config-hero[data-state="{tone}"]' in STYLE_CSS
 
 
 def test_model_config_has_three_required_surfaces():
@@ -1446,18 +1465,30 @@ def test_main_model_refresh_pending_is_not_rendered_as_unconfigured(tmp_path):
         "badge": "主模型刷新中",
         "hero": "主模型配置已保存，运行时正在刷新",
         "message": "配置已写入本机，运行时状态尚未完成刷新。",
-        "state": "warn",
+        "state": "info",
+        "icon": "↻",
+        "badgeTone": "info",
     }
-    assert result["applied"]["effective"] == "已配置，尚未验证"
-    assert result["applied"]["badge"] == "主模型尚未验证"
+    assert result["applied"]["effective"] == "尚未检查连接"
+    assert result["applied"]["badge"] == "主模型尚未检查连接"
+    assert result["applied"]["state"] == "neutral"
+    assert result["applied"]["icon"] == "i"
     assert result["connection"]["effective"] == "连接正常"
-    assert result["connection"]["state"] == "warn"
+    assert result["connection"]["state"] == "ok"
+    assert result["connection"]["badgeTone"] == "ok"
+    assert result["connection"]["icon"] == "✓"
+    assert "实际对话效果以会话结果为准" in result["connection"]["message"]
     assert result["chat"]["effective"] == "对话已验证"
     assert result["chat"]["state"] == "ok"
     assert result["authFailed"]["hero"] == "API Key 无效或已失效"
     assert result["authFailed"]["state"] == "danger"
     assert result["unconfigured"]["effective"] == "待配置"
     assert result["unconfigured"]["badge"] == "主模型待配置"
+    assert result["unconfigured"]["state"] == "warn"
+    assert result["checking"]["state"] == "info"
+    assert result["checking"]["icon"] == "↻"
+    assert result["checking"]["hero"] == "正在检查模型服务连接"
+    assert result["unsupported"]["state"] == "neutral"
     assert result["stateMessages"] == {
         "saving": {"text": "正在保存主模型配置…", "state": "saving"},
         "refreshing": {

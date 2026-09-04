@@ -1,12 +1,43 @@
 """Frontend contract tests for the unified image capability center."""
 
 import re
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).parent.parent
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+
+def test_visible_image_status_tones_do_not_warn_for_optional_unverified():
+    def function(name, next_name):
+        body = INDEX_HTML.split(f"  function {name}(", 1)[1].split(f"  function {next_name}(", 1)[0]
+        return f"function {name}(" + body
+
+    source = "\n".join([
+        function("imageCapabilityEnabled", "imageCapabilityVerificationLabel"),
+        function("imageCapabilityTone", "imageCapabilityConfigLabel"),
+        function("imageCapabilityOverallState", "imageCapabilityRenderData"),
+    ])
+    driver = "const imageCapabilityConfig=(data,key)=>data.capabilities[key];\n" + source + """
+const result={};
+for(const status of ['unconfigured','configured_unverified','verifying','failed','verified']){
+ const config={enabled:status!=='unconfigured',provider:'fixture',model:'fixture',verification:{status}};
+ result[status]=[imageCapabilityTone(config),imageCapabilityOverallState({capabilities:{vision:config,image_generation:config}}).state];
+}
+console.log(JSON.stringify(result));
+"""
+    result = subprocess.run([shutil.which("node"), "-e", driver], check=True, capture_output=True, text=True)
+    assert json.loads(result.stdout) == {
+        "unconfigured": ["neutral", "neutral"],
+        "configured_unverified": ["neutral", "neutral"],
+        "verifying": ["info", "info"],
+        "failed": ["danger", "danger"],
+        "verified": ["ok", "ok"],
+    }
 
 
 def _marked_slice(start: str, end: str) -> str:

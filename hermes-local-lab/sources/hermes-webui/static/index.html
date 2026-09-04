@@ -89,6 +89,11 @@
 .image-capability-center-status[data-state="ok"]{border-color:var(--green,#16a46c)}
 .image-capability-center-status[data-state="warn"]{border-color:var(--yellow,#d98a16)}
 .image-capability-center-status[data-state="danger"]{border-color:var(--red,#d93d4a)}
+.image-capability-center-status[data-state="info"]{border-color:#21649a}
+.image-capability-center-verification[data-state="ok"]{color:#14814a;background:rgba(20,129,74,.08)}
+.image-capability-center-verification[data-state="info"]{color:#21649a;background:rgba(33,100,154,.08)}
+.image-capability-center-verification[data-state="warn"]{color:#936017;background:rgba(217,138,22,.08)}
+.image-capability-center-verification[data-state="danger"]{color:#b42332;background:rgba(217,61,74,.08)}
 .image-capability-center-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
 .image-capability-center-card{display:grid;align-content:start;gap:12px;min-width:0;padding:14px;border:1px solid var(--border2);border-radius:var(--radius-lg,12px);background:var(--panel-bg,var(--code-bg))}
 .image-capability-center-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -1494,15 +1499,13 @@
               </section>
 
               <section class="model-config-hero" id="modelConfigHero" data-state="loading">
-                <span class="model-config-state-icon" aria-hidden="true">✓</span>
-                <div class="model-config-hero-copy">
+                <span class="model-config-state-icon" aria-hidden="true">↻</span>
+                <div class="model-config-hero-copy" aria-live="polite" aria-atomic="true">
                   <strong id="modelConfigHeroTitle">正在读取模型配置</strong>
-                  <span id="modelConfigHeroMessage">页面只突出当前能否使用和需要处理的阻断项。</span>
+                  <span id="modelConfigHeroMessage">正在读取本机保存的配置与检查结果。</span>
                 </div>
-                <div class="model-config-hero-badges" id="modelConfigStatus" aria-live="polite">
+                <div class="model-config-hero-badges" id="modelConfigStatus">
                   <span class="model-config-pill" id="modelConfigMainStatusBadge">主模型 —</span>
-                  <span class="model-config-pill" id="visionConfigStatusBadge">看图识别 —</span>
-                  <span class="model-config-pill" id="imageGenConfigStatusBadge">图片生成 —</span>
                   <em id="modelConfigProfile" class="model-config-sr">—</em>
                   <em id="modelConfigPath" class="model-config-sr">—</em>
                   <em id="modelConfigActive" class="model-config-sr">—</em>
@@ -1771,7 +1774,7 @@
                     </div>
                   </section>
                   <div class="model-config-image-capability-grid">
-                    <section class="model-config-capability-card" id="modelConfigVisionSummaryCard" data-state="warn">
+                    <section class="model-config-capability-card" id="modelConfigVisionSummaryCard" data-state="neutral">
                       <div class="model-config-card-head">
                         <div>
                           <strong>看图识别</strong>
@@ -1851,7 +1854,7 @@
                       <p class="model-config-hint" id="visionConfigVerificationStatus" aria-live="polite">尚未检查识图配置。</p>
                     </section>
 
-                    <section class="model-config-capability-card model-config-image-card" id="modelConfigImageSummaryCard" data-state="warn">
+                    <section class="model-config-capability-card model-config-image-card" id="modelConfigImageSummaryCard" data-state="neutral">
                       <div class="model-config-card-head">
                         <div>
                           <strong id="imageGenConfigCardTitle">生成图片</strong>
@@ -2720,6 +2723,12 @@
     if(status==='disabled')return '能力已停用，配置仍保留。';
     return '尚未验证。';
   }
+  function imageCapabilityTone(config){
+    if(!imageCapabilityEnabled(config))return 'neutral';
+    if(!config.provider||!config.model)return 'warn';
+    const status=String((config.verification||{}).status||'');
+    return {verified:'ok',failed:'danger',verifying:'info'}[status]||'neutral';
+  }
   function imageCapabilityConfigLabel(capability,config){
     if(!imageCapabilityEnabled(config)){
       return capability==='vision'
@@ -2728,7 +2737,7 @@
     }
     if(!config.provider||!config.model)return '配置不完整';
     const status=String((config.verification&&config.verification.status)||'');
-    return status==='verified'?'已配置 · 已验证':'已配置 · 待验证';
+    return {verified:'已配置 · 已验证',failed:'已配置 · 验证失败',verifying:'已配置 · 验证中'}[status]||'已配置 · 待验证';
   }
   function imageCapabilityVisionRouteLabel(data){
     const route=((data&&data.effective_route)||{}).vision||{};
@@ -2773,6 +2782,8 @@
     imageCapabilityRenderEndpointFields(capability,selectedRow,config);
     imageCapabilityText(meta.prefix+'Auth',imageCapabilityAuthLabel(selectedRow));
     imageCapabilityText(meta.prefix+'ConfigStatus',imageCapabilityConfigLabel(capability,config));
+    const verificationElement=imageCapabilityElement(meta.prefix+'Verification');
+    if(verificationElement)verificationElement.dataset.state=imageCapabilityTone(config);
     imageCapabilityText(
       meta.prefix+'Verification',
       capability==='vision'&&!imageCapabilityEnabled(config)
@@ -2798,11 +2809,13 @@
       };
     }
     if(enabled.some(config=>!config.provider||!config.model)){
-      return {state:'danger',title:'存在未完成的图片能力配置',detail:'请补全已启用能力的 Provider 和模型后再保存。'};
+      return {state:'warn',title:'存在未完成的图片能力配置',detail:'请补全已启用能力的 Provider 和模型后再保存。'};
     }
+    if(enabled.some(config=>imageCapabilityTone(config)==='danger'))return {state:'danger',title:'图片能力验证失败',detail:'请查看下方各能力的验证结果；主模型连接状态单独显示。'};
+    if(enabled.some(config=>imageCapabilityTone(config)==='info'))return {state:'info',title:'正在验证图片能力',detail:'请稍候，验证结果将在对应能力下显示。'};
     const verified=enabled.filter(config=>String((config.verification||{}).status||'')==='verified').length;
     if(verified===enabled.length)return {state:'ok',title:'已启用图片能力均已验证',detail:'实际路由与配置状态已分开显示。'};
-    return {state:'warn',title:'图片能力已配置，仍需验证',detail:'点击“保存并验证”后分别查看图片理解和图片生成结果。'};
+    return {state:'neutral',title:'图片能力已配置，尚未验证',detail:'点击“保存并验证”后分别查看图片理解和图片生成结果。'};
   }
   function imageCapabilityRenderData(data){
     Object.keys(imageCapabilityCredentialDraftIds).forEach(capability=>{
@@ -3035,6 +3048,8 @@
     imageCapabilityLoadInFlight=true;
     imageCapabilitySetBusy(true);
     center.dataset.state='loading';
+    const loadingStatus=imageCapabilityElement('imageCapabilityCenterStatus');
+    if(loadingStatus)loadingStatus.dataset.state='info';
     imageCapabilityText('imageCapabilityCenterError','');
     imageCapabilityText('imageCapabilityCenterStatusTitle','正在读取图片能力');
     imageCapabilityText('imageCapabilityCenterStatusDetail','正在从当前配置档读取脱敏状态。');
@@ -3096,8 +3111,13 @@
   }
   function imageCapabilityApplyVerificationResults(result){
     const rows=(result&&result.verification_results)||{};
-    if(rows.vision)imageCapabilityText('imageCapabilityVisionVerification',imageCapabilityVerificationLabel(rows.vision));
-    if(rows.image_generation)imageCapabilityText('imageCapabilityGenerationVerification',imageCapabilityVerificationLabel(rows.image_generation));
+    for(const capability of ['vision','image_generation']){
+      if(!rows[capability])continue;
+      const id=IMAGE_CAPABILITY_META[capability].prefix+'Verification';
+      imageCapabilityText(id,imageCapabilityVerificationLabel(rows[capability]));
+      const element=imageCapabilityElement(id);
+      if(element)element.dataset.state={verified:'ok',failed:'danger',verifying:'info'}[rows[capability].status]||'neutral';
+    }
   }
   async function saveAndVerifyImageCapabilityCenter(){
     if(imageCapabilityBusy||imageCapabilityRequestInFlight||imageCapabilityLoadInFlight)return;
@@ -3112,6 +3132,8 @@
     const draftIdentity=imageCapabilityDraftIdentity();
     imageCapabilityRequestInFlight=true;
     imageCapabilitySetBusy(true);
+    const savingStatus=imageCapabilityElement('imageCapabilityCenterStatus');
+    if(savingStatus)savingStatus.dataset.state='info';
     imageCapabilityText('imageCapabilityCenterError','');
     imageCapabilityText('imageCapabilityCenterStatusTitle','正在保存并验证');
     imageCapabilityText(
@@ -3144,7 +3166,7 @@
       const superseded=String((result&&result.request_status)||'')==='superseded';
       const failed=Object.values((result&&result.verification_results)||{}).some(row=>String((row&&row.status)||'')==='failed');
       const status=imageCapabilityElement('imageCapabilityCenterStatus');
-      if(status)status.dataset.state=(failed||superseded)?'warn':'ok';
+      if(status)status.dataset.state=superseded?'neutral':(failed?'danger':'ok');
       imageCapabilityText(
         'imageCapabilityCenterStatusTitle',
         superseded
