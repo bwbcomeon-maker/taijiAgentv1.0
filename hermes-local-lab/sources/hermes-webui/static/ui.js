@@ -103,7 +103,7 @@ const _taijiFloatingPanels=new Set();
 let _taijiFloatingListenersReady=false;
 
 const UI_VISIBILITY_DEFAULTS={
-  nav:['chat','tasks','kanban','writing','skills','memory','workspaces','profiles','todos','insights','logs','settings'],
+  nav:['chat','tasks','kanban','writing','zhinang','skills','memory','workspaces','profiles','todos','insights','logs','settings'],
   settings_sections:['conversation','appearance','preferences','models','providers','plugins','system','about'],
   composer:['profile','workspace_files','workspace_switcher','model','reasoning','toolsets','quota'],
   chat:['activity_details']
@@ -2508,7 +2508,7 @@ function _expertTeamActivePanelName(){
   }catch(_){}
   const mainEl=typeof document!=='undefined'?document.querySelector('main.main'):null;
   if(!mainEl||!mainEl.classList)return 'chat';
-  const panels=['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','todos','insights','logs','plugin'];
+  const panels=['settings','skills','memory','tasks','kanban','writing','zhinang','workspaces','profiles','todos','insights','logs','plugin'];
   for(const panel of panels){
     if(mainEl.classList.contains(`showing-${panel}`))return panel;
   }

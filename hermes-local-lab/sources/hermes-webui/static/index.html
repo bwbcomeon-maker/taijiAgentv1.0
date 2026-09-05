@@ -75,6 +75,7 @@
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/expert-team-v3.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/zhinang.css?v=__WEBUI_VERSION__">
 <style>
 /* image-capability-center-styles:start */
 .image-capability-center{display:grid;gap:14px;min-width:0}
@@ -208,6 +209,9 @@
       <button class="taiji-nav-item" type="button" data-taiji-panel="writing" onclick="taijiHomeSelectNav(this)">
         <span class="taiji-icon taiji-nav-icon" data-icon="users-round" aria-hidden="true"></span><span>专家团</span>
       </button>
+      <button class="taiji-nav-item" type="button" data-taiji-panel="zhinang" onclick="taijiHomeSelectNav(this)">
+        <span class="taiji-icon taiji-nav-icon" data-icon="book-open" aria-hidden="true"></span><span>智囊库</span>
+      </button>
       <button class="taiji-nav-item" type="button" data-taiji-panel="skills" onclick="taijiHomeSelectNav(this)">
         <span class="taiji-icon taiji-nav-icon" data-icon="blocks" aria-hidden="true"></span><span>技能</span>
       </button>
@@ -322,6 +326,7 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="writing" onclick="switchPanel('writing',{fromRailClick:true})" data-tooltip="写作" data-i18n-title="tab_writing" aria-label="写作"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="zhinang" onclick="switchPanel('zhinang',{fromRailClick:true})" data-tooltip="智囊库" aria-label="智囊库"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="workspaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
@@ -340,6 +345,7 @@
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban" data-label="Kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="writing" data-label="写作" onclick="switchPanel('writing',{fromRailClick:true})" data-tooltip="写作" data-i18n-title="tab_writing"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="zhinang" data-label="智囊库" onclick="switchPanel('zhinang',{fromRailClick:true})" data-tooltip="智囊库" aria-label="智囊库"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="memory" data-label="Memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
@@ -421,6 +427,19 @@
       </div>
       <div class="writeflow-panel writeflow-panel-compact">
         <p>从专家中心选择团队，召唤后进入新的聊天任务。</p>
+      </div>
+    </div>
+    <div class="panel-view" id="panelZhinang">
+      <div class="panel-head"><span>智囊库</span></div>
+      <div class="zhinang-side" data-zhinang-side>
+        <div class="zhinang-side-tabs" role="group" aria-label="智囊范围">
+          <button type="button" class="is-active" data-zhinang-scope="all">全部角色</button>
+          <button type="button" data-zhinang-scope="favorites">我的收藏</button>
+        </div>
+        <label class="zhinang-search-label" for="zhinangSearch">搜索智囊</label>
+        <div class="zhinang-search-wrap"><span aria-hidden="true">⌕</span><input id="zhinangSearch" type="search" maxlength="200" autocomplete="off" placeholder="搜索名称、能力或标签"></div>
+        <nav class="zhinang-categories" id="zhinangCategories" aria-label="智囊类别"></nav>
+        <p class="zhinang-side-note">角色说明来自内置目录；创建任务后角色固定。</p>
       </div>
     </div>
     <!-- Skills panel -->
@@ -563,6 +582,7 @@
   </aside>
   <main class="main">
     <div id="mainChat" class="main-view">
+    <button id="zhinangSessionRole" class="zhinang-session-role" type="button" hidden aria-haspopup="dialog"></button>
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
@@ -1005,6 +1025,26 @@
     </div>
     <div id="mainWriting" class="main-view">
       <div id="expertTeamV3PortalRoot" data-expert-team-v3 data-expert-team-v3-surface="portal"></div>
+    </div>
+    <div id="mainZhinang" class="main-view" aria-labelledby="zhinangHeading">
+      <div class="zhinang-page-head">
+        <div><p class="zhinang-eyebrow">TAIJI KNOWLEDGE ROLES</p><h1 id="zhinangHeading" tabindex="-1">太极智囊</h1><p>选择一位专业角色，创建固定角色的新任务。</p></div>
+        <button type="button" class="zhinang-refresh" data-zhinang-action="refresh" aria-label="刷新智囊目录">刷新</button>
+      </div>
+      <div class="zhinang-main-layout">
+        <section class="zhinang-results" aria-label="智囊目录">
+          <div class="zhinang-view-tabs" role="group" aria-label="目录视图">
+            <button type="button" class="is-active" data-zhinang-view="featured">精选</button>
+            <button type="button" data-zhinang-view="all">全部</button>
+            <button type="button" data-zhinang-view="recent">最近使用</button>
+          </div>
+          <div id="zhinangStatus" class="zhinang-status" role="status" aria-live="polite"></div>
+          <div id="zhinangGrid" class="zhinang-grid"></div>
+          <nav id="zhinangPagination" class="zhinang-pagination" aria-label="智囊目录分页"></nav>
+        </section>
+        <div id="zhinangDetailBackdrop" class="zhinang-detail-backdrop" hidden></div>
+        <aside id="zhinangDetail" class="zhinang-detail" hidden aria-label="智囊详情"></aside>
+      </div>
     </div>
     <div id="mainWorkspaces" class="main-view">
       <div class="main-view-header">
@@ -2433,6 +2473,7 @@
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/zhinang.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>

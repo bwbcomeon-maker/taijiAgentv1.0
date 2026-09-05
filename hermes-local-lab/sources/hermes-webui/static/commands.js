@@ -41,6 +41,14 @@ const SLASH_SUBARG_SOURCES={
   writeflow:{desc:t('cmd_writeflow')||'运行写作工作流', subArgs:['start','status','next','redo','skip','export','style','extract','开始','状态','继续','返工','跳过','导出','风格','提取']},
 };
 
+function _isFixedZhinangRoleSession(){
+  return !!(typeof S!=='undefined'&&S&&S.session&&S.session.zhinang_role);
+}
+
+function _fixedZhinangPersonalityMessage(){
+  return '固定智囊角色任务不支持切换个性；如需其他角色，请从智囊库新建任务。';
+}
+
 function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
@@ -92,6 +100,14 @@ function getMatchingCommands(prefix){
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
+  }
+  if(_isFixedZhinangRoleSession()){
+    for(const item of matches){
+      if(item.name==='personality'){
+        item.disabled=true;
+        item.desc=_fixedZhinangPersonalityMessage();
+      }
+    }
   }
   return matches;
 }
@@ -201,7 +217,7 @@ async function _loadSlashPersonalitySubArgs(force=false){
 function _getSlashSubArgOptions(spec){
   if(Array.isArray(spec)) return Promise.resolve(spec.slice());
   if(spec==='models') return _loadSlashModelSubArgs();
-  if(spec==='personalities') return _loadSlashPersonalitySubArgs();
+  if(spec==='personalities') return _isFixedZhinangRoleSession()?Promise.resolve([]):_loadSlashPersonalitySubArgs();
   return Promise.resolve([]);
 }
 
@@ -1144,6 +1160,10 @@ if(typeof window!=='undefined')window.sendExpertTeamAction=sendExpertTeamAction;
 
 async function cmdPersonality(args){
   if(!S.session){showToast(t('no_active_session'));return;}
+  if(_isFixedZhinangRoleSession()){
+    showToast(_fixedZhinangPersonalityMessage());
+    return;
+  }
   if(!args){
     // List available personalities
     try{
@@ -1725,6 +1745,7 @@ function showCmdDropdown(matches){
     const c=matches[i];
     const el=document.createElement('div');
     el.className='cmd-item';
+    if(c.disabled){el.classList.add('is-disabled');el.setAttribute('aria-disabled','true');}
     if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
     const isSubArg=c.source==='subarg';
@@ -1738,6 +1759,7 @@ function showCmdDropdown(matches){
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
+      if(c.disabled)return;
       const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
       $('msg').value=nextValue;
       $('msg').focus();

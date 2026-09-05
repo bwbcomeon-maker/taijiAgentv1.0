@@ -2215,6 +2215,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof d.status==='string') tc.status=d.status;
       tc.done=typeof d.done==='boolean'?d.done:true;
       tc.is_error=!!d.is_error;
+      if(typeof d.artifact_path==='string') tc.artifact_path=d.artifact_path;
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
@@ -2459,7 +2460,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
             return hasTc||hasPartialTc||hasTu;
           });
-          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
+          const hasSessionArtifact=Array.isArray(d.session.tool_calls)&&d.session.tool_calls.some(tc=>tc&&typeof tc.artifact_path==='string'&&tc.artifact_path);
+          if((!hasMessageToolMetadata||hasSessionArtifact)&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
           } else {
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
@@ -2983,7 +2985,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
           return hasTc||hasPartialTc||hasTu;
         });
-        if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
+        const hasSessionArtifact=Array.isArray(session.tool_calls)&&session.tool_calls.some(tc=>tc&&typeof tc.artifact_path==='string'&&tc.artifact_path);
+        if((!hasMessageToolMetadata||hasSessionArtifact)&&session.tool_calls&&session.tool_calls.length){
           S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
         }else{
           S.toolCalls=[];

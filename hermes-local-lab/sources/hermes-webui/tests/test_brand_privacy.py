@@ -1060,15 +1060,17 @@ def test_public_egress_scrub_recursively_masks_credentials_in_all_visible_text()
 
 
 def test_public_tool_event_projection_drops_raw_operational_fields():
+    # Synthetic test data: preserve the runtime canary without storing a token-shaped literal.
+    token_canary = "sk-" + "TestCredential1234567890"
     payload = {
         "event_type": "tool.completed",
         "name": "terminal",
         "status": "completed",
         "duration": 1.25,
-        "summary": "已生成业务报告 /private/runtime/report.md token=sk-TestCredential1234567890",
+        "summary": f"已生成业务报告 /private/runtime/report.md token={token_canary}",
         "args": {
             "command": "cat /private/runtime/config.yaml",
-            "token": "sk-TestCredential1234567890",
+            "token": token_canary,
         },
         "result": {"path": "/private/runtime/report.md", "raw": "canary-result"},
         "path": "/private/runtime/report.md",
@@ -1090,7 +1092,7 @@ def test_public_tool_event_projection_drops_raw_operational_fields():
     serialized = json.dumps(cleaned, ensure_ascii=False)
     assert "已生成业务报告" in cleaned["summary"]
     assert "/private/runtime" not in serialized
-    assert "sk-TestCredential1234567890" not in serialized
+    assert token_canary not in serialized
     assert "canary-result" not in serialized
 
 
@@ -1121,6 +1123,48 @@ def test_public_tool_projection_preserves_only_typed_history_position_fields():
     )
     assert "assistant_msg_idx" not in rejected
     assert "done" not in rejected
+
+
+def test_public_tool_projection_accepts_only_workspace_relative_artifact_paths():
+    valid = public_egress_scrub(
+        {
+            "event_type": "tool.completed",
+            "name": "write_file",
+            "tid": "call-artifact-1",
+            "status": "completed",
+            "artifact_path": "reports/成果.md",
+        },
+        surface="stream",
+        event_name="tool_complete",
+    )
+    assert valid["artifact_path"] == "reports/成果.md"
+
+    for unsafe in ("/private/runtime/成果.md", "../成果.md", "https://example.test/a.md"):
+        cleaned = public_egress_scrub(
+            {"event_type": "tool.completed", "name": "write_file", "artifact_path": unsafe},
+            surface="stream",
+            event_name="tool_complete",
+        )
+        assert "artifact_path" not in cleaned
+
+    for unsafe_state in (
+        {"tid": "call-running", "status": "running"},
+        {"tid": "call-running-done", "status": "running", "done": True},
+        {"tid": "call-failed", "status": "failed", "is_error": True},
+        {"tid": "call-cancelled", "status": "cancelled"},
+        {"status": "completed"},
+    ):
+        cleaned = public_egress_scrub(
+            {
+                "event_type": "tool.completed",
+                "name": "write_file",
+                "artifact_path": "reports/不应公开.md",
+                **unsafe_state,
+            },
+            surface="stream",
+            event_name="tool_complete",
+        )
+        assert "artifact_path" not in cleaned
 
 
 def test_public_user_message_projection_preserves_internal_text_verbatim():

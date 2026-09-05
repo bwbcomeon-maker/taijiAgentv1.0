@@ -733,6 +733,33 @@ def _public_tool_projection(payload: Any, *, event_name: str | None = None) -> d
         cleaned["assistant_msg_idx"] = assistant_msg_idx
     if isinstance(source.get("done"), bool):
         cleaned["done"] = source["done"]
+    artifact_path = source.get("artifact_path")
+    status_value = str(status or "").strip().lower()
+    tool_name = str(
+        source.get("name") or source.get("tool") or function.get("name") or ""
+    ).strip()
+    tool_call_id = str(
+        source.get("tid") or source.get("tool_call_id") or source.get("id") or ""
+    ).strip()
+    successful_completion = (
+        bool(tool_name)
+        and bool(tool_call_id)
+        and not bool(source.get("is_error") or source.get("error"))
+        and status_value in {"completed", "success", "succeeded"}
+    )
+    if successful_completion and isinstance(artifact_path, str):
+        normalized = artifact_path.strip().replace("\\", "/")
+        parts = normalized.split("/")
+        if (
+            normalized
+            and len(normalized) <= 240
+            and not normalized.startswith("/")
+            and not re.match(r"^[A-Za-z]:", normalized)
+            and "://" not in normalized
+            and all(part not in {"", ".", ".."} for part in parts)
+            and not any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+        ):
+            cleaned["artifact_path"] = normalized
     return cleaned
 
 

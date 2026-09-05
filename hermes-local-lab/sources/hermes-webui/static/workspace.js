@@ -237,7 +237,7 @@ function _artifactCandidatesFromText(text){
   return out;
 }
 
-function _artifactCandidatesFromToolCall(tc){
+function _artifactCandidatesFromToolCall(tc, publicOnly=false){
   if(!tc) return [];
   const name = String(tc.name || '').replace(/^functions\./,'');
   const args = tc.arguments || tc.args || tc.input || {};
@@ -247,6 +247,13 @@ function _artifactCandidatesFromToolCall(tc){
     path = _normalizeArtifactPath(path);
     if(path) out.push({path, kind:source});
   };
+  const status=String(tc.status||'').toLowerCase();
+  const failed=!!tc.is_error||!!tc.error||['error','failed','failure','cancelled','canceled','denied','capability_blocked'].includes(status);
+  const succeeded=!failed&&(status==='completed'||status==='success'||status==='succeeded'||(tc.done===true&&!status));
+  if(succeeded&&typeof tc.artifact_path==='string'){
+    add(tc.artifact_path,'tool');
+  }
+  if(publicOnly||failed||status==='running'||status==='pending'||tc.done===false)return out;
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
     for(const key of ['path','file_path','source','destination']) add(args[key]);
     if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
@@ -312,17 +319,13 @@ function collectSessionArtifacts(){
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+    for(const a of _artifactCandidatesFromToolCall(tc,true)) push(a.path, a.kind || tc.name || 'tool');
   }
-  // Source 2 & 3: message-level data — both text-mined diffs and structured
-  // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
+  // Message-level public tool metadata survives the S.toolCalls clear. Only
+  // producer-validated artifact_path values become user-visible artifact cards;
+  // args/results/diff text remain internal preview-invalidation hints.
   for(const msg of (S.messages || [])){
     if(!msg) continue;
-    const text = msg.content || msg.text || msg.message || '';
-    // Text-mined diff/patch fences (existing path).
-    if(typeof text === 'string'){
-      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
-    }
     // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
     if(Array.isArray(msg.tool_calls)){
       for(const tc of msg.tool_calls){
@@ -331,8 +334,16 @@ function collectSessionArtifacts(){
         const name = fn.name || tc.name || '';
         let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
         if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
-        const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+        const fakeTc = {
+          name,
+          args,
+          result: tc.result || tc.output || '',
+          artifact_path: tc.artifact_path,
+          status: tc.status,
+          done: tc.done,
+          is_error: !!tc.is_error,
+        };
+        for(const a of _artifactCandidatesFromToolCall(fakeTc,true)) push(a.path, a.kind || name || 'tool');
       }
     }
     // Structured content array with tool_use blocks (Anthropic format).
@@ -341,8 +352,16 @@ function collectSessionArtifacts(){
         if(!block || block.type !== 'tool_use') continue;
         let inp = block.input || {};
         if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
-        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+        const fakeTc = {
+          name: block.name || '',
+          args: inp,
+          result: block.result || '',
+          artifact_path: block.artifact_path,
+          status: block.status,
+          done: block.done,
+          is_error: !!block.is_error,
+        };
+        for(const a of _artifactCandidatesFromToolCall(fakeTc,true)) push(a.path, a.kind || block.name || 'tool');
       }
     }
   }

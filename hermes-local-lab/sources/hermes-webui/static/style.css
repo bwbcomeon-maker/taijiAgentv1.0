@@ -3068,6 +3068,7 @@
 .cmd-dropdown.open{display:block;}
 .cmd-item{padding:8px 14px;cursor:pointer;transition:background .12s;}
 .cmd-item:hover{background:rgba(255,255,255,.07);}
+.cmd-item.is-disabled{opacity:.58;cursor:not-allowed;}
 .cmd-item.selected{background:var(--accent-bg);outline:1px solid var(--accent-bg-strong);}
 .cmd-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
 .cmd-item-name{font-size:13px;color:var(--text);font-weight:500;}
@@ -4050,18 +4051,20 @@ main.main > #mainMemory,
 main.main > #mainTasks,
 main.main > #mainKanban,
 main.main > #mainWriting,
+main.main > #mainZhinang,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainTodos,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-writing):not(.showing-workspaces):not(.showing-profiles):not(.showing-todos):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-writing):not(.showing-zhinang):not(.showing-workspaces):not(.showing-profiles):not(.showing-todos):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
 main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-writing > #mainWriting{display:flex;overflow-y:auto;}
+main.main.showing-zhinang > #mainZhinang{display:flex;overflow:hidden;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-todos > #mainTodos{display:flex;}
@@ -8374,6 +8377,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .taiji-home-shell main.main.taiji-real-main.showing-tasks > #mainTasks,
   .taiji-home-shell main.main.taiji-real-main.showing-kanban > #mainKanban,
   .taiji-home-shell main.main.taiji-real-main.showing-writing > #mainWriting,
+  .taiji-home-shell main.main.taiji-real-main.showing-zhinang > #mainZhinang,
   .taiji-home-shell main.main.taiji-real-main.showing-workspaces > #mainWorkspaces,
   .taiji-home-shell main.main.taiji-real-main.showing-profiles > #mainProfiles,
   .taiji-home-shell main.main.taiji-real-main.showing-todos > #mainTodos,
@@ -8388,6 +8392,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .taiji-home-shell main.main.taiji-real-main.showing-tasks > #mainChat,
   .taiji-home-shell main.main.taiji-real-main.showing-kanban > #mainChat,
   .taiji-home-shell main.main.taiji-real-main.showing-writing > #mainChat,
+  .taiji-home-shell main.main.taiji-real-main.showing-zhinang > #mainChat,
   .taiji-home-shell main.main.taiji-real-main.showing-workspaces > #mainChat,
   .taiji-home-shell main.main.taiji-real-main.showing-profiles > #mainChat,
   .taiji-home-shell main.main.taiji-real-main.showing-todos > #mainChat,

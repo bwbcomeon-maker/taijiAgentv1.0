@@ -650,6 +650,7 @@ async function newSession(flash, options={}){
     }
     updateQueueBadge(S.session.session_id);
     syncTopbar();renderMessages();
+    if(window.TaijiZhinang&&typeof window.TaijiZhinang.syncSessionRole==='function') void window.TaijiZhinang.syncSessionRole();
     if(options&&options.zhinang&&typeof _restoreComposerDraft==='function'){
       _restoreComposerDraft(data.session.composer_draft||{},S.session.session_id);
       const composer=$('msg');
@@ -1037,6 +1038,7 @@ async function loadSession(sid){
   } else {
     _hideHandoffHint();
   }
+  if(window.TaijiZhinang&&typeof window.TaijiZhinang.syncSessionRole==='function') void window.TaijiZhinang.syncSessionRole();
 }
 
 function _forceChatSessionPanel(){
@@ -1044,7 +1046,7 @@ function _forceChatSessionPanel(){
   if(layoutEl) layoutEl.classList.remove('writing-center-mode');
   const mainEl=document.querySelector('main.main');
   if(mainEl){
-    ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','todos','insights','logs','plugin'].forEach(panel=>{
+    ['settings','skills','memory','tasks','kanban','writing','zhinang','workspaces','profiles','todos','insights','logs','plugin'].forEach(panel=>{
       mainEl.classList.remove('showing-'+panel);
     });
   }
@@ -1635,11 +1637,13 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
     return hasTc||hasTu;
   });
-  if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length){
+  const hasSessionArtifact=Array.isArray(sessionToolCalls)&&sessionToolCalls.some(tc=>tc&&typeof tc.artifact_path==='string'&&tc.artifact_path);
+  if((!hasMessageToolMetadata||hasSessionArtifact)&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length){
     S.toolCalls=sessionToolCalls.map(tc=>({...tc,done:true}));
   }else{
     S.toolCalls=[];
   }
+  if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
 }
 
 async function _ensureMessagesLoaded(sid) {

@@ -102,3 +102,77 @@ def test_guard_present_in_source():
         "OpenAI tool_calls loop must guard malformed entries before "
         "dereferencing tc.function (#3329 Codex regression-gate finding)"
     )
+
+
+def test_public_completed_artifact_path_is_listed_but_failed_path_is_not():
+    messages = [{"tool_calls": [
+        {
+            "name": "write_file",
+            "artifact_path": "成果.md",
+            "status": "completed",
+            "done": True,
+            "is_error": False,
+        },
+        {
+            "name": "write_file",
+            "artifact_path": "失败.md",
+            "status": "failed",
+            "done": True,
+            "is_error": True,
+        },
+    ]}]
+
+    assert _collect_via_node(messages) == ["成果.md"]
+
+
+def test_anthropic_public_artifact_path_is_listed_after_windowed_reload():
+    messages = [{
+        "role": "assistant",
+        "content": [{
+            "type": "tool_use",
+            "id": "anthropic-1",
+            "name": "write_file",
+            "artifact_path": "报告/成果.md",
+            "status": "completed",
+            "done": True,
+            "is_error": False,
+        }],
+    }]
+
+    assert _collect_via_node(messages) == ["报告/成果.md"]
+
+
+def test_public_artifacts_ignore_private_metadata_and_assistant_only_diffs():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "```diff\n--- a/model_only.md\n+++ b/model_only.md\n```",
+            "tool_calls": [
+                {
+                    "name": "write_file",
+                    "status": "failed",
+                    "is_error": True,
+                    "args": {"path": "failed.md"},
+                },
+                {
+                    "name": "write_file",
+                    "status": "cancelled",
+                    "args": {"path": "cancelled.md"},
+                },
+                {
+                    "name": "patch",
+                    "status": "failed",
+                    "is_error": True,
+                    "result": "```diff\n--- a/failed.py\n+++ b/failed.py\n```",
+                },
+                {
+                    "name": "write_file",
+                    "status": "running",
+                    "done": True,
+                    "artifact_path": "running.md",
+                },
+            ],
+        }
+    ]
+
+    assert _collect_via_node(messages) == []

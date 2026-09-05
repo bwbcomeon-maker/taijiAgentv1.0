@@ -1,6 +1,6 @@
 # 太极智囊实施与验收台账
 
-> 状态更新：2026-09-05（阶段 2 已审核并提交；阶段 3 目录、详情、收藏与最近使用后端实施中）
+> 状态更新：2026-09-05（阶段 2、3 已审核并本地提交；阶段 4 阻断项已闭合、全量门禁通过，当前完成但有两项已知 P2 限制）
 > 功能契约：[太极智囊 PRD](../requirements/2026-09-05-taiji-zhinang-prd.md)
 
 ## 当前状态卡
@@ -8,12 +8,12 @@
 | 项目 | 已验证状态 |
 | --- | --- |
 | 物理仓库 / Git common dir | `/Users/bwb/Documents/工作/taiji-agentv1.0` / `.git` |
-| 开发线与基线 | `main@d3a108c6d373da767b55ecf82c1f7cd4b249bc99`；`origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e`，本地领先 3、远端未领先；阶段 2 已在本地提交，阶段 3 结论绑定当前未提交工作树 |
+| 开发线与基线 | `main@ce4aadd17b526f50c96d436860db117105b7db27`；与未刷新本地跟踪引用 `origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e` 比较为 `4 0`，不能证明当前远端状态；阶段 3 已在本地提交，阶段 4 结论绑定当前未提交工作树 |
 | 写入边界 | 当前实施者是共享工作树及 Git index 唯一写入者；其他协作者只读 |
-| 当前证据层 | 本地源码与资源；目录/详情/收藏/最近使用 HTTP 路由、真实 `AIAgent` 到 mock Provider、持久化/重启和静态前端契约证据；尚无可见智囊页面或浏览器证据 |
-| 已完成 | 274 个中文角色资源对账；服务端完整不可变角色快照；幂等新建与历史详情；目录筛选及 24 条分页、固定 6 精选、完整安全当前详情；profile 权威原子收藏与下架取消；基于真实受理记录的最近任务回溯；每轮角色注入及压缩、重启、复制/分支/清空契约；按 SID 串行草稿与未上传 `File` 内存隔离 |
-| 未完成 | 智囊库可见页面及相关浏览器验收；A07 保存失败浏览器交互；A13/A14/A17；F01–F12 和 A01–A17 整体验收 |
-| 当前出口 | 阶段 2 已经 fresh Sol v4 审核通过并本地提交 `d3a108c6d373da767b55ecf82c1f7cd4b249bc99`；阶段 3 已按 RED→GREEN 完成实施，79 项聚焦/关联回归及统一 `scripts/verify.sh --full` 全部 PASS，待精确暂存、新哈希与 fresh Sol 终审；终审 PASS 前不提交，不重试未获具体远端授权的 push |
+| 当前证据层 | 本地源码与资源；生产 WebUI HTTP 路由、真实 `AIAgent` 到 loopback mock Provider、真实持久化/进程重启、真实 `write_file` 写盘/预览/下载，以及规定视口的 headless Chromium 证据；不外推为安装态、目标机、真实模型或发布态 |
+| 已完成 | 274 个中文角色资源对账；完整不可变角色快照；目录/筛选/详情/收藏/最近；幂等新建和草稿/File 安全；现有外壳内完整智囊 UI；角色持续注入；附件与真实文件产物；取消/模型失败恢复；下架、键盘、焦点、响应式、性能及原产品回归 |
+| 未完成 | 修正候选完整暂存内容的 fresh Sol 最终结论和通过后的本地提交。宽屏详情卡片选中态与收藏重渲染后的焦点恢复为已知 P2；axe 专用扫描、像素基线视觉回归、真实模型、安装态和目标机验收不在本轮已验证证据层 |
+| 当前出口 | 阶段 2 本地提交 `d3a108c6d373da767b55ecf82c1f7cd4b249bc99`，阶段 3 fresh Sol 终审通过后本地提交 `ce4aadd17b526f50c96d436860db117105b7db27`；阶段 4 首轮暂存终审的三项 P1 已闭合，修正候选 full 和最终浏览器主链通过，复审阶段性结论无 P0/P1、保留两项 P2。等待文档更新后的完整暂存最终结论；未获具体远端授权，不 push |
 
 ## 工具链与隔离环境
 
@@ -22,9 +22,9 @@
 | Python | 阶段 0/1 纯目录使用 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3`；阶段 2 WebUI 使用仓库 Agent venv 的 Python 3.11，并同时固定 `HERMES_WEBUI_AGENT_DIR` 与 `HERMES_WEBUI_PYTHON` |
 | Node | `/Users/bwb/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node`，Node v24.19.0 |
 | npm | 上述 Node 执行 `/Users/bwb/.hermes/node/lib/node_modules/npm/bin/npm-cli.js`，npm 11.19.0 |
-| Playwright | `NODE_PATH=/Users/bwb/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules`；`require.resolve('playwright')` 指向该固定目录 |
+| Playwright | 显式 `PLAYWRIGHT_NODE_PATH=/Users/bwb/.codex/skills/huashu-design/node_modules/playwright-core`；正式 harness 拒绝缺省模块路径，不自动安装 |
 | Chromium | 使用现有 `~/Library/Caches/ms-playwright/chromium-*`，不下载或启动默认浏览器 |
-| 自动化状态根 | 每组使用独立 `/private/tmp/taiji-zhinang-*-state`；同时固定 `HERMES_WEBUI_STATE_DIR`、`HERMES_WEBUI_TEST_STATE_DIR`、`HERMES_HOME`、`HERMES_BASE_HOME` |
+| 自动化状态根 | 每组使用独立 `/private/tmp/taiji-zhinang-*`；同时固定 `HERMES_WEBUI_STATE_DIR`、`HERMES_WEBUI_TEST_STATE_DIR`（pytest）、`HERMES_HOME`、`HERMES_BASE_HOME`、`TAIJI_RUNTIME_HOME` |
 | 自动化配置 / 工作区 | 每组独立 `/private/tmp/taiji-zhinang-*-home/config.yaml` / `/private/tmp/taiji-zhinang-*-workspace`；固定 `HERMES_CONFIG_PATH` 与 `HERMES_WEBUI_DEFAULT_WORKSPACE` |
 | 服务与 Provider | 运行时选择空闲 loopback 端口；mock Provider 只监听 loopback；同时设置 `TAIJI_WEBUI_TEST_NETWORK_BLOCK=1` 和现有测试使用的 `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` |
 | 凭据隔离 | 复用 `tests/conftest.py` 的完整 Provider、AWS、记忆、消息、浏览/搜索与 GitHub 凭据前缀剥离清单；真实 Provider/OAuth 不进入自动化 |
@@ -42,7 +42,7 @@
 | 原文规模 | 3,870,844 bytes；单个源文件均小于 1 MiB |
 | 试导入与产品资源 | `/private/tmp/taiji-zhinang-source-smoke-v2` 与 `hermes-webui/data/zhinang` 均为 273 个角色加清单、分区和许可，共 276 个文件；`--check` 已通过 |
 | 稳定身份 | 上游角色为 `agency:<source_path 去掉 .md>`；目录版本 `agency-agents-af128a92888f-source-v1`；原文字节数及 SHA-256 写入清单 |
-| 存储分层 | `upstream/agency-agents` 只存原文；中文展示与本地运行适配使用独立版本化资源，后续批次实现 |
+| 存储分层 | `upstream/agency-agents` 只存原文；中文展示与本地运行适配使用独立版本化资源，当前实现继续保持分层 |
 | 中文展示 / 运行适配 | 中文资源 `584049` bytes，SHA-256 `b2122872c03981332854d1afc2c425ad5d63c59ce8a4ec4b9ae3d852d83c45c6`；运行适配 `taiji-zhinang-runtime-v3` 依次组合逐字节原文、角色级 limitations/adaptation_note 和最终通用规则，覆盖语言、资质、证据、权限及角色文本不得自行触发多 Agent 的边界 |
 
 首批只提交 PRD、台账、导入器、只读加载器和双哨兵测试。完整上游原文、`divisions.json`、许可证和生成清单作为独立资源批进入工作树，按完整文件字节计量并保持每批小于 4 MiB；任一新增文件小于 1 MiB。中文展示和运行适配不与 3.87 MB 原文批次混装。
@@ -57,42 +57,42 @@
 
 | 功能 | 状态 | 当前证据 / 下一步 |
 | --- | --- | --- |
-| F01 智囊库入口与外壳 | 未开始 | 阶段 4 接入现有导航与品牌 |
-| F02 内置角色目录 | 实施中 | 273 个固定上游角色加 1 个本地角色的中文展示层已入库并与来源逐项对账；完整目录接口/UI 留待后续阶段 |
-| F03 分类、搜索、精选与全部角色 | 实施中 | 正交范围/领域/视图/搜索筛选、24 条分页及固定 6 精选接口契约已通过；阶段 4 实现 UI |
-| F04 我的收藏 | 实施中 | profile 权威状态、原子写入、进程内并发保护、重启等价重读及下架取消接口已通过；阶段 4 实现 UI |
-| F05 最近使用 | 实施中 | 从真实受理元数据选取最新可见执行 tip，压缩展示快照与可继续 tip 分离，删除后按同角色其他独立任务回溯；阶段 4 实现 UI |
-| F06 角色卡片及详情 | 实施中 | 卡片安全列表投影与完整当前详情 API 已通过；阶段 4 实现卡片与详情 UI |
-| F07 完整角色说明与来源 | 实施中 | 当前目录详情可查原文、版本、改编、固定 source URL 和完整 MIT 文本；历史详情沿用任务快照且不返回内部提示词；UI 留待阶段 4 |
-| F08 示例任务 | 实施中 | 服务端原子保存新任务草稿；前端按 SID 串行 debounce/立即/切换前/clear 四种写入，切换前等待旧写入后提交最新文本；原生 `File` 仅按 SID 保存在内存，成功切换隔离、失败保持原任务状态；示例 UI 与保存失败浏览器交互未实现 |
-| F09 使用此智囊 | 待验收 | `role_id/catalog_version/request_id` 幂等创建、参数冲突和非法环境拒绝已通过 HTTP 测试；可见入口待阶段 4 |
-| F10 持续角色上下文 | 待验收 | sync、streaming、Gateway、缓存、自愈、压缩、重启、复制/分支/清空均保存或重放固定快照；浏览器端标签待阶段 4 |
-| F11 既有聊天与成果链路 | 未开始 | 阶段 5 mock Provider、附件与真实文件产物验收 |
-| F12 完整状态与可访问性 | 未开始 | 阶段 4/5 状态、键盘、响应式及错误注入 |
+| F01 智囊库入口与外壳 | 通过 | 三个既有导航面均可真实点击进入“智囊库”，保留国网品牌与原产品外壳；`viewports`、`regression` 通过 |
+| F02 内置角色目录 | 通过 | 273 个固定上游角色加 1 个本地角色的中文层、真实目录 API 和可见列表通过 A01/A02/A17 |
+| F03 分类、搜索、精选与全部角色 | 通过 | 正交筛选、24 条分页、固定 6 精选、竞态与 500 条性能通过 A03/A17 |
+| F04 我的收藏 | 通过 | profile 权威原子收藏、双 Store/双窗口、失败恢复和真实 WebUI 重启通过 A04/A12/A14 |
+| F05 最近使用 | 通过 | 真实受理最近、展示快照与可继续 tip 分离、删除/分支/复制回退和 UI 继续入口通过 A05/A12 |
+| F06 角色卡片及详情 | 通过 | 安全卡片、明确“查看详情”、完整详情、可重试与响应式 drawer/aside 通过 A06/A14/A15；宽屏 aside 当前卡片尚无选中高亮/`aria-selected`（P2） |
+| F07 完整角色说明与来源 | 通过 | 当前/历史说明、改编、版本、MIT、固定来源及 HTTP(S) 白名单通过 A06/A12/A15 |
+| F08 示例任务 | 通过 | 所选示例预填且 0 模型调用；普通创建空白；失败保留原 SID/草稿/File；切换隔离通过 A07 |
+| F09 使用此智囊 | 通过 | 可见 CTA、无模型创建、请求幂等、受理后可新建与继续并存通过 A05/A08/A09 |
+| F10 持续角色上下文 | 通过 | Provider 实际注入、可见角色标签、缓存/self-heal/压缩/重启/复制/分支/清空通过 A10/A11 |
+| F11 既有聊天与成果链路 | 通过 | 附件进入真实 Agent、`write_file` 真写盘、预览/下载/刷新、取消与失败不出假成果通过 A13/A16 |
+| F12 完整状态与可访问性 | 通过 | 加载/空态/错误/重试、原生键盘、焦点、五视口/边界/200% 和外网阻断通过 A01/A14/A17；收藏后的 grid DOM 重建尚未恢复对应按钮键盘焦点（P2） |
 
 ## A01–A17 验收台账
 
 | 用例 | 状态 | 计划证据 / 当前边界 |
 | --- | --- | --- |
-| A01 来源和范围 | 未开始 | 真实 WebUI 导航、品牌与排除项浏览器证据 |
-| A02 目录对账 | 通过 | 273 个固定源加 1 个本地角色与中文层 274 项逐项对账；必填字段、六分类、能力 3–5、交付示例 2–3、固定提交和有效提示词均由聚焦测试验证 |
-| A03 筛选分页 | 实施中 | 中英文/标签搜索、领域、精选、收藏、最近正交与稳定 24 条分页接口契约通过；500 条 30 次性能实测及浏览器竞态留待后续 |
-| A04 收藏持久化 | 实施中 | 两个独立 Store 实例并发写、新实例重读、profile 隔离、幂等取消和 `os.replace` 故障前后磁盘不变已通过；多窗口与真实服务重启留待 UI 阶段 |
-| A05 使用事实 | 实施中 | sync、streaming 与 Gateway 受理时间/请求去重已通过；最近查询分离展示快照与执行 tip，并重验 profile、角色、snapshot 与可见性，tip→branch→duplicate→全删回退通过；产品 UI 待验收 |
-| A06 详情真实性 | 实施中 | 当前详情从固定目录生成，包含原文、改编、版本、完整 MIT 和固定来源；历史详情从会话快照读取，二者都排除内部有效提示词；卡片/详情 UI 未实现 |
-| A07 示例与草稿 | 实施中 | Node 24 实际函数测试以 deferred Promise 证明同 SID 的 debounce/立即/切换前/clear 串行，旧请求不能反写最新文本或 clear，失败链允许后续显式重试；原生 `File` 不进入 JSON，成功新建/切换按 SID 隔离并能切回同一对象，创建或切换前保存失败保持原 SID/文本/附件；真实浏览器提示和模型调用计数待后续 |
-| A08 创建幂等 | 通过 | HTTP 顺序重放、两线程并发、同请求不同参数冲突均通过；持久请求在重启等价读取时先于当前目录解析，即使目录版本变化或角色移除仍返回原 SID；坏 sidecar 逐文件隔离，有目标时继续重放、无法证明 request_id 不存在时 409 fail-closed；带草稿关联一致，空角色任务沿用不落盘生命周期 |
-| A09 环境不被替换 | 待验收 | 无模型创建、非法档案/项目/工作区拒绝、创建 body 不得覆盖请求活动 profile、合法命名 profile 可创建、配置文件字节不变及工具不增权规则通过聚焦测试；完整可见流程待后续 |
-| A10 真正进入模型 | 通过 | 两个角色唯一哨兵经真实 `run_agent.AIAgent` 到 mock `client.chat.completions.create`，sync 与 streaming 各验证两轮：所选出现、另一角色与旧 personality 不出现；编排角色在 `delegate_task` schema 保留时，覆盖性单角色禁令位于上游委派指令之后并进入实际 SDK 请求；医疗编码和法律审阅两个资质敏感角色的 limitations/adaptation_note 位于原文声明之后、最终通用规则之前并进入实际 SDK 请求 |
-| A11 生命周期一致 | 待验收 | 第二轮、缓存复用、两条 credential self-heal worker 的重建后真实 SDK 请求、压缩父快照/metadata-only tip、重启、复制/分支/清空通过；可见标签和重试 UI 待后续 |
-| A12 更新与损坏 | 实施中 | 目录更新/角色移除不影响旧任务快照和幂等重放；快照 schema v2 canonical digest 篡改在 Provider 前 fail-closed，损坏任务列表隔离；下架收藏按保留名称/分类/标签/摘要筛选，详情不伪造原文，HTTP 取消后失效条目消失已通过；可见 UI 待验收 |
-| A13 聊天与产物 | 未开始 | mock Provider 下附件、流式、取消、失败恢复和真实产物 |
-| A14 状态与键盘 | 未开始 | 故障注入、Tab/Escape/焦点和各视口 |
-| A15 安全边界 | 实施中 | 清单寻址、路径穿越、完整快照摘要损坏、角色不增权、角色文本不得自行触发 spawn/delegate/team、角色级资质边界实际注入、公开字段白名单、内部提示词不泄露和历史角色说明跨 profile 404 已覆盖；可见 HTML/链接行为待 UI 阶段 |
-| A16 产品回归 | 实施中 | 阶段 3 智囊目录/会话/收藏/最近关联 79 项通过，统一 `scripts/verify.sh --full` 原入口再次通过；历史关联集的 1 项未修改 boot.js 词法断言和 13 项 Gateway 签名失配均为下方已隔离基线；完整可见 UI 回归待后续 |
-| A17 本地可用与性能 | 未开始 | 外网阻断、长内容及 500 条连续 30 次 p95 实测 |
+| A01 来源和范围 | 通过 | 真实源码 WebUI 三个导航入口、国网品牌和排除项检查；`viewports` 87 checks 与独立 UX 复核通过 |
+| A02 目录对账 | 通过 | 273 个固定源加 1 个本地角色与中文层 274 项逐项对账；必填字段、六分类、能力 3–5、交付示例 2–3、固定提交和有效提示词由聚焦测试验证 |
+| A03 筛选分页 | 通过 | 中英文/标签搜索、领域、精选、收藏、最近正交与稳定 24 条分页通过；500 条 30 次真实 HTTP/浏览器性能见 `performance` 67 checks |
+| A04 收藏持久化 | 通过 | 两独立 Store 并发、磁盘故障不变、双窗口、profile 隔离与真实 WebUI 重启见 `lifecycle` 19 checks |
+| A05 使用事实 | 通过 | sync/streaming/Gateway 受理、最近 tip 安全解析及删除回退通过；浏览器验证示例 0 调用、受理后新建与继续并存 |
+| A06 详情真实性 | 通过 | 当前详情来自固定目录、历史详情来自会话快照，含原文/改编/版本/MIT/来源且不泄露内部提示词；浏览器完整显示 |
+| A07 示例与草稿 | 通过 | Node 竞态契约及 `draft-idempotency` 11 checks：选例 0 调用、失败保留原 SID/文本/原生 File、成功后隔离 |
+| A08 创建幂等 | 通过 | HTTP 顺序/并发/冲突/重启 replay 与浏览器双击、受理后 504、同 request_id 重试均通过 |
+| A09 环境不被替换 | 通过 | 无模型创建、非法上下文拒绝；浏览器断言 active profile/workspace/model/provider 与 config 文件 SHA 不变 |
+| A10 真正进入模型 | 通过 | 多角色真实 `AIAgent` mock SDK 覆盖 sync/streaming/self-heal；浏览器主链再次观察所选角色与工具 schema 进入 Provider |
+| A11 生命周期一致 | 通过 | 后端覆盖缓存、压缩、复制/分支/清空；`lifecycle` 以同 SID 真重启验证完整 snapshot/effective prompt/Provider system 哈希一致 |
+| A12 更新与损坏 | 通过 | schema2 canonical digest、坏 sidecar 隔离、目录移除与 replay 通过；`removed` 验证下架保留安全摘要、历史入口与取消 |
+| A13 聊天与产物 | 通过 | `flow`/`recovery`：真实附件、流式 Agent、`write_file` 磁盘/下载 SHA、追问/刷新、取消/模型失败恢复且无假成果 |
+| A14 状态与键盘 | 通过 | `faults` 与 `viewports` 覆盖加载/目录/详情/收藏故障、retry、Tab/Shift+Tab/Escape/焦点恢复、裁剪及 hit-test |
+| A15 安全边界 | 通过 | 后端路径/快照/profile/权限边界与前端 HTML 转义、HTTP(S) 来源白名单、外网请求零记录均通过 |
+| A16 产品回归 | 通过 | `regression` 12 checks：普通聊天、personality、模型配置、草稿/会话同步、写作/专家团真实启动与重载；固定角色人格入口禁用 |
+| A17 本地可用与性能 | 通过 | 双 network block、浏览器外部请求零；500 条真实 HTTP 目录 30 次 p95 `16.888917 ms`，防抖后交互 p95 `44.883083 ms`，长内容可达 |
 
-浏览器视口固定覆盖 PRD 的五种尺寸，另测现有外壳断点 `900/901/902` 与桌面断点 `1023/1024/1025`，并执行 200% 缩放。浏览器、截图、可访问性和视觉回归当前均为**未验证**。
+浏览器已覆盖 PRD 的五种尺寸，另测现有外壳断点 `900/901/902`、详情边界 `1023/1024/1025` 和 200% 缩放。键盘、焦点、ARIA/语义、截图、几何裁剪与 hit-test 已验证；axe 专用扫描和像素基线自动视觉回归未验证，不能由人工/语义检查替代。
 
 ## 验证记录与故障边界
 
@@ -149,6 +149,24 @@
 | 2026-09-05 | 阶段 3 `py_compile`、`git diff --check`、`python3 scripts/check-local-change-safety.py` | PASS；4 个预计交付文件完整体积 `1,296,135` bytes，低于单批 4 MiB 门禁 |
 
 | 2026-09-05 | 阶段 3 当前未暂存候选，保留正常账户 `HOME/TMPDIR`、独立 Hermes home/base/state/config/workspace、显式清除凭据、双 network block 且由 conftest 自动选择跨进程端口/测试状态，执行原入口 `scripts/verify.sh --full` | PASS：local change safety PASS；root `1334 tests in 552.556s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint PASS；WebUI 注册集 `952 passed, 1 warning in 27.26s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`；日志 `/private/tmp/taiji-zhinang-stage3-full.log` |
+| 2026-09-05 | 阶段 3 完整暂存 fresh Sol 终审及本地提交 | PASS：plain diff `72159` bytes / SHA-256 `1a6c978b8832910c23d6bd7e497807ab05ed95a4e7f1d7064101d4ee45a3b4fd`；full-index `72415` bytes / SHA-256 `5d4819fe7bf14165449005769da655e2a9f19d5dc14ea5c530edec3f4cfe8d24`；提交 `ce4aadd17b526f50c96d436860db117105b7db27`，未 push |
+| 2026-09-05 | 阶段 4 UI 与产物桥接聚焦 RED→GREEN | 初始 RED 捕获缺少可见智囊页面、收藏/焦点失败状态、非 HTTP(S) 来源、角色标签 hit-test、工具成果元数据丢失及失败假成果；修正后 Python 聚焦 `110 passed`、Node 草稿运行契约 `10 passed`，后续最终聚焦以本批收尾记录为准 |
+| 2026-09-05 | 详情“继续最近任务”后端字段假设核查 | 撤销：曾推测当前详情 API 缺少 continue 会使 UI 丢入口；实际最近卡片已携带通过安全 resolver 的 `continue_session_id`，浏览器中卡片继续与详情新建并存，后端 `zhinang.py`/相关测试未因此改动 |
+| 2026-09-05 | 隔离浏览器 `flow` / `faults` / `draft-idempotency` / `recovery` / `removed` / `regression` | PASS：修正前完整主链为 40 checks；最终同一正式 runner 为 45 checks / 9 Provider requests，新增 assistant-only diff 在刷新前后均无假成果卡；其余范围分别为 14/11/12/10/12 checks。主链使用真实 WebUI、真实 `AIAgent`、loopback Provider 与真实 `write_file`，route mock 仅用于指定故障和下架投影；完整 JSON 与截图见阶段 4 UX 报告 |
+| 2026-09-05 | 隔离浏览器 `viewports` | PASS：87 checks；覆盖 1440×900、1280×800、1024×768、768×1024、390×844、900/901/902、1023/1024/1025 与 200% 缩放 |
+| 2026-09-05 | 隔离浏览器 `performance` | PASS：500 条数据经生产 HTTP handler/query/paging，30 次 HTTP p95 `16.888917 ms`，30 次浏览器防抖后可交互 p95 `44.883083 ms`，报告保留原始样本、算法与运行版本 |
+| 2026-09-05 | 隔离浏览器 `lifecycle` 最终专项 | PASS：19 checks / 4 Provider requests；同 SID 经真实 WebUI SIGTERM/新 PID 后继续发送，完整 schema2 snapshot、effective prompt digest 与 Provider 角色 system hash 前后一致；报告 SHA-256 `74efcf70492c66f7d004b69f7be226e5d1e17a25ff2bb2ac2fe002ba4355a78d` |
+| 2026-09-05 | 独立 Sol UX 复核 | PASS：1440/1024/768/390、宽屏 aside 与角色标签空白/草稿/消息三态原生点击均通过；有界范围无遗留 P0/P1/P2。报告 `/private/tmp/taiji-zhinang-independent-ux-review.md`，SHA-256 `b27fc112e9c851ef05aa03e8688266878d9ecc3fd89477a6dcdadf7270ff92a0` |
+| 2026-09-05 | 阶段 4 最终聚焦与关联契约 | PASS：受影响 Python `93 passed, 1 warning in 2.29s`；阶段 2/3 关联 `79 passed, 1 warning in 18.39s`；Node 24 草稿/File 运行契约 `10 passed`；Python/JS 语法和 `git diff --check` 通过 |
+| 2026-09-05 | 关联契约首次环境偏差 | 首次为 `74 passed, 5 failed`；额外设置 `TAIJI_RUNTIME_HOME` 触发产品 single-runtime，导致 profile 创建被拒及 default/research 合并。按既有多 profile pytest 环境 unset 该变量、保持独立 HERMES 根和双 network block 后同 79 项通过，未放宽 profile 断言；真实浏览器继续固定独立 `TAIJI_RUNTIME_HOME` |
+| 2026-09-05 | 本地安全门禁首次检查阶段 4隐私测试 | 唯一 finding 是已存在的合成 `sk-...` canary 在完整变更文件中触发 `high-confidence-token`；测试改为运行时拼接同一 canary，隐私断言和实际字符串不变，单测通过且未改安全脚本/白名单；复验 `local change safety: PASS` |
+| 2026-09-05 | 阶段 4 当前工作树，以固定 Node 24、正常账户 `HOME/TMPDIR`、独立 Hermes home/base/state/config/workspace、凭据清除、双 network block 和 pytest 自动端口执行原入口 `scripts/verify.sh --full` | PASS：local change safety；root `1334 tests in 552.907s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint；WebUI `953 passed, 1 warning in 27.10s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`。日志 `/private/tmp/taiji-zhinang-stage4-full.log`，SHA-256 `02fdd8a433e448a49cdc8c8eb34e656b5dcd8eeea0f28292b1b2657ec5c78ab5` |
+| 2026-09-05 | 阶段 4 首轮完整暂存 Sol 终审 | FAIL：确认三项 P1——running/failed/cancelled/无工具 ID 的公开事件仍可携 `artifact_path`；Anthropic `content[].tool_use` 未回写成功成果，在 `msg_limit` 清空 session summaries 后刷新丢失；前端从失败工具私有 args/result 或 assistant-only diff 推测假成果。报告 `/private/tmp/taiji-zhinang-stage4-final-sol-review.md`，SHA-256 `6b0e805d0553d434573b73b62a2c5c9b130628762af9180fb45e5d60964e2ef5`；首轮暂存哈希失效，未 commit |
+| 2026-09-05 | 首轮终审修正 RED→GREEN | RED 正式反例见 `/private/tmp/taiji-stage4-review-backend-red.log` 与 `/private/tmp/taiji-stage4-review-workspace-red.log`；修正后只允许明确成功、非错误、非空工具 ID 且名称匹配的公开成果投影，Anthropic/OpenAI 均回写并在 Provider 请求前移除 WebUI 专用字段；可见 collector 不再挖私有 args/result 或 assistant-only diff，内部 diff 仅供预览缓存失效 |
+| 2026-09-05 | 修正轮聚焦与真实公共入口 | PASS：新增/受影响 5 项为 `5 passed`，其中真实隔离 HTTP `GET /api/session?messages=1&resolve_model=0&msg_limit=30` 验证 Anthropic 窗口刷新，固定 Node 24 验证实际 collector；三份受影响测试文件为 `87 passed, 1 warning`。最终真实浏览器 `flow` 为 `45 checks / 9 Provider requests`，0 console/page/external，JSON SHA-256 `aa53751272dfe63aa7a0de2ad8f7bb410623d33c54d673a2d5be2befb8437107`，runner SHA-256 `e8ec954c925d7443d8d77621a625c9cbdbfdd0e8a429cb0c9d0236faedb02e1a` |
+| 2026-09-05 | 修正候选原入口 `scripts/verify.sh --full` | PASS：full 启动后产品三文件保持冻结；local change safety；root `1334 tests in 544.330s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint；WebUI `953 passed, 1 warning in 27.11s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`。日志 `/private/tmp/taiji-zhinang-stage4-review-fix-full.log`，SHA-256 `9135086839b36345c8572054976618af52b0b9038b2f263828d5d861c0a33245`。full 运行中仅为补实际浏览器证据修改正式 runner，full 不执行该 runner；最终 runner 字节随后由上述 `flow` 单独验证 |
+| 2026-09-05 | 修正候选 Sol 复审阶段性结论 | 旧三项 P1 均闭合，无新 P0/P1；记录两项非阻断 P2：宽屏详情 aside 缺少当前卡片选中样式/`aria-selected`，收藏触发目录重渲染后未恢复到对应按钮的键盘焦点。按本轮修正上限不再改产品，文档准确标注限制后重新绑定完整暂存内容 |
+| 2026-09-05 | 阶段 4 最终完整文件预算 | 修正候选为 `3,822,172` bytes / 21 files，低于单批 4 MiB 门禁；每个新增文件小于 1 MiB |
 
 ### 既有 Gateway 基线问题
 
@@ -156,4 +174,4 @@
 
 本批 diff 未修改 `_stream_gateway_run_events` 的定义。为排除导入路径或猴子补丁影响，使用 `git archive HEAD` 解出独立 `/private/tmp/taiji-zhinang-head-baseline`，以相同隔离环境单独执行首个代表 node ID；纯 `HEAD@266dfd73` 同样得到上述 TypeError。`scripts/verify.sh` 的 WebUI 952 注册计划只列品牌、模型配置、审批、专家团前端等选择器，不包含 `test_webui_gateway_chat_backend.py`，因此历史 952 通过与该问题不矛盾。本阶段不扩大范围修复该既有签名问题，也不把它表述为智囊核心阻断。
 
-后续每批在暂存前运行聚焦测试和 `scripts/check-local-change-safety.py`，记录完整文件字节；任何 staged bytes 变化都会使原终审失效。全量 `scripts/verify.sh --full`、浏览器流程、独立前端只读审查和 Sol 暂存终审按阶段执行，未执行时不标为通过。
+阶段 4 修正候选在精确暂存后运行 `scripts/check-local-change-safety.py` 和一次必要的 `scripts/verify.sh --full`，并记录完整文件字节；任何 staged bytes 变化都会使终审失效。完整暂存内容须经新的 Sol 终审 PASS 后才能本地提交。

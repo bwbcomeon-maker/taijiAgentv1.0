@@ -41,6 +41,7 @@ const APP_TITLEBAR_KEYS = {
   writing: 'tab_writing', memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
+const APP_TITLEBAR_LABELS = {zhinang: '智囊库'};
 
 /**
  * Update the top app titlebar to reflect the current page or selected conversation.
@@ -61,7 +62,7 @@ function syncAppTitlebar() {
     if (S.session.is_cli_session) sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
-    mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
+    mainText = APP_TITLEBAR_LABELS[panel] || (key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1)));
   }
 
   // Don't touch the element while an inline rename is in progress — replacing
@@ -251,7 +252,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','todos','insights','logs','plugin'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','writing','zhinang','workspaces','profiles','todos','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -262,6 +263,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'writing') await loadWriteflow();
+  if (nextPanel === 'zhinang' && window.TaijiZhinang && typeof window.TaijiZhinang.activate === 'function') await window.TaijiZhinang.activate();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
@@ -275,7 +277,11 @@ async function switchPanel(name, opts = {}) {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }
-  if (opts.fromRailClick && nextPanel !== 'writing' && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+  if (opts.fromRailClick && nextPanel === 'zhinang' && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    // Zhinang owns the full mobile canvas. Close the hamburger drawer after
+    // its navigation item is chosen so it cannot intercept catalog gestures.
+    if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+  } else if (opts.fromRailClick && nextPanel !== 'writing' && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
     const sidebar = document.querySelector('.sidebar');
     const overlay = document.getElementById('mobileOverlay');
     if (sidebar) sidebar.classList.add('mobile-open');
@@ -6169,6 +6175,7 @@ async function switchToProfile(name) {
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
+    if(window.TaijiZhinang&&typeof window.TaijiZhinang.profileChanged==='function') await window.TaijiZhinang.profileChanged();
 
   } catch (e) {
     // Revert the optimistic name update on error
@@ -6500,7 +6507,7 @@ function switchSettingsSection(name){
     _currentPanel = 'settings';
     var mainEl = document.querySelector('main.main');
     if (mainEl) {
-      ['settings','skills','memory','tasks','kanban','writing','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
+      ['settings','skills','memory','tasks','kanban','writing','zhinang','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
         mainEl.classList.toggle('showing-' + p, p === 'settings');
       });
     }

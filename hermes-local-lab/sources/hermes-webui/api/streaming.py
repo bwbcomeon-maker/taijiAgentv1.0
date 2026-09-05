@@ -2953,7 +2953,19 @@ def _sanitize_messages_for_api(
             if not tid or tid not in valid_tool_call_ids:
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
-        sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        sanitized = copy.deepcopy({k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS})
+        if role == 'assistant':
+            for tc in sanitized.get('tool_calls') or []:
+                if not isinstance(tc, dict):
+                    continue
+                for key in ('artifact_path', 'status', 'done', 'is_error'):
+                    tc.pop(key, None)
+            if isinstance(sanitized.get('content'), list):
+                for part in sanitized['content']:
+                    if not isinstance(part, dict) or part.get('type') != 'tool_use':
+                        continue
+                    for key in ('artifact_path', 'status', 'done', 'is_error'):
+                        part.pop(key, None)
         content = sanitized.get('content')
         has_native_images = (
             isinstance(content, list)
@@ -3835,6 +3847,70 @@ def _tool_result_metadata(raw) -> dict:
     return {}
 
 
+_WORKSPACE_ARTIFACT_MUTATION_TOOLS = {
+    "write_file", "create_file", "edit_file", "patch",
+    "mcp_filesystem_write_file", "mcp_filesystem_edit_file",
+}
+
+
+def _tool_result_is_error(raw) -> bool:
+    """Recognize ordinary structured tool failures without exposing their payload."""
+    text = str(raw or "").strip().lower()
+    if text.startswith("error executing tool ") or text.startswith("[tool execution cancelled"):
+        return True
+    try:
+        data = raw if isinstance(raw, dict) else json.loads(str(raw or ""))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("ok") is False or data.get("is_error") is True:
+        return True
+    error = data.get("error")
+    if error not in (None, "", False, 0, [], {}):
+        return True
+    return str(data.get("status") or "").strip().lower() in {
+        "error", "failed", "failure", "denied", "capability_blocked",
+    }
+
+
+def _workspace_artifact_path_from_tool_completion(
+    tool_name, args, function_result, workspace, *, is_error=False
+) -> str:
+    """Return a safe workspace-relative file created by a successful mutator."""
+    name = str(tool_name or "").removeprefix("functions.")
+    if name not in _WORKSPACE_ARTIFACT_MUTATION_TOOLS:
+        return ""
+    if is_error or _tool_result_is_error(function_result) or not isinstance(args, dict):
+        return ""
+    try:
+        from agent.tool_result_classification import file_mutation_result_landed
+
+        if not file_mutation_result_landed(name, function_result):
+            return ""
+    except (ImportError, TypeError, ValueError):
+        return ""
+    raw_path = next(
+        (args.get(key) for key in ("path", "file_path", "destination") if args.get(key)),
+        None,
+    )
+    if not isinstance(raw_path, (str, os.PathLike)):
+        return ""
+    try:
+        root = Path(workspace).expanduser().resolve()
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        relative = candidate.relative_to(root)
+        if not candidate.is_file():
+            return ""
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    result = relative.as_posix()
+    return result if result and result != "." and len(result) <= 240 else ""
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence."""
     out = {}
@@ -3855,7 +3931,7 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
     return -1
 
 
-def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
+def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
     tool_calls = []
     pending_names = {}
@@ -3880,13 +3956,19 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             for tc in m.get('tool_calls', []):
                 if not isinstance(tc, dict):
                     continue
-                tid = tc.get('id', '') or tc.get('call_id', '')
+                tid = tc.get('id', '') or tc.get('call_id', '') or tc.get('tid', '')
                 fn = tc.get('function', {})
-                name = fn.get('name', '')
-                try:
-                    args = json.loads(fn.get('arguments', '{}') or '{}')
-                except Exception:
-                    args = {}
+                if not isinstance(fn, dict):
+                    fn = {}
+                name = fn.get('name', '') or tc.get('name', '')
+                raw_args = fn.get('arguments', tc.get('arguments', tc.get('args', {})))
+                if isinstance(raw_args, dict):
+                    args = raw_args
+                else:
+                    try:
+                        args = json.loads(raw_args or '{}')
+                    except Exception:
+                        args = {}
                 if tid and name:
                     pending_names[tid] = name
                     pending_args[tid] = args
@@ -3924,7 +4006,140 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
             })
 
+    def _normalized_tool_name(value):
+        return str(value or '').removeprefix('functions.').strip()
+
+    def _successful_artifact_summary(value):
+        if not isinstance(value, dict):
+            return False
+        status = str(value.get('status') or '').strip().lower()
+        return (
+            bool(str(value.get('tid') or '').strip())
+            and bool(_normalized_tool_name(value.get('name')))
+            and isinstance(value.get('artifact_path'), str)
+            and bool(value.get('artifact_path'))
+            and not bool(value.get('is_error') or value.get('error'))
+            and (
+                status in {'completed', 'success', 'succeeded'}
+                or (value.get('done') is True and not status)
+            )
+        )
+
+    failure_statuses = {
+        'error', 'failed', 'failure', 'cancelled', 'canceled',
+        'denied', 'capability_blocked',
+    }
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        call_tid = str(call.get('tid') or '')
+        call_name = _normalized_tool_name(call.get('name'))
+        matched_live = None
+        for live_tc in reversed(live):
+            live_tid = str(live_tc.get('tid') or '').strip()
+            live_name = _normalized_tool_name(live_tc.get('name'))
+            if not call_tid or not live_tid or live_tid != call_tid or live_name != call_name:
+                continue
+            matched_live = live_tc
+            live_status = str(live_tc.get('status') or '').strip().lower()
+            if live_tc.get('is_error') or live_tc.get('error') or live_status in failure_statuses:
+                call['is_error'] = True
+                call['status'] = 'failed'
+                call['done'] = True
+                call.pop('artifact_path', None)
+                break
+            if _successful_artifact_summary(live_tc):
+                call['artifact_path'] = live_tc['artifact_path']
+                call['status'] = 'completed'
+                call['done'] = True
+                call['is_error'] = False
+            break
+        # A same-id/name live record is authoritative even while it is still
+        # running. Never revive an older successful path over newer live state.
+        if matched_live:
+            continue
+        if call.get('artifact_path') or not call_tid:
+            continue
+        for prior in prior_tool_calls or []:
+            if (
+                not _successful_artifact_summary(prior)
+                or str(prior.get('tid') or '').strip() != call_tid
+                or _normalized_tool_name(prior.get('name')) != call_name
+            ):
+                continue
+            call['artifact_path'] = prior['artifact_path']
+            call['status'] = 'completed'
+            call['done'] = True
+            call['is_error'] = False
+            break
+
     return tool_calls
+
+
+def _project_tool_artifact_paths_onto_messages(messages, tool_calls):
+    """Attach only validated public artifact paths to matching persisted calls."""
+    def _normalized_tool_name(value):
+        return str(value or '').removeprefix('functions.').strip()
+
+    successful_by_tid = {
+        str(call.get('tid')).strip(): call
+        for call in tool_calls or []
+        if isinstance(call, dict)
+        and str(call.get('tid') or '').strip()
+        and _normalized_tool_name(call.get('name'))
+        and isinstance(call.get('artifact_path'), str)
+        and call.get('artifact_path')
+        and not bool(call.get('is_error') or call.get('error'))
+        and str(call.get('status') or '').strip().lower() not in {
+            'error', 'failed', 'failure', 'cancelled', 'canceled',
+            'denied', 'capability_blocked',
+        }
+        and (
+            str(call.get('status') or '').strip().lower() in {'completed', 'success', 'succeeded'}
+            or (call.get('done') is True and not str(call.get('status') or '').strip())
+        )
+    }
+
+    def _project(call, *, tid, name):
+        call.pop('artifact_path', None)
+        if (
+            call.get('is_error')
+            or call.get('error')
+            or str(call.get('status') or '').strip().lower() in {
+                'error', 'failed', 'failure', 'cancelled', 'canceled',
+                'denied', 'capability_blocked',
+            }
+        ):
+            return
+        summary = successful_by_tid.get(str(tid or '').strip())
+        if not summary or _normalized_tool_name(summary.get('name')) != _normalized_tool_name(name):
+            return
+        call['artifact_path'] = summary['artifact_path']
+        call['status'] = 'completed'
+        call['done'] = True
+        call['is_error'] = False
+
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            if not isinstance(call, dict):
+                continue
+            tid = str(call.get('id') or call.get('call_id') or call.get('tid') or '')
+            function = call.get('function') if isinstance(call.get('function'), dict) else {}
+            name = function.get('name') or call.get('name') or ''
+            _project(call, tid=tid, name=name)
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get('type') != 'tool_use':
+                continue
+            _project(
+                part,
+                tid=part.get('id') or part.get('call_id') or part.get('tid'),
+                name=part.get('name'),
+            )
 
 
 def _partial_message_signature(message: dict) -> tuple:
@@ -5405,6 +5620,7 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
+            _live_tool_completion_errors = {}
 
             def _capture_image_artifact_candidate(
                 name, tool_call_id, function_result, *, is_error=False
@@ -5534,6 +5750,9 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
+                    tool_call_id = str(cb_kwargs.get('tool_call_id') or '')
+                    if tool_call_id:
+                        _live_tool_completion_errors[tool_call_id] = bool(cb_kwargs.get('is_error', False))
                     _capture_image_artifact_candidate(
                         name,
                         cb_kwargs.get('tool_call_id'),
@@ -5544,7 +5763,18 @@ def _run_agent_streaming(
 
                 if event_type == 'tool.completed':
                     result_metadata = _tool_result_metadata(preview)
-                    result_is_error = bool(cb_kwargs.get('is_error', False)) or result_metadata.get("status") == "capability_blocked"
+                    result_is_error = (
+                        bool(cb_kwargs.get('is_error', False))
+                        or result_metadata.get("status") == "capability_blocked"
+                        or _tool_result_is_error(cb_kwargs.get('result', preview))
+                    )
+                    artifact_path = _workspace_artifact_path_from_tool_completion(
+                        name,
+                        args if isinstance(args, dict) else {},
+                        cb_kwargs.get('result', preview),
+                        s.workspace or workspace,
+                        is_error=result_is_error,
+                    )
                     _capture_image_artifact_candidate(
                         name,
                         cb_kwargs.get('tool_call_id'),
@@ -5558,6 +5788,8 @@ def _run_agent_streaming(
                             live_tc['done'] = True
                             live_tc['duration'] = cb_kwargs.get('duration')
                             live_tc['is_error'] = result_is_error
+                            if artifact_path:
+                                live_tc['artifact_path'] = artifact_path
                             break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
@@ -5568,6 +5800,8 @@ def _run_agent_streaming(
                                 shared_tc['done'] = True
                                 shared_tc['duration'] = cb_kwargs.get('duration')
                                 shared_tc['is_error'] = result_is_error
+                                if artifact_path:
+                                    shared_tc['artifact_path'] = artifact_path
                                 break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
@@ -5580,6 +5814,8 @@ def _run_agent_streaming(
                         'is_error': result_is_error,
                     }
                     event_payload.update(result_metadata)
+                    if artifact_path:
+                        event_payload['artifact_path'] = artifact_path
                     put('tool_complete', event_payload)
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
@@ -5620,8 +5856,14 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
+                    result_metadata = _tool_result_metadata(function_result)
+                    result_is_error = (
+                        result_metadata.get("status") == "capability_blocked"
+                        or bool(_live_tool_completion_errors.pop(str(tool_call_id or ''), False))
+                        or _tool_result_is_error(function_result)
+                    )
                     _capture_image_artifact_candidate(
-                        name, tool_call_id, function_result
+                        name, tool_call_id, function_result, is_error=result_is_error
                     )
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
@@ -5630,8 +5872,13 @@ def _run_agent_streaming(
                             _tool_result_snippet(function_result),
                             surface="stream_tool_result",
                         )
-                        result_metadata = _tool_result_metadata(function_result)
-                        result_is_error = result_metadata.get("status") == "capability_blocked"
+                        artifact_path = _workspace_artifact_path_from_tool_completion(
+                            name,
+                            args,
+                            function_result,
+                            s.workspace or workspace,
+                            is_error=result_is_error,
+                        )
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
@@ -5639,6 +5886,8 @@ def _run_agent_streaming(
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
                                 live_tc['is_error'] = result_is_error
+                                if artifact_path:
+                                    live_tc['artifact_path'] = artifact_path
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -5648,6 +5897,8 @@ def _run_agent_streaming(
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
                                     shared_tc['is_error'] = result_is_error
+                                    if artifact_path:
+                                        shared_tc['artifact_path'] = artifact_path
                                     break
                         _checkpoint_activity[0] += 1
                         event_payload = {
@@ -5658,6 +5909,8 @@ def _run_agent_streaming(
                             'is_error': result_is_error,
                         }
                         event_payload.update(result_metadata)
+                        if artifact_path:
+                            event_payload['artifact_path'] = artifact_path
                         put('tool_complete', event_payload)
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
@@ -7134,6 +7387,7 @@ def _run_agent_streaming(
                 tool_calls = _extract_tool_calls_from_messages(
                     s.messages,
                     live_tool_calls=_live_tool_calls,
+                    prior_tool_calls=s.tool_calls,
                 )
                 tool_calls = public_egress_scrub(
                     scrub_public_session_payload({"tool_calls": tool_calls}),
@@ -7457,6 +7711,7 @@ def _run_agent_streaming(
                     else _display_message
                     for _display_message in s.messages
                 ]
+                _project_tool_artifact_paths_onto_messages(s.messages, s.tool_calls)
                 _previous_active_stream_id = getattr(
                     s,
                     'active_stream_id',
