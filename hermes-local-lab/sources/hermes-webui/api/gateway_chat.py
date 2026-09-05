@@ -1457,19 +1457,38 @@ def _run_gateway_chat_streaming(
         )
         prefill_messages = []
         if not strict_turn:
+            from api.zhinang import session_role_ephemeral_prompt
+
+            try:
+                from api.streaming import _WEBUI_PROGRESS_PROMPT
+            except ImportError:
+                _WEBUI_PROGRESS_PROMPT = ""
+
+            gateway_system_prompt = session_role_ephemeral_prompt(
+                s,
+                base_ephemeral_prompt=(
+                    "\n\n".join(
+                        part
+                        for part in (BRAND_PRIVACY_SYSTEM_PROMPT, _WEBUI_PROGRESS_PROMPT)
+                        if part
+                    )
+                ),
+                strict_turn=False,
+            )
+            prefill_messages = [
+                {"role": "system", "content": gateway_system_prompt},
+            ]
             try:
                 from api.streaming import (
-                    _WEBUI_PROGRESS_PROMPT,
                     _load_webui_prefill_context,
                     _prefill_messages_with_webui_context,
                     _public_prefill_context_status,
                 )
 
                 prefill_context = _load_webui_prefill_context(cfg)
-                prefill_messages = [
-                    {"role": "system", "content": f"{BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{_WEBUI_PROGRESS_PROMPT}"},
-                    *_prefill_messages_with_webui_context(prefill_context, cfg),
-                ]
+                prefill_messages.extend(
+                    _prefill_messages_with_webui_context(prefill_context, cfg)
+                )
                 put_gateway_event("context_status", {
                     "session_id": session_id,
                     "prefill": _public_prefill_context_status(prefill_context),
@@ -1542,6 +1561,14 @@ def _run_gateway_chat_streaming(
             )
         elif not strict_turn:
             turn_envelope = turn_envelope.with_model_messages(model_messages)
+        from api.zhinang import session_has_zhinang_binding
+
+        if not strict_turn and session_has_zhinang_binding(s):
+            from api.zhinang import record_session_role_acceptance
+
+            with _get_session_agent_lock(session_id):
+                record_session_role_acceptance(s, turn_envelope.turn_id)
+                s.save(touch_updated_at=False)
         body = _gateway_request_body(
             model=model,
             provider=model_provider,

@@ -11,6 +11,7 @@ import pytest
 from api.zhinang import (
     AGENCY_AGENTS_COMMIT,
     CatalogResourceError,
+    ZhinangContentCatalog,
     ZhinangSourceCatalog,
 )
 
@@ -180,3 +181,26 @@ def test_catalog_returns_explicit_not_found_without_treating_id_as_path(tmp_path
 
     assert raised.value.code == "role_not_found"
     assert "private" not in str(raised.value)
+
+
+def test_builtin_chinese_content_matches_every_source_and_local_role():
+    source = ZhinangSourceCatalog().validate()
+    content = ZhinangContentCatalog().validate(source)
+
+    assert len(content) == source.role_count + 1 == 274
+    assert set(content) - set(source.roles) == {"taiji:document-reviewer"}
+    assert {item["category"] for item in content.values()} == {
+        "售前与方案",
+        "产品与研发",
+        "设计与体验",
+        "市场与增长",
+        "文档与研究",
+        "运营与管理",
+    }
+    for item in content.values():
+        assert item["name"]
+        assert item["original_name"]
+        assert item["summary"]
+        assert 3 <= len(item["capabilities"]) <= 5
+        assert 2 <= len(item["deliverable_examples"]) <= 3
+        assert item["starter_examples"]

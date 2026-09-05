@@ -28,29 +28,72 @@ let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
-// Debounced save — prevents hammering the server on every keystroke.
-let _draftSaveTimer = null;
+// Draft writes are ordered per session. A late older request must never
+// overwrite the text accepted by a transition or clear operation.
+const _draftSaveTimers = new Map();
+const _draftWriteChains = new Map();
+const _pendingFilesBySessionId = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
+
+function _rememberPendingFilesForSession(sid, files) {
+  if (!sid) return;
+  _pendingFilesBySessionId.set(sid, Array.isArray(files) ? [...files] : []);
+}
+
+function _restorePendingFilesForSession(sid, opts={}) {
+  if (!sid || (opts && opts.preserveActiveInput)) return;
+  const files = _pendingFilesBySessionId.get(sid) || [];
+  S.pendingFiles = [...files];
+  if (typeof renderTray === 'function') renderTray();
+}
+
+function _clearDraftSaveTimer(sid) {
+  const timer = _draftSaveTimers.get(sid);
+  if (timer !== undefined) clearTimeout(timer);
+  _draftSaveTimers.delete(sid);
+}
+
+function _enqueueComposerDraftWrite(sid, text) {
+  const payload = JSON.stringify({ session_id: sid, text: text || '' });
+  const predecessor = _draftWriteChains.get(sid) || Promise.resolve();
+  const write = predecessor.catch(() => {}).then(() => api('/api/session/draft', {
+    method: 'POST',
+    body: payload,
+  }));
+  _draftWriteChains.set(sid, write);
+  const cleanup = () => {
+    if (_draftWriteChains.get(sid) === write) _draftWriteChains.delete(sid);
+  };
+  write.then(cleanup, cleanup);
+  return write;
+}
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
-  _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
-    }).catch(() => {});
+  _rememberPendingFilesForSession(sid, files);
+  _clearDraftSaveTimer(sid);
+  const timer = setTimeout(() => {
+    _draftSaveTimers.delete(sid);
+    _enqueueComposerDraftWrite(sid, text).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
+  _draftSaveTimers.set(sid, timer);
 }
 
 // Fire-and-forget immediate save (used before session switches).
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
-  api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
-  }).catch(() => {});
+  _rememberPendingFilesForSession(sid, files);
+  _clearDraftSaveTimer(sid);
+  return _enqueueComposerDraftWrite(sid, text).catch(() => {});
+}
+
+// Awaitable transition save used by flows that must not leave the current task
+// until its visible input is durably accepted by the server.
+async function _saveComposerDraftBeforeTransition(sid, text, files) {
+  if (!sid) return;
+  _rememberPendingFilesForSession(sid, files);
+  _clearDraftSaveTimer(sid);
+  await _enqueueComposerDraftWrite(sid, text);
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -63,7 +106,6 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // _loadingSessionId, a newer session switch has already begun, so skip.
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
-  const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
 
@@ -74,9 +116,10 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // normally so the previous session's composer contents do not leak forward.
   if (preserveActiveInput && current && current !== text) return;
 
-  // If there's no text and no files, clear the textarea (a previous session's
-  // draft may still be sitting there from a cross-session switch).
-  if (!text && !files.length) {
+  // If there's no text, clear the textarea (a previous session's draft may
+  // still be sitting there from a cross-session switch). Attachments are
+  // restored separately from the per-session in-memory File cache.
+  if (!text) {
     if (current) {
       ta.value = '';
       if (typeof autoResize === 'function') autoResize();
@@ -90,17 +133,14 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
-  api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).catch(() => {});
+  _clearDraftSaveTimer(sid);
+  _pendingFilesBySessionId.delete(sid);
+  return _enqueueComposerDraftWrite(sid, '').catch(() => {});
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -485,6 +525,20 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const currentSessionId=S.session&&S.session.session_id;
+    if(currentSessionId){
+      _rememberPendingFilesForSession(
+        currentSessionId,
+        S.pendingFiles?[...S.pendingFiles]:[],
+      );
+    }
+    if(options&&options.awaitCurrentDraftSave&&currentSessionId){
+      await _saveComposerDraftBeforeTransition(
+        currentSessionId,
+        ($('msg')||{}).value||'',
+        S.pendingFiles?[...S.pendingFiles]:[],
+      );
+    }
     _resetWriteflowDockForSessionChange('new-session-start');
     updateQueueBadge();
     S.toolCalls=[];
@@ -504,6 +558,20 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
+    let requestedPendingFiles=[];
+    if(options&&options.zhinang){
+      const requestedDraft=options.zhinang.composer_draft||{};
+      requestedPendingFiles=Array.isArray(requestedDraft.files)?[...requestedDraft.files]:[];
+      reqBody.zhinang_role_id=options.zhinang.role_id;
+      reqBody.catalog_version=options.zhinang.catalog_version;
+      reqBody.request_id=options.zhinang.request_id;
+      // Native File objects cannot be serialized durably. Their bytes stay in
+      // the browser's per-session memory cache until the normal upload path.
+      reqBody.composer_draft={
+        text:typeof requestedDraft.text==='string'?requestedDraft.text:'',
+        files:[],
+      };
+    }
     if(options&&Object.prototype.hasOwnProperty.call(options,'project_id')){
       if(options.project_id) reqBody.project_id=options.project_id;
     }else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
@@ -523,6 +591,10 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,inheritWs):data.session;S.messages=data.session.messages||[];
+    if(!_pendingFilesBySessionId.has(S.session.session_id)){
+      _rememberPendingFilesForSession(S.session.session_id,requestedPendingFiles);
+    }
+    _restorePendingFilesForSession(S.session.session_id);
     S.lastUsage={...(data.session.last_usage||{})};
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -578,12 +650,18 @@ async function newSession(flash, options={}){
     }
     updateQueueBadge(S.session.session_id);
     syncTopbar();renderMessages();
+    if(options&&options.zhinang&&typeof _restoreComposerDraft==='function'){
+      _restoreComposerDraft(data.session.composer_draft||{},S.session.session_id);
+      const composer=$('msg');
+      if(composer&&typeof composer.focus==='function') composer.focus();
+    }
     const dirLoad=loadDir('.');
     // loadDir('.') is fire-and-forget while the workspace panel is closed:
     // waiting would block new-chat/profile-switch flow for users who never open
     // the file tree. When visible, wait so the file list lands with the session.
     if(options&&options.awaitWorkspaceLoad) await dirLoad;
     // don't call renderSessionList here - callers do it when needed
+    return S.session;
   })();
   try{
     return await _newSessionInFlight;
@@ -591,6 +669,33 @@ async function newSession(flash, options={}){
     _newSessionInFlight=null;
     _setNewSessionPending(false);
   }
+}
+
+function _newZhinangRequestId(){
+  if(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function'){
+    return globalThis.crypto.randomUUID();
+  }
+  return `zhinang-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function createZhinangSession(roleId, catalogVersion, options={}){
+  const normalizedRoleId=String(roleId||'').trim();
+  const normalizedVersion=String(catalogVersion||'').trim();
+  if(!normalizedRoleId||!normalizedVersion) throw new Error('智囊角色或目录版本无效');
+  const requestId=String(options.requestId||_newZhinangRequestId()).trim();
+  const draft={
+    text:typeof options.draftText==='string'?options.draftText:'',
+    files:Array.isArray(options.draftFiles)?options.draftFiles:[],
+  };
+  return newSession(true,{
+    awaitCurrentDraftSave:true,
+    zhinang:{
+      role_id:normalizedRoleId,
+      catalog_version:normalizedVersion,
+      request_id:requestId,
+      composer_draft:draft,
+    },
+  });
 }
 
 async function loadSession(sid){
@@ -700,6 +805,7 @@ async function loadSession(sid){
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
   S.session=typeof sanitizeSessionRuntimeFields==='function'?sanitizeSessionRuntimeFields(data.session,S.session&&S.session.workspace):data.session;
+  _restorePendingFilesForSession(sid,{preserveActiveInput:currentSid===sid&&forceReload});
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   // Reset scroll-direction tracker on session switch so the new chat's
@@ -913,8 +1019,8 @@ async function loadSession(sid){
   // Restore server-persisted composer draft (synced across clients + survives refresh).
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
-  const _draft = S.session && S.session.composer_draft;
-  if (_draft && (typeof _restoreComposerDraft === 'function')) {
+  const _draft = (S.session && S.session.composer_draft) || {};
+  if (typeof _restoreComposerDraft === 'function') {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});
   }
 

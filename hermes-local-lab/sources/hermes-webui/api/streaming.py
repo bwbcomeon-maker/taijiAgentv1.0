@@ -6183,10 +6183,17 @@ def _run_agent_streaming(
                 "Never fall back to a hardcoded path when this tag is present.\n\n"
                 f"{BRAND_PRIVACY_SYSTEM_PROMPT}"
             )
+            from api.zhinang import apply_session_role_to_agent, session_has_zhinang_binding
+
+            has_session_role = session_has_zhinang_binding(s)
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
-            _pname = getattr(s, 'personality', None)
+            _pname = (
+                None
+                if has_session_role
+                else getattr(s, 'personality', None)
+            )
             if _pname:
                 _agent_cfg = _cfg.get('agent', {})
                 _personalities = _agent_cfg.get('personalities', {})
@@ -6205,7 +6212,7 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = (
+            _base_ephemeral_prompt = (
                 None
                 if strict_turn
                 else _webui_ephemeral_system_prompt(
@@ -6217,6 +6224,12 @@ def _run_agent_streaming(
                         'workspace': s.workspace,
                     },
                 )
+            )
+            apply_session_role_to_agent(
+                agent,
+                s,
+                base_ephemeral_prompt=_base_ephemeral_prompt,
+                strict_turn=strict_turn,
             )
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
@@ -6282,6 +6295,13 @@ def _run_agent_streaming(
             # Persist the user message BEFORE streaming starts so it's durable even if
             # the server crashes before the first checkpoint fires (every 15s).
             with _agent_lock:
+                if not strict_turn and has_session_role:
+                    from api.zhinang import record_session_role_acceptance
+
+                    record_session_role_acceptance(
+                        s,
+                        str(getattr(turn_envelope, 'turn_id', None) or stream_id),
+                    )
                 s.save(touch_updated_at=True, skip_index=False)
 
             from api.legacy_session_migration import start_legacy_migration_guarded_worker
@@ -6684,6 +6704,12 @@ def _run_agent_streaming(
                             agent = _require_agent_capability_generation(
                                 _AIAgent(**_agent_kwargs),
                                 _capability_generation,
+                            )
+                            apply_session_role_to_agent(
+                                agent,
+                                s,
+                                base_ephemeral_prompt=_base_ephemeral_prompt,
+                                strict_turn=False,
                             )
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
@@ -7911,6 +7937,12 @@ def _run_agent_streaming(
                     _heal_agent = _require_agent_capability_generation(
                         _AIAgent(**_heal_kwargs),
                         _capability_generation,
+                    )
+                    apply_session_role_to_agent(
+                        _heal_agent,
+                        s,
+                        base_ephemeral_prompt=_base_ephemeral_prompt,
+                        strict_turn=False,
                     )
                     agent = _heal_agent
                     with STREAMS_LOCK:

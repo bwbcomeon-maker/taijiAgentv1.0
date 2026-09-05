@@ -289,7 +289,7 @@ def _write_session_index(updates=None):
                 try:
                     s = _load_sidecar_for_index(p)
                     if s:
-                        c = s.compact()
+                        c = s.compact(sidebar_safe=True)
                         sid = c.get('session_id')
                         if sid:
                             # Dedup by session_id: prefer entry with more messages
@@ -308,7 +308,7 @@ def _write_session_index(updates=None):
                 existing_ids = set(entry_map.keys())
                 for s in SESSIONS.values():
                     if s.session_id not in existing_ids:
-                        entries.append(s.compact())
+                        entries.append(s.compact(sidebar_safe=True))
                 entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
                 _payload = json.dumps(entries, ensure_ascii=False, indent=2)
 
@@ -344,7 +344,9 @@ def _write_session_index(updates=None):
                 ]
 
                 # Build lookup of updated entries
-                updated_map = {s.session_id: s.compact() for s in updates}
+                updated_map = {
+                    s.session_id: s.compact(sidebar_safe=True) for s in updates
+                }
                 existing_ids = {e.get('session_id') for e in existing}
                 # Add any updated entries not yet in the index
                 for sid, entry in updated_map.items():
@@ -685,9 +687,13 @@ class Session:
                  enabled_toolsets=None,
                  composer_draft=None,
                 privacy_context=None,
-                expert_team_start_transaction_ids=None,
-                expert_team_launch_transaction_id=None,
-                **kwargs):
+                 expert_team_start_transaction_ids=None,
+                 expert_team_launch_transaction_id=None,
+                 zhinang_role_snapshot=None,
+                 zhinang_create_request_id=None,
+                 zhinang_create_fingerprint=None,
+                 zhinang_usage=None,
+                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -759,6 +765,19 @@ class Session:
             str(expert_team_launch_transaction_id)
             if expert_team_launch_transaction_id is not None
             else None
+        )
+        # Preserve the raw durable shape.  A non-object value is corruption,
+        # not an absent role: coercing it to None would let a bound Zhinang
+        # task silently fall back to an ordinary conversation after restart.
+        self.zhinang_role_snapshot = copy.deepcopy(zhinang_role_snapshot)
+        self.zhinang_create_request_id = (
+            str(zhinang_create_request_id) if zhinang_create_request_id else None
+        )
+        self.zhinang_create_fingerprint = (
+            str(zhinang_create_fingerprint) if zhinang_create_fingerprint else None
+        )
+        self.zhinang_usage = (
+            copy.deepcopy(zhinang_usage) if isinstance(zhinang_usage, dict) else {}
         )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
@@ -848,6 +867,8 @@ class Session:
             'privacy_context',
             'expert_team_start_transaction_ids',
             'expert_team_launch_transaction_id',
+            'zhinang_create_request_id', 'zhinang_create_fingerprint',
+            'zhinang_usage', 'zhinang_role_snapshot',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -1040,7 +1061,7 @@ class Session:
             # Corrupt prefix or decode error — fall back to full load
             return cls.load(sid)
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None, *, sidebar_safe=False) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
@@ -1053,7 +1074,7 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        return {
+        compact = {
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
@@ -1119,6 +1140,30 @@ class Session:
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+        role_bound = bool(
+            self.zhinang_role_snapshot is not None
+            or self.zhinang_create_request_id
+            or self.zhinang_create_fingerprint
+        )
+        if role_bound:
+            from api.zhinang import SessionRoleSnapshotError, public_session_role_projection
+
+            try:
+                compact['zhinang_role'] = public_session_role_projection(
+                    self.zhinang_role_snapshot,
+                    usage=self.zhinang_usage,
+                )
+            except SessionRoleSnapshotError:
+                if not sidebar_safe:
+                    raise
+                # Sidebar availability is independent of role execution.  Use
+                # one fixed marker and disclose no unverified snapshot identity.
+                compact['zhinang_role'] = {
+                    'status': 'invalid',
+                    'code': 'zhinang_snapshot_invalid',
+                    'name': '智囊角色快照已损坏',
+                }
+        return compact
 
 def _get_profile_home(profile) -> Path:
     """Resolve the hermes agent home directory for the given profile.
@@ -2821,7 +2866,11 @@ def _row_may_need_sidecar_metadata_refresh(session: dict) -> bool:
             or session.get('last_message_at') is None
         )
     )
-    return is_runtime_row or snapshot_missing_sidebar_metadata
+    # A cached role label must be revalidated against canonical sidecar truth.
+    # Otherwise a snapshot damaged after index creation keeps exposing stale,
+    # unverified role identity indefinitely.
+    is_role_row = "zhinang_role" in session
+    return is_runtime_row or snapshot_missing_sidebar_metadata or is_role_row
 
 
 def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict]:
@@ -2841,11 +2890,27 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
         if not sid:
             out.append(session)
             continue
-        sidecar = Session.load_metadata_only(sid)
-        if not sidecar:
-            out.append(session)
+        try:
+            sidecar = Session.load_metadata_only(sid)
+            compact = (
+                sidecar.compact(include_runtime=True, sidebar_safe=True)
+                if sidecar
+                else None
+            )
+        except Exception:
+            compact = None
+        if compact is None:
+            if "zhinang_role" in session:
+                refreshed = dict(session)
+                refreshed["zhinang_role"] = {
+                    "status": "invalid",
+                    "code": "zhinang_snapshot_invalid",
+                    "name": "智囊角色快照已损坏",
+                }
+                out.append(refreshed)
+            else:
+                out.append(session)
             continue
-        compact = sidecar.compact(include_runtime=True)
         refreshed = dict(session)
         for key in (
             'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
@@ -2857,6 +2922,9 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
             value = compact.get(key)
             if value is not None:
                 refreshed[key] = value
+        refreshed.pop("zhinang_role", None)
+        if "zhinang_role" in compact:
+            refreshed["zhinang_role"] = copy.deepcopy(compact["zhinang_role"])
         try:
             refreshed['message_count'] = max(
                 int(session.get('message_count') or 0),
@@ -3083,14 +3151,14 @@ def all_sessions(diag=None):
                 sidecar = Session.load_metadata_only(missing_sid)
                 if sidecar is None:
                     continue
-                index.append(sidecar.compact())
+                index.append(sidecar.compact(sidebar_safe=True))
                 backfilled.append(sidecar)
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = Session.load(s.get('session_id'))
                     if full:
-                        index[i] = full.compact()
+                        index[i] = full.compact(sidebar_safe=True)
                         backfilled.append(full)
             if backfilled:
                 try:
@@ -3112,6 +3180,7 @@ def all_sessions(diag=None):
                     index_map[s.session_id] = s.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
+                        sidebar_safe=True,
                     )
             _diag_stage(diag, "all_sessions.refresh_sidecar_metadata")
             refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(list(index_map.values()))
@@ -3175,7 +3244,7 @@ def all_sessions(diag=None):
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
-    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
+    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids, sidebar_safe=True) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
         and not s.active_stream_id

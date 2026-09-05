@@ -329,6 +329,7 @@ _PUBLIC_SESSION_FIELDS = (
     "active_stream_id", "pending_user_message", "pending_started_at",
     "has_pending_user_message", "is_cli_session", "source_tag", "raw_source",
     "session_source", "source_label", "read_only", "enabled_toolsets",
+    "zhinang_role",
     "is_streaming", "_messages_truncated", "_messages_offset",
 )
 
@@ -1906,6 +1907,27 @@ def public_session_projection(payload: Any) -> dict:
             cleaned[key] = _mask_public_sensitive_text(_public_visible_text(value))
         elif key == "enabled_toolsets":
             cleaned[key] = [str(item) for item in value] if isinstance(value, list) else []
+        elif key == "zhinang_role":
+            try:
+                # The producer already supplies a compact public projection.
+                # Re-project through an explicit scalar/list whitelist rather
+                # than deepcopying an arbitrary nested role dictionary.
+                allowed = {
+                    field: copy.deepcopy(value[field])
+                    for field in (
+                        "status", "code", "role_id", "name", "original_name", "summary", "category",
+                        "tags", "catalog_version", "upstream_commit", "source_path",
+                        "adapter_version", "effective_prompt_sha256", "created_at",
+                        "first_accepted_at", "last_accepted_at",
+                    )
+                    if isinstance(value, dict) and field in value
+                }
+                cleaned[key] = allowed
+            except Exception:
+                # A malformed role label must not make the whole session public
+                # response leak or crash; execution separately fails closed on
+                # the authoritative private snapshot.
+                continue
         else:
             cleaned[key] = copy.deepcopy(value)
     if is_worktree:

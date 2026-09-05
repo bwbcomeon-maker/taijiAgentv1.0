@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from urllib.parse import parse_qs, urlsplit
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.agent_sessions import (
@@ -84,6 +84,158 @@ _CLIENT_EVENT_ALLOWED_FIELDS = {
     "url_path": 256,
     "reason": 160,
 }
+_ZHINANG_CREATE_LOCK = threading.RLock()
+
+
+class _ZhinangCreateReplayError(RuntimeError):
+    """Fail closed when durable idempotency state cannot be read safely."""
+
+
+def _zhinang_create_fingerprint(payload: dict) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _find_zhinang_create_replay(profile, request_id: str):
+    """Find the live or durable lineage tip for one create request."""
+    candidates = []
+    with LOCK:
+        candidates.extend(
+            session
+            for session in SESSIONS.values()
+            if getattr(session, "zhinang_create_request_id", None) == request_id
+            and _profiles_match(getattr(session, "profile", None), profile)
+        )
+    scan_failed = False
+    try:
+        from api.config import SESSION_DIR
+
+        durable_paths = list(SESSION_DIR.glob("*.json"))
+    except Exception:
+        durable_paths = []
+        scan_failed = True
+        logger.warning("failed to enumerate durable 智囊 create requests", exc_info=True)
+    for path in durable_paths:
+        sid = path.stem
+        if sid == "_index" or not is_safe_session_id(sid):
+            continue
+        try:
+            session = Session.load_metadata_only(sid)
+        except Exception:
+            scan_failed = True
+            logger.warning(
+                "failed to inspect durable 智囊 create request sidecar %s",
+                path,
+                exc_info=True,
+            )
+            continue
+        if (
+            session is not None
+            and getattr(session, "zhinang_create_request_id", None) == request_id
+            and _profiles_match(getattr(session, "profile", None), profile)
+        ):
+            candidates.append(session)
+    if not candidates:
+        if scan_failed:
+            raise _ZhinangCreateReplayError(
+                "durable create replay scan could not prove request_id absence"
+            )
+        return None
+    unique_candidates = {}
+    for session in candidates:
+        sid = str(getattr(session, "session_id", "") or "")
+        current = unique_candidates.get(sid)
+        if current is None or (
+            getattr(current, "_loaded_metadata_only", False)
+            and not getattr(session, "_loaded_metadata_only", False)
+        ):
+            unique_candidates[sid] = session
+    candidates = sorted(
+        unique_candidates.values(),
+        key=lambda session: (
+            not bool(getattr(session, "pre_compression_snapshot", False)),
+            float(getattr(session, "updated_at", 0) or 0),
+            float(getattr(session, "created_at", 0) or 0),
+        ),
+        reverse=True,
+    )
+    selected = candidates[0]
+    if getattr(selected, "_loaded_metadata_only", False):
+        try:
+            selected = Session.load(selected.session_id)
+        except Exception as exc:
+            raise _ZhinangCreateReplayError(
+                "durable create replay could not be hydrated"
+            ) from exc
+        if selected is None or getattr(selected, "_loaded_metadata_only", False):
+            raise _ZhinangCreateReplayError(
+                "durable create replay could not be hydrated"
+            )
+    return selected
+
+
+def _normalize_zhinang_draft(value: object) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - {"text", "files"}:
+        raise ValueError("composer_draft must contain only text and files")
+    text = value.get("text", "")
+    files = value.get("files", [])
+    if not isinstance(text, str) or len(text) > 50_000:
+        raise ValueError("composer_draft text is invalid")
+    if (
+        not isinstance(files, list)
+        or len(files) > 50
+        or any(not isinstance(item, (str, dict)) for item in files)
+    ):
+        raise ValueError("composer_draft files are invalid")
+    return {"text": text, "files": copy.deepcopy(files)}
+
+
+def _resolve_zhinang_create_profile(profile) -> str:
+    from api.profiles import _PROFILE_ID_RE, get_active_profile_name
+
+    requested_profile = str(profile or "").strip()
+    active_profile = str(get_active_profile_name() or "default")
+    if requested_profile:
+        if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+            raise ValueError("invalid profile")
+        if not _profiles_match(requested_profile, active_profile):
+            raise ValueError("profile must match the active request profile")
+    return active_profile
+
+
+def _validate_zhinang_create_environment(profile, project_id) -> str:
+    from api.profiles import list_profiles_api
+
+    resolved_profile = str(profile or "default")
+    available = {
+        str(item.get("name") or item.get("id") or "")
+        for item in list_profiles_api()
+        if isinstance(item, dict)
+    }
+    if available and resolved_profile not in available and resolved_profile != "default":
+        raise ValueError("profile not found")
+    if project_id:
+        project = next(
+            (
+                item
+                for item in load_projects()
+                if str(item.get("project_id") or "") == str(project_id)
+            ),
+            None,
+        )
+        if project is None:
+            raise ValueError("project not found")
+        project_profile = project.get("profile")
+        if project_profile and not _profiles_match(project_profile, resolved_profile):
+            raise ValueError("project is not available in this profile")
+    return resolved_profile
 
 
 def _session_field(session, field, default=None):
@@ -13555,6 +13707,42 @@ def handle_get(handler, parsed) -> bool:
         _handle_session_compress_status(handler, query.get("session_id", [""])[0])
         return True
 
+    if parsed.path == "/api/zhinang/session-role":
+        query = parse_qs(parsed.query)
+        sid = str(query.get("session_id", [""])[0] or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        from api.profiles import get_active_profile_name
+
+        if not _profiles_match(
+            getattr(session, "profile", None),
+            get_active_profile_name(),
+        ):
+            return bad(handler, "Session not found", 404)
+        from api.zhinang import session_has_zhinang_binding
+
+        snapshot = getattr(session, "zhinang_role_snapshot", None)
+        if not session_has_zhinang_binding(session):
+            return bad(handler, "Session has no 智囊 role", 404)
+        try:
+            from api.zhinang import public_session_role_detail_projection
+
+            role = public_session_role_detail_projection(snapshot)
+        except Exception as exc:
+            return j(
+                handler,
+                {
+                    "error": "智囊角色快照已损坏，无法读取历史说明。",
+                    "code": getattr(exc, "code", "zhinang_snapshot_invalid"),
+                },
+                status=409,
+            )
+        return j(handler, {"role": role})
+
     if parsed.path == "/api/session":
         import time as _time
         _t0 = _time.monotonic()
@@ -13587,6 +13775,8 @@ def handle_get(handler, parsed) -> bool:
             msg_before = int(_msg_before) if _msg_before else None
         except (ValueError, TypeError):
             msg_before = None
+        from api.zhinang import SessionRoleSnapshotError
+
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -13835,6 +14025,15 @@ def handle_get(handler, parsed) -> bool:
                     (_t5-_t4)*1000, (_t6-_t5)*1000, (_t6-_t0)*1000,
                 )
             return resp
+        except SessionRoleSnapshotError as exc:
+            return j(
+                handler,
+                {
+                    "error": "智囊角色快照已损坏，无法读取此任务。",
+                    "code": exc.code,
+                },
+                status=409,
+            )
         except KeyError:
             # Not a WebUI session -- try CLI store
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -15499,6 +15698,7 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/session/new":
+        zhinang_role_id = str(body.get("zhinang_role_id") or "").strip()
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
@@ -15508,6 +15708,8 @@ def handle_post(handler, parsed) -> bool:
             body.get("worktree") is True
             or str(body.get("worktree")).strip().lower() in {"1", "true", "yes", "on"}
         )
+        if zhinang_role_id and worktree_requested:
+            return bad(handler, "智囊任务暂不支持自动创建 worktree。", status=400)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -15525,6 +15727,34 @@ def handle_post(handler, parsed) -> bool:
             body.get("model"),
             body.get("model_provider"),
         )
+        profile = body.get("profile") or None
+        project_id = body.get("project_id") or None
+        role_snapshot = None
+        request_id = None
+        request_fingerprint = None
+        composer_draft = {}
+        if zhinang_role_id:
+            request_id = str(body.get("request_id") or "").strip()
+            catalog_version = str(body.get("catalog_version") or "").strip()
+            if not request_id or len(request_id) > 160:
+                return bad(handler, "request_id is required and must be at most 160 characters")
+            if not catalog_version:
+                return bad(handler, "catalog_version is required")
+            try:
+                profile = _resolve_zhinang_create_profile(profile)
+                composer_draft = _normalize_zhinang_draft(body.get("composer_draft"))
+            except ValueError as exc:
+                return bad(handler, str(exc))
+            request_fingerprint = _zhinang_create_fingerprint({
+                "role_id": zhinang_role_id,
+                "catalog_version": catalog_version,
+                "workspace": workspace,
+                "model": model,
+                "model_provider": model_provider,
+                "profile": profile,
+                "project_id": project_id,
+                "composer_draft": composer_draft,
+            })
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
         # ── Memory lifecycle: commit the previous session before starting a new one ──
@@ -15541,14 +15771,62 @@ def handle_post(handler, parsed) -> bool:
                 commit_session_memory(prev_session_id, agent=prev_agent)
             except Exception:
                 logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
-        s = new_session(
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
-            worktree_info=worktree_info,
-        )
+        with _ZHINANG_CREATE_LOCK if zhinang_role_id else nullcontext():
+            if zhinang_role_id:
+                try:
+                    replay = _find_zhinang_create_replay(profile, request_id)
+                except _ZhinangCreateReplayError:
+                    logger.error(
+                        "durable 智囊 create replay scan failed closed",
+                        exc_info=True,
+                    )
+                    return j(handler, {
+                        "error": "无法安全核对已保存的智囊任务，请检查会话存储后重试。",
+                        "code": "zhinang_create_replay_unavailable",
+                    }, status=409)
+                if replay is not None:
+                    if getattr(replay, "zhinang_create_fingerprint", None) != request_fingerprint:
+                        return j(handler, {
+                            "error": "request_id 已用于不同的智囊任务参数。",
+                            "code": "zhinang_create_idempotency_conflict",
+                        }, status=409)
+                    return j(handler, {"session": public_session_projection(
+                        replay.compact() | {"messages": replay.messages}
+                    )})
+                from api.zhinang import CatalogResourceError, snapshot_role_from_catalog
+
+                try:
+                    profile = _validate_zhinang_create_environment(profile, project_id)
+                    role_snapshot = snapshot_role_from_catalog(
+                        zhinang_role_id,
+                        catalog_version=catalog_version,
+                    )
+                except CatalogResourceError as exc:
+                    return j(handler, {"error": str(exc), "code": exc.code}, status=409)
+                except ValueError as exc:
+                    return bad(handler, str(exc))
+            s = new_session(
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+                project_id=project_id,
+                worktree_info=worktree_info,
+            )
+            if zhinang_role_id:
+                s.zhinang_role_snapshot = role_snapshot
+                s.zhinang_create_request_id = request_id
+                s.zhinang_create_fingerprint = request_fingerprint
+                s.zhinang_usage = {}
+                s.composer_draft = composer_draft
+                if composer_draft.get("text") or composer_draft.get("files"):
+                    try:
+                        s.save()
+                    except Exception:
+                        logger.exception("failed to persist 智囊 composer draft")
+                        with LOCK:
+                            SESSIONS.pop(s.session_id, None)
+                        return bad(handler, "Failed to save 智囊 session draft", 500)
         if worktree_info:
             publish_session_list_changed("session_new")
         return j(handler, {"session": public_session_projection(
@@ -15618,6 +15896,10 @@ def handle_post(handler, parsed) -> bool:
                 created_at=time.time(),
                 updated_at=time.time(),
             )
+            from api.zhinang import clone_session_role_state, session_has_zhinang_binding
+
+            if session_has_zhinang_binding(session):
+                clone_session_role_state(session, copied_session)
 
             try:
                 _persist_new_session_truth(copied_session)
@@ -15953,6 +16235,13 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        from api.zhinang import session_has_zhinang_binding
+
+        if session_has_zhinang_binding(s):
+            return j(handler, {
+                "error": "固定智囊角色任务不允许切换 personality。",
+                "code": "zhinang_personality_fixed",
+            }, status=409)
         # Resolve personality from config.yaml agent.personalities section
         # (matches hermes-agent CLI behavior)
         prompt = ""
@@ -16642,6 +16931,10 @@ def handle_post(handler, parsed) -> bool:
             parent_session_id=source.session_id,
             session_source="fork",
         )
+        from api.zhinang import clone_session_role_state, session_has_zhinang_binding
+
+        if session_has_zhinang_binding(source):
+            clone_session_role_state(source, branch)
         try:
             _persist_new_session_truth(branch)
         except Exception:
@@ -22828,6 +23121,19 @@ def _handle_chat_start(handler, body, diag=None):
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        from api.zhinang import (
+            SessionRoleSnapshotError,
+            session_has_zhinang_binding,
+            validated_session_role_prompt,
+        )
+
+        if session_has_zhinang_binding(s):
+            try:
+                validated_session_role_prompt(
+                    getattr(s, "zhinang_role_snapshot", None)
+                )
+            except SessionRoleSnapshotError as exc:
+                return j(handler, {"error": str(exc), "code": exc.code}, status=409)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:
@@ -23062,7 +23368,20 @@ def _handle_chat_sync(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
+    _sync_turn_id = str(body.get("request_id") or uuid.uuid4().hex)[:160]
     with _get_session_agent_lock(s.session_id):
+        from api.zhinang import (
+            SessionRoleSnapshotError,
+            record_session_role_acceptance,
+            session_has_zhinang_binding,
+        )
+
+        if session_has_zhinang_binding(s):
+            try:
+                if record_session_role_acceptance(s, _sync_turn_id):
+                    s.save(touch_updated_at=False)
+            except SessionRoleSnapshotError as exc:
+                return j(handler, {"error": str(exc), "code": exc.code}, status=409)
         sync_snapshot = _snapshot_session_truth(s)
         model, model_provider = _resolve_compatible_session_model_state(
             body.get("model") or s.model,
@@ -23170,6 +23489,19 @@ def _handle_chat_sync(handler, body):
                 enabled_toolsets=_sync_toolsets,
                 session_id=s.session_id,
             )
+            from api.zhinang import (
+                SessionRoleSnapshotError,
+                apply_session_role_to_agent,
+            )
+            try:
+                apply_session_role_to_agent(
+                    agent,
+                    s,
+                    base_ephemeral_prompt=None,
+                    strict_turn=False,
+                )
+            except SessionRoleSnapshotError as exc:
+                return j(handler, {"error": str(exc), "code": exc.code}, status=409)
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
                 _dedupe_replayed_context_messages,
@@ -23203,7 +23535,6 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
-
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
