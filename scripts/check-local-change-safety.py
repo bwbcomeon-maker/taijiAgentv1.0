@@ -79,6 +79,20 @@ PLACEHOLDER_PATTERNS = (
     re.compile(r"(?:FAKE|FIXTURE|EXAMPLE)[A-Za-z0-9_.-]*", re.IGNORECASE),
 )
 
+# These fixed upstream documents contain reviewed teaching examples that trip
+# one generic finding. Suppress only that finding for the byte-exact blob; all
+# other checks still run, and a one-byte change restores the suppressed check.
+FIXED_UPSTREAM_FALSE_POSITIVES = {
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/engineering/engineering-email-intelligence-engineer.md": ("bef84b77b2ce3f2cbe29faa72ec0d58576bbcad390ee2c1bdcccaca38b4b125f", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/engineering/engineering-feishu-integration-developer.md": ("836667ab301da70a2da5d6241c44f2134fe059f839b4efeac7f6ceece632b76a", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/engineering/engineering-solidity-smart-contract-engineer.md": ("9e6f96fb29cc71faf2638bce3a5aa06ff15b4c674ca4ec039e5e4515a7844839", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/engineering/engineering-technical-writer.md": ("70c8a29cddf7de486b41185693b4961af3fcccbc632b8df13ec43572859edc43", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/security/security-ai-generated-code-auditor.md": ("ac2196a914bfb00dddfef93edb9eef1860f924f9582d814cd303ab45e4fc71bc", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/security/security-senior-secops.md": ("90b535077cff7253bf18355ec99d5205dbe09c9f3e93f5b85222183460f2b879", frozenset({"private-key"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/testing/testing-api-tester.md": ("c89d7ae592523f4799426a8b09700ec4b9d99bf2fcae2d1b0dd2900d5f770127", frozenset({"credential-assignment"})),
+    "hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/testing/testing-performance-benchmarker.md": ("24dbd3a55cf6ca36c5f8af4081e87859914131199d87b6f90d129643fcfba43e", frozenset({"credential-assignment"})),
+}
+
 
 class GitQueryError(RuntimeError):
     pass
@@ -389,6 +403,10 @@ def _content_findings(path: str, content: bytes, baseline: bytes = b"") -> list[
     )
     if credential_fingerprints - baseline_fingerprints:
         findings.append("credential-assignment")
+    false_positive = FIXED_UPSTREAM_FALSE_POSITIVES.get(path)
+    if false_positive and false_positive[0] == hashlib.sha256(content).hexdigest():
+        suppressed = false_positive[1]
+        findings = [finding for finding in findings if finding not in suppressed]
     return findings
 
 

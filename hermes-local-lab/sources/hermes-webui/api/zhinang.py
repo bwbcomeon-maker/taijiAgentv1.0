@@ -39,6 +39,7 @@ class CatalogResourceError(RuntimeError):
         "source_missing": "智囊角色资源缺失，请重试或联系维护人员。",
         "source_invalid": "智囊角色资源格式无效，请重试或联系维护人员。",
         "source_digest_mismatch": "智囊角色资源校验失败，请重试或联系维护人员。",
+        "control_digest_mismatch": "智囊目录控制资源校验失败，请重试或联系维护人员。",
         "source_inventory_mismatch": "智囊角色资源清单不完整，请重试或联系维护人员。",
         "role_not_found": "未找到指定智囊角色。",
     }
@@ -163,6 +164,24 @@ def _validate_frontmatter(payload: bytes) -> None:
         raise CatalogResourceError("source_invalid", detail="frontmatter_required_field")
 
 
+def _validate_control_digest(manifest: dict, prefix: str, payload: bytes) -> None:
+    expected_bytes = manifest.get(f"{prefix}_bytes")
+    expected_digest = manifest.get(f"{prefix}_sha256")
+    if (
+        not isinstance(expected_bytes, int)
+        or isinstance(expected_bytes, bool)
+        or expected_bytes < 1
+        or expected_bytes > _MAX_CONTROL_BYTES
+        or not isinstance(expected_digest, str)
+        or _SHA256_RE.fullmatch(expected_digest) is None
+    ):
+        raise CatalogResourceError("manifest_invalid", detail=f"{prefix}_record")
+    if len(payload) != expected_bytes:
+        raise CatalogResourceError("control_digest_mismatch", detail=f"{prefix}_bytes")
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise CatalogResourceError("control_digest_mismatch", detail=f"{prefix}_sha256")
+
+
 class ZhinangSourceCatalog:
     """Load only files named by a fixed, checksum-bound built-in manifest."""
 
@@ -207,21 +226,22 @@ class ZhinangSourceCatalog:
 
         divisions_path = self._control_path(manifest.get("divisions_path"))
         license_path = self._control_path(manifest.get("license_path"))
-        divisions_document = _parse_json_object(
-            _read_regular(
-                divisions_path,
-                maximum=_MAX_CONTROL_BYTES,
-                missing_code="catalog_missing",
-            )
+        divisions_payload = _read_regular(
+            divisions_path,
+            maximum=_MAX_CONTROL_BYTES,
+            missing_code="catalog_missing",
         )
+        _validate_control_digest(manifest, "divisions", divisions_payload)
+        divisions_document = _parse_json_object(divisions_payload)
         divisions = divisions_document.get("divisions")
         if not isinstance(divisions, dict) or not divisions:
             raise CatalogResourceError("manifest_invalid", detail="divisions")
-        _read_regular(
+        license_payload = _read_regular(
             license_path,
             maximum=_MAX_CONTROL_BYTES,
             missing_code="catalog_missing",
         )
+        _validate_control_digest(manifest, "license", license_payload)
 
         source_root_value = manifest.get("source_root")
         if source_root_value != "upstream/agency-agents":

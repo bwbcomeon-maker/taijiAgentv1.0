@@ -50,18 +50,17 @@ def _write_catalog(root: Path) -> dict[str, bytes]:
                 "source_sha256": hashlib.sha256(payload).hexdigest(),
             }
         )
-    (root / "LICENSE.agency-agents").write_text("MIT License\n", encoding="utf-8")
-    (root / "divisions.json").write_text(
-        json.dumps(
-            {
-                "divisions": {
-                    "product": {"label": "Product"},
-                    "sales": {"label": "Sales"},
-                }
+    license_payload = b"MIT License\n"
+    divisions_payload = json.dumps(
+        {
+            "divisions": {
+                "product": {"label": "Product"},
+                "sales": {"label": "Sales"},
             }
-        ),
-        encoding="utf-8",
-    )
+        }
+    ).encode("utf-8")
+    (root / "LICENSE.agency-agents").write_bytes(license_payload)
+    (root / "divisions.json").write_bytes(divisions_payload)
     manifest = {
         "schema_version": 1,
         "catalog_version": "agency-agents-af128a92888f-source-v1",
@@ -69,7 +68,11 @@ def _write_catalog(root: Path) -> dict[str, bytes]:
         "upstream_commit": AGENCY_AGENTS_COMMIT,
         "source_root": "upstream/agency-agents",
         "license_path": "LICENSE.agency-agents",
+        "license_bytes": len(license_payload),
+        "license_sha256": hashlib.sha256(license_payload).hexdigest(),
         "divisions_path": "divisions.json",
+        "divisions_bytes": len(divisions_payload),
+        "divisions_sha256": hashlib.sha256(divisions_payload).hexdigest(),
         "role_count": len(manifest_roles),
         "roles": manifest_roles,
     }
@@ -152,6 +155,19 @@ def test_catalog_rejects_wrong_upstream_version(tmp_path):
         ZhinangSourceCatalog(tmp_path).validate()
 
     assert raised.value.code == "catalog_version_mismatch"
+
+
+@pytest.mark.parametrize("control_name", ["LICENSE.agency-agents", "divisions.json"])
+def test_catalog_rejects_changed_control_resources(tmp_path, control_name):
+    _write_catalog(tmp_path)
+    with (tmp_path / control_name).open("ab") as handle:
+        handle.write(b" ")
+
+    with pytest.raises(CatalogResourceError) as raised:
+        ZhinangSourceCatalog(tmp_path).validate()
+
+    assert raised.value.code == "control_digest_mismatch"
+    assert str(tmp_path) not in str(raised.value)
 
 
 def test_catalog_returns_explicit_not_found_without_treating_id_as_path(tmp_path):

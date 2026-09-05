@@ -162,7 +162,11 @@ def build_import(upstream_root: Path, output_root: Path) -> dict:
             "upstream_commit": UPSTREAM_COMMIT,
             "source_root": "upstream/agency-agents",
             "license_path": "LICENSE.agency-agents",
+            "license_bytes": len(license_payload),
+            "license_sha256": hashlib.sha256(license_payload).hexdigest(),
             "divisions_path": "divisions.json",
+            "divisions_bytes": len(divisions_payload),
+            "divisions_sha256": hashlib.sha256(divisions_payload).hexdigest(),
             "role_count": len(records),
             "roles": records,
         }
@@ -187,7 +191,12 @@ def check_import(upstream_root: Path, output_root: Path) -> dict:
         raise ImportFailure("could not import the product catalog validator") from error
 
     snapshot = ZhinangSourceCatalog(output_root).validate()
-    _, divisions = _divisions(upstream_root)
+    divisions_payload, divisions = _divisions(upstream_root)
+    license_payload = _read_regular(upstream_root / "LICENSE")
+    if _read_regular(output_root / "divisions.json") != divisions_payload:
+        raise ImportFailure("imported divisions.json does not match fixed upstream")
+    if _read_regular(output_root / "LICENSE.agency-agents") != license_payload:
+        raise ImportFailure("imported license does not match fixed upstream")
     role_paths = _tracked_roles(upstream_root, divisions)
     if snapshot.role_count != len(role_paths):
         raise ImportFailure("imported role count does not match fixed upstream")

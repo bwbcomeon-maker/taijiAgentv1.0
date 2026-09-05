@@ -1,0 +1,3 @@
+# Preserve the checksum-bound upstream role corpus byte-for-byte.
+hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/** -whitespace
+hermes-local-lab/sources/hermes-webui/data/zhinang/upstream/agency-agents/design/design-persona-walkthrough.md conflict-marker-size=64
