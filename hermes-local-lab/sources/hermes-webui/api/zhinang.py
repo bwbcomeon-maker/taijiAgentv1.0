@@ -5,14 +5,18 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import stat
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping, Sequence
+from urllib.parse import quote
 
 
 AGENCY_AGENTS_COMMIT = "af128a92888fd7d7c389b6cb37f1820be1b3cd9d"
@@ -22,6 +26,23 @@ DATA_ROOT = Path(__file__).resolve().parent.parent / "data" / "zhinang"
 CHINESE_CONTENT_PATH = DATA_ROOT / "chinese-content-v1.json"
 CHINESE_CONTENT_SHA256 = "b2122872c03981332854d1afc2c425ad5d63c59ce8a4ec4b9ae3d852d83c45c6"
 RUNTIME_ADAPTER_VERSION = "taiji-zhinang-runtime-v3"
+CATALOG_PAGE_SIZE = 24
+CATALOG_CATEGORIES = (
+    "售前与方案",
+    "产品与研发",
+    "设计与体验",
+    "市场与增长",
+    "文档与研究",
+    "运营与管理",
+)
+_FEATURED_ROLE_IDS = (
+    "agency:sales/sales-engineer",
+    "agency:sales/sales-proposal-strategist",
+    "agency:product/product-manager",
+    "agency:engineering/engineering-software-architect",
+    "agency:marketing/marketing-content-creator",
+    "taiji:document-reviewer",
+)
 
 _RUNTIME_ADAPTATION = (
     "Taiji runtime adaptation: respond in Chinese by default unless the user "
@@ -74,6 +95,15 @@ class SessionRoleSnapshotError(RuntimeError):
         self.code = "zhinang_snapshot_invalid"
         self.detail = detail
         super().__init__("智囊角色快照已损坏，无法继续此任务；请新建智囊任务。")
+
+
+class ZhinangFavoritesError(RuntimeError):
+    """A safe failure for unreadable or uncommitted favorite state."""
+
+    code = "zhinang_favorites_unavailable"
+
+    def __init__(self, message: str = "智囊收藏状态不可用，请重试。") -> None:
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -395,6 +425,22 @@ class ZhinangSourceCatalog:
             raw_source=raw_source,
         )
 
+    def read_license(self) -> str:
+        """Read the checksum-bound upstream license as display text."""
+        self._snapshot or self.validate()
+        manifest = self._manifest()
+        path = self._control_path(manifest.get("license_path"))
+        payload = _read_regular(
+            path,
+            maximum=_MAX_CONTROL_BYTES,
+            missing_code="catalog_missing",
+        )
+        _validate_control_digest(manifest, "license", payload)
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise CatalogResourceError("manifest_invalid", detail="license_utf8") from error
+
 
 class ZhinangContentCatalog:
     """Validate the checksum-bound Chinese display and runtime adaptation layer."""
@@ -433,9 +479,8 @@ class ZhinangContentCatalog:
             raise CatalogResourceError("manifest_invalid", detail="chinese_role_count")
         roles: dict[str, dict] = {}
         source_paths: set[str] = set()
-        allowed_categories = {
-            "售前与方案", "产品与研发", "设计与体验", "市场与增长", "文档与研究", "运营与管理",
-        }
+        allowed_categories = set(CATALOG_CATEGORIES)
+        featured: dict[int, str] = {}
         for value in values:
             if not isinstance(value, dict):
                 raise CatalogResourceError("manifest_invalid", detail="chinese_role_shape")
@@ -444,6 +489,19 @@ class ZhinangContentCatalog:
             role_id = value["role_id"]
             if role_id in roles or value.get("category") not in allowed_categories:
                 raise CatalogResourceError("manifest_invalid", detail="chinese_role_identity")
+            featured_order = value.get("featured_order")
+            if featured_order is not None:
+                if (
+                    not isinstance(featured_order, int)
+                    or isinstance(featured_order, bool)
+                    or featured_order < 1
+                    or featured_order > len(_FEATURED_ROLE_IDS)
+                    or featured_order in featured
+                ):
+                    raise CatalogResourceError(
+                        "manifest_invalid", detail="featured_order"
+                    )
+                featured[featured_order] = role_id
             if (
                 not isinstance(value.get("tags"), list)
                 or not all(isinstance(item, str) and item.strip() for item in value["tags"])
@@ -489,6 +547,8 @@ class ZhinangContentCatalog:
             roles[role_id] = copy.deepcopy(value)
         if source_paths != {record.source_path for record in source.roles.values()}:
             raise CatalogResourceError("source_inventory_mismatch", detail="chinese_source_set")
+        if tuple(featured.get(index) for index in range(1, 7)) != _FEATURED_ROLE_IDS:
+            raise CatalogResourceError("manifest_invalid", detail="featured_roles")
         self._roles = MappingProxyType(roles)
         return self._roles
 
@@ -502,6 +562,548 @@ class ZhinangContentCatalog:
         if role is None:
             raise CatalogResourceError("role_not_found", detail="unknown_role_id")
         return copy.deepcopy(role)
+
+
+_CURRENT_CATALOG_LOCK = threading.RLock()
+_CURRENT_SOURCE_CATALOG: ZhinangSourceCatalog | None = None
+_CURRENT_CATALOG_ROWS: tuple[dict, ...] | None = None
+_FAVORITES_LOCK = threading.RLock()
+_MAX_PREFERENCES_BYTES = 4 * 1024 * 1024
+_FAVORITE_FIELDS = ("role_id", "name", "category", "tags", "summary", "updated_at")
+_CATALOG_LIST_FIELDS = (
+    "role_id",
+    "name",
+    "original_name",
+    "summary",
+    "category",
+    "tags",
+    "capabilities",
+    "featured_order",
+    "catalog_order",
+)
+
+
+def _current_catalog_bundle() -> tuple[ZhinangSourceCatalog, tuple[dict, ...]]:
+    global _CURRENT_SOURCE_CATALOG, _CURRENT_CATALOG_ROWS
+    with _CURRENT_CATALOG_LOCK:
+        if _CURRENT_SOURCE_CATALOG is not None and _CURRENT_CATALOG_ROWS is not None:
+            return _CURRENT_SOURCE_CATALOG, _CURRENT_CATALOG_ROWS
+        source_catalog = ZhinangSourceCatalog()
+        source_snapshot = source_catalog.validate()
+        content = ZhinangContentCatalog().validate(source_snapshot)
+        rows = []
+        for catalog_order, (role_id, value) in enumerate(content.items()):
+            rows.append({
+                "role_id": role_id,
+                "name": value["name"],
+                "original_name": value["original_name"],
+                "summary": value["summary"],
+                "category": value["category"],
+                "tags": copy.deepcopy(value["tags"]),
+                "capabilities": copy.deepcopy(value["capabilities"]),
+                "featured_order": value.get("featured_order"),
+                "catalog_order": catalog_order,
+                "available": True,
+            })
+        _CURRENT_SOURCE_CATALOG = source_catalog
+        _CURRENT_CATALOG_ROWS = tuple(rows)
+        return source_catalog, _CURRENT_CATALOG_ROWS
+
+
+def load_current_catalog_rows() -> list[dict]:
+    """Return safe current catalog rows in the checksum-bound content order."""
+    _source, rows = _current_catalog_bundle()
+    return copy.deepcopy(list(rows))
+
+
+def _favorite_profile_key(profile: object) -> str:
+    value = str(profile or "default").strip() or "default"
+    if len(value) > 128 or any(ord(character) < 32 for character in value):
+        raise ZhinangFavoritesError("智囊收藏档案无效，请刷新后重试。")
+    from api.profiles import _profiles_match
+
+    return "default" if _profiles_match(value, "default") else value
+
+
+def _favorite_record(role_id: str, role: Mapping[str, object], timestamp: float) -> dict:
+    name = role.get("name")
+    category = role.get("category")
+    summary = role.get("summary")
+    tags = role.get("tags")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or category not in CATALOG_CATEGORIES
+        or not isinstance(summary, str)
+        or not summary.strip()
+        or not isinstance(tags, list)
+        or not all(isinstance(tag, str) and tag.strip() for tag in tags)
+    ):
+        raise ZhinangFavoritesError("智囊收藏角色信息无效，请刷新后重试。")
+    if (
+        not isinstance(timestamp, (int, float))
+        or isinstance(timestamp, bool)
+        or not math.isfinite(float(timestamp))
+        or float(timestamp) < 0
+    ):
+        raise ZhinangFavoritesError("智囊收藏时间无效，请刷新后重试。")
+    return {
+        "role_id": role_id,
+        "name": name.strip(),
+        "category": category,
+        "tags": [tag.strip() for tag in tags[:20]],
+        "summary": summary.strip(),
+        "updated_at": float(timestamp),
+    }
+
+
+class ZhinangFavoritesStore:
+    """Atomically persist profile-scoped favorite sets under WebUI state."""
+
+    def __init__(self, state_dir: str | os.PathLike[str] | Path | None = None) -> None:
+        if state_dir is None:
+            from api import config
+
+            state_dir = config.STATE_DIR
+        self.state_dir = Path(state_dir).expanduser().resolve()
+        self.root = self.state_dir / "zhinang"
+        self.path = self.root / "preferences.json"
+
+    @staticmethod
+    def _empty() -> dict:
+        return {"schema_version": 1, "profiles": {}}
+
+    def _ensure_root(self) -> None:
+        try:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            metadata = self.root.lstat()
+        except OSError as error:
+            raise ZhinangFavoritesError("智囊收藏状态目录不可用，请重试。") from error
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ZhinangFavoritesError("智囊收藏状态目录不可用，请重试。")
+
+    def _read(self) -> dict:
+        try:
+            metadata = self.path.lstat()
+        except FileNotFoundError:
+            return self._empty()
+        except OSError as error:
+            raise ZhinangFavoritesError() from error
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size < 1
+            or metadata.st_size > _MAX_PREFERENCES_BYTES
+        ):
+            raise ZhinangFavoritesError()
+        try:
+            payload = self.path.read_bytes()
+            document = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ZhinangFavoritesError() from error
+        if not isinstance(document, dict) or document.get("schema_version") != 1:
+            raise ZhinangFavoritesError()
+        profiles = document.get("profiles")
+        if not isinstance(profiles, dict):
+            raise ZhinangFavoritesError()
+        for profile, value in profiles.items():
+            if not isinstance(profile, str) or not isinstance(value, dict):
+                raise ZhinangFavoritesError()
+            favorites = value.get("favorites")
+            if not isinstance(favorites, dict):
+                raise ZhinangFavoritesError()
+            for role_id, record in favorites.items():
+                if (
+                    not isinstance(role_id, str)
+                    or not isinstance(record, dict)
+                    or record.get("role_id") != role_id
+                    or set(record) != set(_FAVORITE_FIELDS)
+                ):
+                    raise ZhinangFavoritesError()
+                _favorite_record(role_id, record, record.get("updated_at"))
+        return document
+
+    def _write(self, document: dict) -> None:
+        encoded = (
+            json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded) > _MAX_PREFERENCES_BYTES:
+            raise ZhinangFavoritesError("智囊收藏数量超出可保存范围。")
+        self._ensure_root()
+        descriptor = -1
+        temporary = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".preferences.", suffix=".tmp", dir=self.root
+            )
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            temporary = None
+            try:
+                directory_fd = os.open(self.root, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+        except OSError as error:
+            raise ZhinangFavoritesError("智囊收藏状态保存失败，请重试。") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+
+    def list_favorites(self, profile: object) -> dict[str, dict]:
+        key = _favorite_profile_key(profile)
+        with _FAVORITES_LOCK:
+            document = self._read()
+            profile_state = document["profiles"].get(key, {})
+            favorites = profile_state.get("favorites", {})
+            return copy.deepcopy(favorites)
+
+    def set_favorite(
+        self,
+        profile: object,
+        role_id: object,
+        favorite: bool,
+        role: Mapping[str, object] | None = None,
+        *,
+        updated_at: float | None = None,
+    ) -> dict:
+        key = _favorite_profile_key(profile)
+        role_key = str(role_id or "").strip()
+        if not role_key or len(role_key) > 500 or any(ord(character) < 32 for character in role_key):
+            raise ZhinangFavoritesError("智囊收藏角色标识无效，请刷新后重试。")
+        if not isinstance(favorite, bool):
+            raise ZhinangFavoritesError("智囊收藏请求无效，请重试。")
+        with _FAVORITES_LOCK:
+            document = self._read()
+            profiles = document["profiles"]
+            profile_state = profiles.setdefault(key, {"favorites": {}})
+            favorites = profile_state["favorites"]
+            if favorite:
+                if role is None:
+                    raise ZhinangFavoritesError("当前版本未提供此智囊角色，无法收藏。")
+                if role_key in favorites:
+                    return {"role_id": role_key, "favorite": True}
+                favorites[role_key] = _favorite_record(
+                    role_key,
+                    role,
+                    time.time() if updated_at is None else updated_at,
+                )
+            else:
+                if role_key not in favorites:
+                    return {"role_id": role_key, "favorite": False}
+                favorites.pop(role_key, None)
+                if not favorites:
+                    profiles.pop(key, None)
+            self._write(document)
+        return {"role_id": role_key, "favorite": favorite}
+
+
+def _safe_list_row(value: Mapping[str, object]) -> dict:
+    return {
+        field: copy.deepcopy(value.get(field))
+        for field in _CATALOG_LIST_FIELDS
+        if field in value
+    }
+
+
+def _search_matches(item: Mapping[str, object], query: str) -> bool:
+    if not query:
+        return True
+    values = [
+        item.get("name", ""),
+        item.get("original_name", ""),
+        item.get("summary", ""),
+        *(item.get("tags") if isinstance(item.get("tags"), list) else []),
+        *(
+            item.get("capabilities")
+            if isinstance(item.get("capabilities"), list)
+            else []
+        ),
+    ]
+    needle = query.casefold()
+    return any(needle in str(value).casefold() for value in values)
+
+
+def query_catalog_roles(
+    *,
+    rows: Sequence[Mapping[str, object]] | None = None,
+    favorites: Mapping[str, Mapping[str, object]] | None = None,
+    recent: Mapping[str, Mapping[str, object]] | None = None,
+    scope: str = "all",
+    category: str = "all",
+    view: str = "featured",
+    query: str = "",
+    page: int = 1,
+) -> dict:
+    """Filter one current catalog against authoritative favorites and usage."""
+    if scope not in {"all", "favorites"}:
+        raise ValueError("scope must be all or favorites")
+    if category != "all" and category not in CATALOG_CATEGORIES:
+        raise ValueError("category is invalid")
+    if view not in {"featured", "all", "recent"}:
+        raise ValueError("view must be featured, all, or recent")
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        raise ValueError("page must be a positive integer")
+    normalized_query = str(query or "").strip()
+    if len(normalized_query) > 200:
+        raise ValueError("query must be at most 200 characters")
+
+    current_rows = load_current_catalog_rows() if rows is None else list(rows)
+    current: dict[str, dict] = {}
+    for row in current_rows:
+        role_id = row.get("role_id") if isinstance(row, Mapping) else None
+        if not isinstance(role_id, str) or not role_id or role_id in current:
+            continue
+        item = _safe_list_row(row)
+        item["available"] = True
+        current[role_id] = item
+    favorite_rows = {
+        str(role_id): copy.deepcopy(dict(value))
+        for role_id, value in (favorites or {}).items()
+        if isinstance(role_id, str) and isinstance(value, Mapping)
+    }
+    recent_rows = {
+        str(role_id): copy.deepcopy(dict(value))
+        for role_id, value in (recent or {}).items()
+        if isinstance(role_id, str) and isinstance(value, Mapping)
+    }
+
+    if view == "featured":
+        role_ids = {
+            role_id
+            for role_id, item in current.items()
+            if isinstance(item.get("featured_order"), int)
+        }
+    elif view == "recent":
+        role_ids = set(recent_rows)
+    elif scope == "favorites":
+        role_ids = set(favorite_rows)
+    else:
+        role_ids = set(current)
+    if scope == "favorites":
+        role_ids &= set(favorite_rows)
+
+    items = []
+    for role_id in role_ids:
+        available = role_id in current
+        recent_record = recent_rows.get(role_id)
+        if available:
+            item = copy.deepcopy(current[role_id])
+        elif role_id in favorite_rows:
+            item = _safe_list_row(favorite_rows[role_id])
+        elif recent_record is not None:
+            item = _safe_list_row(recent_record)
+        else:
+            continue
+        item["role_id"] = role_id
+        item["available"] = available
+        item["favorite"] = role_id in favorite_rows
+        item["historical"] = bool(not available and recent_record is not None)
+        item["last_accepted_at"] = (
+            recent_record.get("last_accepted_at")
+            if recent_record is not None
+            else None
+        )
+        item["continue_session_id"] = (
+            recent_record.get("continue_session_id")
+            if recent_record is not None
+            else None
+        )
+        if not available:
+            item["unavailable_reason"] = "当前版本未提供此智囊角色。"
+            item["featured_order"] = None
+            item["catalog_order"] = None
+        if category != "all" and item.get("category") != category:
+            continue
+        if not _search_matches(item, normalized_query):
+            continue
+        items.append(item)
+
+    if view == "featured":
+        items.sort(key=lambda item: (
+            int(item.get("featured_order") or 10**9),
+            int(item.get("catalog_order") or 10**9),
+            item["role_id"],
+        ))
+    elif view == "recent":
+        items.sort(key=lambda item: (
+            -float(item.get("last_accepted_at") or 0),
+            item["role_id"],
+        ))
+    else:
+        items.sort(key=lambda item: (
+            item.get("catalog_order") is None,
+            int(item.get("catalog_order") or 0),
+            item["role_id"],
+        ))
+
+    total = len(items)
+    pages = max(1, math.ceil(total / CATALOG_PAGE_SIZE))
+    offset = (page - 1) * CATALOG_PAGE_SIZE
+    page_items = items[offset:offset + CATALOG_PAGE_SIZE]
+    category_counts = {value: 0 for value in CATALOG_CATEGORIES}
+    for item in current.values():
+        if item.get("category") in category_counts:
+            category_counts[item["category"]] += 1
+    return {
+        "catalog_version": CATALOG_VERSION,
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": CATALOG_PAGE_SIZE,
+        "pages": pages,
+        "filters": {
+            "scope": scope,
+            "category": category,
+            "view": view,
+            "query": normalized_query,
+        },
+        "categories": [
+            {"category": value, "count": category_counts[value]}
+            for value in CATALOG_CATEGORIES
+        ],
+    }
+
+
+def _session_row(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    compact = getattr(value, "compact", None)
+    if callable(compact):
+        try:
+            result = compact(sidebar_safe=True)
+        except TypeError:
+            result = compact()
+        except Exception:
+            return None
+        return result if isinstance(result, Mapping) else None
+    return None
+
+
+def select_recent_roles(
+    session_rows: Sequence[Mapping[str, object]],
+    *,
+    resolve_session: Callable[[str], object | None],
+) -> dict[str, dict]:
+    """Select the newest accepted executable task for each visible role."""
+    selected: dict[str, dict] = {}
+    for display_row in session_rows:
+        if not isinstance(display_row, Mapping):
+            continue
+        display_role = display_row.get("zhinang_role")
+        if not isinstance(display_role, Mapping):
+            continue
+        display_role_id = display_role.get("role_id")
+        if not isinstance(display_role_id, str) or not display_role_id:
+            continue
+        candidate_ids = []
+        lineage_tip = display_row.get("_lineage_tip_id")
+        if isinstance(lineage_tip, str) and lineage_tip:
+            candidate_ids.append(lineage_tip)
+        if not display_row.get("pre_compression_snapshot"):
+            session_id = display_row.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                candidate_ids.append(session_id)
+        for candidate_id in dict.fromkeys(candidate_ids):
+            try:
+                candidate = _session_row(resolve_session(candidate_id))
+            except Exception:
+                candidate = None
+            if candidate is None or candidate.get("pre_compression_snapshot"):
+                continue
+            candidate_role = candidate.get("zhinang_role")
+            if not isinstance(candidate_role, Mapping):
+                continue
+            role_id = candidate_role.get("role_id")
+            accepted_at = candidate_role.get("last_accepted_at")
+            if (
+                role_id != display_role_id
+                or not isinstance(accepted_at, (int, float))
+                or isinstance(accepted_at, bool)
+                or not math.isfinite(float(accepted_at))
+                or float(accepted_at) <= 0
+            ):
+                continue
+            item = {
+                field: copy.deepcopy(candidate_role.get(field))
+                for field in (
+                    "role_id", "name", "original_name", "summary", "category", "tags"
+                )
+                if field in candidate_role
+            }
+            item["last_accepted_at"] = float(accepted_at)
+            item["continue_session_id"] = candidate_id
+            previous = selected.get(role_id)
+            if previous is None or (
+                item["last_accepted_at"], candidate_id
+            ) > (
+                float(previous.get("last_accepted_at") or 0),
+                str(previous.get("continue_session_id") or ""),
+            ):
+                selected[role_id] = item
+            break
+    return selected
+
+
+def current_role_detail(role_id: str, *, favorite: bool = False) -> dict:
+    """Return the complete safe current description for one built-in role."""
+    source_catalog, _rows = _current_catalog_bundle()
+    role_snapshot = snapshot_role_from_catalog(
+        role_id,
+        catalog_version=CATALOG_VERSION,
+        catalog=source_catalog,
+    )
+    detail = public_session_role_detail_projection(role_snapshot)
+    detail.pop("created_at", None)
+    detail["historical"] = False
+    detail["available"] = True
+    detail["favorite"] = bool(favorite)
+    if role_id.startswith("agency:"):
+        detail["license"] = source_catalog.read_license()
+        detail["source_url"] = (
+            f"{AGENCY_AGENTS_REPOSITORY}/blob/{AGENCY_AGENTS_COMMIT}/"
+            + quote(str(detail.get("source_path") or ""), safe="/")
+        )
+    else:
+        detail["source_url"] = None
+    return detail
+
+
+def removed_role_detail(
+    role_id: str,
+    *,
+    favorite: Mapping[str, object] | None = None,
+    recent: Mapping[str, object] | None = None,
+) -> dict:
+    """Return only retained safe metadata for a role absent from this catalog."""
+    source = favorite or recent
+    if not isinstance(source, Mapping):
+        raise CatalogResourceError("role_not_found", detail="unknown_role_id")
+    detail = _safe_list_row(source)
+    detail.update({
+        "role_id": role_id,
+        "available": False,
+        "favorite": favorite is not None,
+        "historical": recent is not None,
+        "last_accepted_at": recent.get("last_accepted_at") if recent else None,
+        "continue_session_id": recent.get("continue_session_id") if recent else None,
+        "unavailable_reason": "当前版本未提供此智囊角色。",
+    })
+    return detail
 
 
 _SESSION_ROLE_SCHEMA_VERSION = 2

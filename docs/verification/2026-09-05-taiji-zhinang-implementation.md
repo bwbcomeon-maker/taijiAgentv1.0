@@ -1,6 +1,6 @@
 # 太极智囊实施与验收台账
 
-> 状态更新：2026-09-05（阶段 2 第三轮终审三项修正完成，统一门禁待重跑）
+> 状态更新：2026-09-05（阶段 2 已审核并提交；阶段 3 目录、详情、收藏与最近使用后端实施中）
 > 功能契约：[太极智囊 PRD](../requirements/2026-09-05-taiji-zhinang-prd.md)
 
 ## 当前状态卡
@@ -8,12 +8,12 @@
 | 项目 | 已验证状态 |
 | --- | --- |
 | 物理仓库 / Git common dir | `/Users/bwb/Documents/工作/taiji-agentv1.0` / `.git` |
-| 开发线与基线 | `main@266dfd7333e7e4911d6f67192a7c8e899064cf3b`；`origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e`，本地领先 2、远端未领先；阶段 2 结论绑定下述未提交工作树/待审暂存内容 |
+| 开发线与基线 | `main@d3a108c6d373da767b55ecf82c1f7cd4b249bc99`；`origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e`，本地领先 3、远端未领先；阶段 2 已在本地提交，阶段 3 结论绑定当前未提交工作树 |
 | 写入边界 | 当前实施者是共享工作树及 Git index 唯一写入者；其他协作者只读 |
-| 当前证据层 | 本地源码与资源候选；HTTP 路由、真实 `AIAgent` 到 mock Provider、持久化/重启和静态前端契约证据；尚无可见智囊页面或浏览器证据 |
-| 已完成 | 274 个中文角色资源对账；服务端完整不可变角色快照；按请求 profile 约束的幂等新建与历史详情；保存/加载/索引/公开投影；sync、streaming、Gateway 逐轮注入；缓存、自愈重建、压缩 tip、重启、复制/分支/清空、固定 personality 拒绝和受理元数据；按 SID 串行的草稿写入与未上传 `File` 内存隔离 |
-| 未完成 | 收藏/筛选/分页与完整目录 API；智囊库可见页面；A07 保存失败浏览器交互；A12 下架收藏；A13/A14/A17；F01–F12 和 A01–A17 整体验收 |
-| 当前出口 | 阶段 2 第三轮暂存候选经 fresh Sol 发现三项新 P1；损坏快照列表隔离、未上传附件跨任务隔离和草稿写入串行化均已按 RED→GREEN 修正，受影响聚焦/关联测试通过；待重跑统一门禁、生成新暂存哈希并接受下一轮 fresh Sol；通过前不提交，不重试未获具体远端授权的 push |
+| 当前证据层 | 本地源码与资源；目录/详情/收藏/最近使用 HTTP 路由、真实 `AIAgent` 到 mock Provider、持久化/重启和静态前端契约证据；尚无可见智囊页面或浏览器证据 |
+| 已完成 | 274 个中文角色资源对账；服务端完整不可变角色快照；幂等新建与历史详情；目录筛选及 24 条分页、固定 6 精选、完整安全当前详情；profile 权威原子收藏与下架取消；基于真实受理记录的最近任务回溯；每轮角色注入及压缩、重启、复制/分支/清空契约；按 SID 串行草稿与未上传 `File` 内存隔离 |
+| 未完成 | 智囊库可见页面及相关浏览器验收；A07 保存失败浏览器交互；A13/A14/A17；F01–F12 和 A01–A17 整体验收 |
+| 当前出口 | 阶段 2 已经 fresh Sol v4 审核通过并本地提交 `d3a108c6d373da767b55ecf82c1f7cd4b249bc99`；阶段 3 已按 RED→GREEN 完成实施，79 项聚焦/关联回归及统一 `scripts/verify.sh --full` 全部 PASS，待精确暂存、新哈希与 fresh Sol 终审；终审 PASS 前不提交，不重试未获具体远端授权的 push |
 
 ## 工具链与隔离环境
 
@@ -59,11 +59,11 @@
 | --- | --- | --- |
 | F01 智囊库入口与外壳 | 未开始 | 阶段 4 接入现有导航与品牌 |
 | F02 内置角色目录 | 实施中 | 273 个固定上游角色加 1 个本地角色的中文展示层已入库并与来源逐项对账；完整目录接口/UI 留待后续阶段 |
-| F03 分类、搜索、精选与全部角色 | 未开始 | 阶段 3 接口契约和阶段 4 UI |
-| F04 我的收藏 | 未开始 | 阶段 3，沿用统一状态目录与档案隔离 |
-| F05 最近使用 | 实施中 | 会话中已记录首次/最后受理时间和请求去重标识；最近使用查询与页面留待阶段 3/4 |
-| F06 角色卡片及详情 | 未开始 | 阶段 3 内容，阶段 4 UI |
-| F07 完整角色说明与来源 | 实施中 | 新任务保存完整历史说明、原文、版本、改编和许可；历史详情接口不返回内部提示词；当前目录详情/UI 留待后续 |
+| F03 分类、搜索、精选与全部角色 | 实施中 | 正交范围/领域/视图/搜索筛选、24 条分页及固定 6 精选接口契约已通过；阶段 4 实现 UI |
+| F04 我的收藏 | 实施中 | profile 权威状态、原子写入、进程内并发保护、重启等价重读及下架取消接口已通过；阶段 4 实现 UI |
+| F05 最近使用 | 实施中 | 从真实受理元数据选取最新可见执行 tip，压缩展示快照与可继续 tip 分离，删除后按同角色其他独立任务回溯；阶段 4 实现 UI |
+| F06 角色卡片及详情 | 实施中 | 卡片安全列表投影与完整当前详情 API 已通过；阶段 4 实现卡片与详情 UI |
+| F07 完整角色说明与来源 | 实施中 | 当前目录详情可查原文、版本、改编、固定 source URL 和完整 MIT 文本；历史详情沿用任务快照且不返回内部提示词；UI 留待阶段 4 |
 | F08 示例任务 | 实施中 | 服务端原子保存新任务草稿；前端按 SID 串行 debounce/立即/切换前/clear 四种写入，切换前等待旧写入后提交最新文本；原生 `File` 仅按 SID 保存在内存，成功切换隔离、失败保持原任务状态；示例 UI 与保存失败浏览器交互未实现 |
 | F09 使用此智囊 | 待验收 | `role_id/catalog_version/request_id` 幂等创建、参数冲突和非法环境拒绝已通过 HTTP 测试；可见入口待阶段 4 |
 | F10 持续角色上下文 | 待验收 | sync、streaming、Gateway、缓存、自愈、压缩、重启、复制/分支/清空均保存或重放固定快照；浏览器端标签待阶段 4 |
@@ -76,20 +76,20 @@
 | --- | --- | --- |
 | A01 来源和范围 | 未开始 | 真实 WebUI 导航、品牌与排除项浏览器证据 |
 | A02 目录对账 | 通过 | 273 个固定源加 1 个本地角色与中文层 274 项逐项对账；必填字段、六分类、能力 3–5、交付示例 2–3、固定提交和有效提示词均由聚焦测试验证 |
-| A03 筛选分页 | 未开始 | 接口契约 + 500 条数据 + 浏览器竞态/分页 |
-| A04 收藏持久化 | 未开始 | 写入故障、刷新/重启、多窗口和档案隔离 |
-| A05 使用事实 | 实施中 | sync、streaming 与 Gateway 在执行链受理时记录首次/最后时间和请求去重标识；最近查询与删除后的产品表现未验收 |
-| A06 详情真实性 | 实施中 | 历史详情从会话完整快照读取并排除内部有效提示词；卡片/当前详情 UI 未实现 |
+| A03 筛选分页 | 实施中 | 中英文/标签搜索、领域、精选、收藏、最近正交与稳定 24 条分页接口契约通过；500 条 30 次性能实测及浏览器竞态留待后续 |
+| A04 收藏持久化 | 实施中 | 两个独立 Store 实例并发写、新实例重读、profile 隔离、幂等取消和 `os.replace` 故障前后磁盘不变已通过；多窗口与真实服务重启留待 UI 阶段 |
+| A05 使用事实 | 实施中 | sync、streaming 与 Gateway 受理时间/请求去重已通过；最近查询分离展示快照与执行 tip，并重验 profile、角色、snapshot 与可见性，tip→branch→duplicate→全删回退通过；产品 UI 待验收 |
+| A06 详情真实性 | 实施中 | 当前详情从固定目录生成，包含原文、改编、版本、完整 MIT 和固定来源；历史详情从会话快照读取，二者都排除内部有效提示词；卡片/详情 UI 未实现 |
 | A07 示例与草稿 | 实施中 | Node 24 实际函数测试以 deferred Promise 证明同 SID 的 debounce/立即/切换前/clear 串行，旧请求不能反写最新文本或 clear，失败链允许后续显式重试；原生 `File` 不进入 JSON，成功新建/切换按 SID 隔离并能切回同一对象，创建或切换前保存失败保持原 SID/文本/附件；真实浏览器提示和模型调用计数待后续 |
 | A08 创建幂等 | 通过 | HTTP 顺序重放、两线程并发、同请求不同参数冲突均通过；持久请求在重启等价读取时先于当前目录解析，即使目录版本变化或角色移除仍返回原 SID；坏 sidecar 逐文件隔离，有目标时继续重放、无法证明 request_id 不存在时 409 fail-closed；带草稿关联一致，空角色任务沿用不落盘生命周期 |
 | A09 环境不被替换 | 待验收 | 无模型创建、非法档案/项目/工作区拒绝、创建 body 不得覆盖请求活动 profile、合法命名 profile 可创建、配置文件字节不变及工具不增权规则通过聚焦测试；完整可见流程待后续 |
 | A10 真正进入模型 | 通过 | 两个角色唯一哨兵经真实 `run_agent.AIAgent` 到 mock `client.chat.completions.create`，sync 与 streaming 各验证两轮：所选出现、另一角色与旧 personality 不出现；编排角色在 `delegate_task` schema 保留时，覆盖性单角色禁令位于上游委派指令之后并进入实际 SDK 请求；医疗编码和法律审阅两个资质敏感角色的 limitations/adaptation_note 位于原文声明之后、最终通用规则之前并进入实际 SDK 请求 |
 | A11 生命周期一致 | 待验收 | 第二轮、缓存复用、两条 credential self-heal worker 的重建后真实 SDK 请求、压缩父快照/metadata-only tip、重启、复制/分支/清空通过；可见标签和重试 UI 待后续 |
-| A12 更新与损坏 | 实施中 | 目录更新/角色移除不影响同 request_id 的旧任务持久重放；快照 schema v2 的 canonical digest 覆盖 schema、identity、public、private，identity/source/adapter/public/raw_source/limitations 篡改均在 Provider 调用前 fail-closed；非对象或缺失但仍有持久绑定标记的快照同样 fail-closed；单个损坏角色只在侧栏显示固定无身份标记，不拖垮普通任务列表，通用详情/角色详情/执行返回 409；移除收藏场景留待收藏阶段 |
+| A12 更新与损坏 | 实施中 | 目录更新/角色移除不影响旧任务快照和幂等重放；快照 schema v2 canonical digest 篡改在 Provider 前 fail-closed，损坏任务列表隔离；下架收藏按保留名称/分类/标签/摘要筛选，详情不伪造原文，HTTP 取消后失效条目消失已通过；可见 UI 待验收 |
 | A13 聊天与产物 | 未开始 | mock Provider 下附件、流式、取消、失败恢复和真实产物 |
 | A14 状态与键盘 | 未开始 | 故障注入、Tab/Escape/焦点和各视口 |
 | A15 安全边界 | 实施中 | 清单寻址、路径穿越、完整快照摘要损坏、角色不增权、角色文本不得自行触发 spawn/delegate/team、角色级资质边界实际注入、公开字段白名单、内部提示词不泄露和历史角色说明跨 profile 404 已覆盖；可见 HTML/链接行为待 UI 阶段 |
-| A16 产品回归 | 实施中 | 本轮智囊目录/会话契约 61 项、受影响 session index 与前端生命周期关联 109 项通过，统一 `scripts/verify.sh --full` 原入口通过；关联集另有 1 项未修改 boot.js 的既有词法断言失败，证据见下方；13 项既有 Gateway 签名失配仍见下方基线问题；完整可见 UI 回归待后续 |
+| A16 产品回归 | 实施中 | 阶段 3 智囊目录/会话/收藏/最近关联 79 项通过，统一 `scripts/verify.sh --full` 原入口再次通过；历史关联集的 1 项未修改 boot.js 词法断言和 13 项 Gateway 签名失配均为下方已隔离基线；完整可见 UI 回归待后续 |
 | A17 本地可用与性能 | 未开始 | 外网阻断、长内容及 500 条连续 30 次 p95 实测 |
 
 浏览器视口固定覆盖 PRD 的五种尺寸，另测现有外壳断点 `900/901/902` 与桌面断点 `1023/1024/1025`，并执行 200% 缩放。浏览器、截图、可访问性和视觉回归当前均为**未验证**。
@@ -142,6 +142,13 @@
 | 2026-09-05 | 已修正账户环境但仍把同一 `HERMES_WEBUI_TEST_PORT=18849` 固定给完整脚本的第二次尝试 | root `1334`、Desktop `79`、DOCX `278`、Agent `220`、WebUI lint、WebUI `952`、branding `24`、bootstrap Agent `12` 已通过；随后第二个 WebUI pytest 的 bootstrap 69 项均在 fixture setup 以 `port 18849 already occupied` 退出，未运行产品断言，整条 full 不记 PASS。`tests/conftest.py` 明确要求跨 pytest invocation 使用 process-scoped auto port |
 | 2026-09-05 | 顺序验证 process-scoped auto port | bootstrap WebUI 在 PID `68139` / port `28441` 为 `69 passed`；紧接 coexistence 在 PID `68174` / port `28476` 为 `6 passed`，证明两个 pytest invocation 使用独立端口；仍为独立 Hermes 根、凭据清除与双 network block |
 | 2026-09-05 | 同一暂存源码，以正常账户 `HOME/TMPDIR`、独立 Hermes home/base/state/config/workspace、凭据清除、双 network block、process-scoped auto port 执行原入口 `scripts/verify.sh --full` | PASS：local change safety PASS；root `1334 tests in 549.759s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint PASS；WebUI 注册计划 `952 passed, 1 warning in 27.19s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`。完整日志 `/private/tmp/taiji-zhinang-v3-full3.log` |
+
+| 2026-09-05 | 阶段 3 目录/收藏/最近契约先于实现运行 | RED：聚焦测试在 collection 阶段缺少 `CATALOG_CATEGORIES` 等新后端符号；确认契约尚未实现后进入最小修正 |
+| 2026-09-05 | 阶段 3 `test_zhinang_library.py` 聚焦契约 | GREEN：`17 passed, 1 warning in 2.19s`；覆盖 274 项安全目录、固定 6 精选、24 条分页、正交筛选、完整详情、profile 收藏、两独立 Store 并发、写失败磁盘不变、下架取消和最近 tip 回溯；唯一警告为现有 `discord/player.py` 的 Python `audioop` 弃用提示 |
+| 2026-09-05 | `test_zhinang_catalog.py test_zhinang_session_contract.py test_zhinang_library.py` 关联回归 | GREEN：`79 passed, 1 warning in 17.80s`；目录/收藏/最近接口与阶段 2 快照、幂等创建、执行注入和生命周期契约兼容 |
+| 2026-09-05 | 阶段 3 `py_compile`、`git diff --check`、`python3 scripts/check-local-change-safety.py` | PASS；4 个预计交付文件完整体积 `1,296,135` bytes，低于单批 4 MiB 门禁 |
+
+| 2026-09-05 | 阶段 3 当前未暂存候选，保留正常账户 `HOME/TMPDIR`、独立 Hermes home/base/state/config/workspace、显式清除凭据、双 network block 且由 conftest 自动选择跨进程端口/测试状态，执行原入口 `scripts/verify.sh --full` | PASS：local change safety PASS；root `1334 tests in 552.556s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint PASS；WebUI 注册集 `952 passed, 1 warning in 27.26s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`；日志 `/private/tmp/taiji-zhinang-stage3-full.log` |
 
 ### 既有 Gateway 基线问题
 

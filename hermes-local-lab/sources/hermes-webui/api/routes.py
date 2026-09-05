@@ -28,7 +28,7 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from contextlib import closing, contextmanager, nullcontext
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.agent_sessions import (
     MESSAGING_SOURCES,
@@ -236,6 +236,57 @@ def _validate_zhinang_create_environment(profile, project_id) -> str:
         if project_profile and not _profiles_match(project_profile, resolved_profile):
             raise ValueError("project is not available in this profile")
     return resolved_profile
+
+
+def _decode_zhinang_role_id(raw_value: object) -> str:
+    raw = str(raw_value or "")
+    if not raw or len(raw) > 1500 or re.search(r"%(?![0-9A-Fa-f]{2})", raw):
+        raise ValueError("invalid 智囊 role id")
+    try:
+        role_id = unquote(raw, encoding="utf-8", errors="strict").strip()
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError("invalid 智囊 role id") from error
+    if (
+        not role_id
+        or len(role_id) > 500
+        or any(ord(character) < 32 for character in role_id)
+    ):
+        raise ValueError("invalid 智囊 role id")
+    return role_id
+
+
+def _zhinang_profile_favorites(profile: str) -> dict[str, dict]:
+    from api.zhinang import ZhinangFavoritesStore
+
+    return ZhinangFavoritesStore().list_favorites(profile)
+
+
+def _zhinang_recent_roles_for_profile(profile: str) -> dict[str, dict]:
+    from api.zhinang import select_recent_roles
+
+    visible_rows = [
+        row
+        for row in all_sessions()
+        if isinstance(row, dict)
+        and _profiles_match(row.get("profile"), profile)
+    ]
+
+    def resolve_session(session_id: str):
+        if not is_safe_session_id(session_id):
+            return None
+        try:
+            session = get_session(session_id, metadata_only=True)
+        except (KeyError, OSError, ValueError):
+            return None
+        if not _profiles_match(getattr(session, "profile", None), profile):
+            return None
+        if not _expert_team_launch_session_is_public(session_id, session):
+            return None
+        if getattr(session, "pre_compression_snapshot", False):
+            return None
+        return session
+
+    return select_recent_roles(visible_rows, resolve_session=resolve_session)
 
 
 def _session_field(session, field, default=None):
@@ -13707,6 +13758,90 @@ def handle_get(handler, parsed) -> bool:
         _handle_session_compress_status(handler, query.get("session_id", [""])[0])
         return True
 
+    if parsed.path == "/api/zhinang/catalog":
+        from api.profiles import get_active_profile_name
+        from api.zhinang import (
+            CatalogResourceError,
+            ZhinangFavoritesError,
+            query_catalog_roles,
+        )
+
+        query = parse_qs(parsed.query or "", keep_blank_values=True)
+        allowed = {"scope", "category", "view", "query", "page"}
+        if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+            return j(handler, {
+                "error": "智囊目录查询参数无效。",
+                "code": "zhinang_catalog_query_invalid",
+            }, status=400)
+        try:
+            page_value = query.get("page", ["1"])[0]
+            page = int(page_value)
+            profile = str(get_active_profile_name() or "default")
+            favorites = _zhinang_profile_favorites(profile)
+            view = query.get("view", ["featured"])[0]
+            recent = (
+                _zhinang_recent_roles_for_profile(profile)
+                if view == "recent"
+                else {}
+            )
+            result = query_catalog_roles(
+                favorites=favorites,
+                recent=recent,
+                scope=query.get("scope", ["all"])[0],
+                category=query.get("category", ["all"])[0],
+                view=view,
+                query=query.get("query", [""])[0],
+                page=page,
+            )
+        except (TypeError, ValueError):
+            return j(handler, {
+                "error": "智囊目录查询参数无效。",
+                "code": "zhinang_catalog_query_invalid",
+            }, status=400)
+        except ZhinangFavoritesError as exc:
+            return j(handler, {"error": str(exc), "code": exc.code}, status=500)
+        except CatalogResourceError as exc:
+            return j(handler, {"error": str(exc), "code": exc.code}, status=409)
+        return j(handler, result)
+
+    if parsed.path.startswith("/api/zhinang/roles/"):
+        from api.profiles import get_active_profile_name
+        from api.zhinang import (
+            CatalogResourceError,
+            ZhinangFavoritesError,
+            current_role_detail,
+            removed_role_detail,
+        )
+
+        raw_role_id = parsed.path[len("/api/zhinang/roles/"):]
+        try:
+            role_id = _decode_zhinang_role_id(raw_role_id)
+        except ValueError:
+            return bad(handler, "未找到指定智囊角色。", 404)
+        profile = str(get_active_profile_name() or "default")
+        try:
+            favorites = _zhinang_profile_favorites(profile)
+            try:
+                role = current_role_detail(
+                    role_id,
+                    favorite=role_id in favorites,
+                )
+            except CatalogResourceError as exc:
+                if exc.code != "role_not_found":
+                    raise
+                recent = _zhinang_recent_roles_for_profile(profile)
+                role = removed_role_detail(
+                    role_id,
+                    favorite=favorites.get(role_id),
+                    recent=recent.get(role_id),
+                )
+        except ZhinangFavoritesError as exc:
+            return j(handler, {"error": str(exc), "code": exc.code}, status=500)
+        except CatalogResourceError as exc:
+            status = 404 if exc.code == "role_not_found" else 409
+            return j(handler, {"error": str(exc), "code": exc.code}, status=status)
+        return j(handler, {"role": role})
+
     if parsed.path == "/api/zhinang/session-role":
         query = parse_qs(parsed.query)
         sid = str(query.get("session_id", [""])[0] or "").strip()
@@ -18977,6 +19112,61 @@ def handle_put(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/zhinang/favorites/"):
+        from api.profiles import get_active_profile_name
+        from api.zhinang import (
+            CatalogResourceError,
+            ZhinangFavoritesError,
+            ZhinangFavoritesStore,
+            load_current_catalog_rows,
+        )
+
+        raw_role_id = parsed.path[len("/api/zhinang/favorites/"):]
+        try:
+            role_id = _decode_zhinang_role_id(raw_role_id)
+        except ValueError:
+            return j(handler, {
+                "error": "未找到指定智囊角色。",
+                "code": "role_not_found",
+            }, status=404)
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"favorite"}
+            or not isinstance(body.get("favorite"), bool)
+        ):
+            return j(handler, {
+                "error": "收藏请求参数无效。",
+                "code": "zhinang_favorite_request_invalid",
+            }, status=400)
+        try:
+            favorite = body["favorite"]
+            role = None
+            if favorite:
+                role = next(
+                    (
+                        row
+                        for row in load_current_catalog_rows()
+                        if row.get("role_id") == role_id
+                    ),
+                    None,
+                )
+                if role is None:
+                    return j(handler, {
+                        "error": "未找到指定智囊角色。",
+                        "code": "role_not_found",
+                    }, status=404)
+            profile = str(get_active_profile_name() or "default")
+            result = ZhinangFavoritesStore().set_favorite(
+                profile,
+                role_id,
+                favorite,
+                role,
+            )
+        except ZhinangFavoritesError as exc:
+            return j(handler, {"error": str(exc), "code": exc.code}, status=500)
+        except CatalogResourceError as exc:
+            return j(handler, {"error": str(exc), "code": exc.code}, status=409)
+        return j(handler, result)
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
