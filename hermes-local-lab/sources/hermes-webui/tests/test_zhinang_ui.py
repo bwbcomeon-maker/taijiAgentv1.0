@@ -59,6 +59,26 @@ def test_zhinang_runtime_owns_filters_races_favorites_and_session_entry():
     assert ":{scope:'all',category:'all',view:'all',query:''});return;" in script
 
 
+def test_zhinang_card_selection_and_favorite_focus_survive_catalog_redraws():
+    script = _read("zhinang.js")
+    style = _read("zhinang.css")
+
+    for marker in (
+        "function syncCardSelection()",
+        "card.setAttribute('aria-current','true')",
+        "card.removeAttribute('aria-current')",
+        "function catalogFocusSnapshot(grid)",
+        "function restoreCatalogFocus(grid,snapshot)",
+        "aria-disabled=\"true\"",
+        "data-zhinang-action=\"browse-all\"",
+    ):
+        assert marker in script
+
+    assert "aria-selected" not in script
+    assert ".zhinang-card.is-selected" in style
+    assert "content:'当前查看'" in style
+
+
 def test_zhinang_details_are_accessible_and_distinguish_examples_from_files():
     script = _read("zhinang.js")
     style = _read("zhinang.css")

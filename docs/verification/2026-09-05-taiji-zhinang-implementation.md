@@ -1,6 +1,6 @@
 # 太极智囊实施与验收台账
 
-> 状态更新：2026-09-05（阶段 2、3 已审核并本地提交；阶段 4 阻断项已闭合、全量门禁通过，当前完成但有两项已知 P2 限制）
+> 状态更新：2026-09-05（阶段 2、3、4 已审核并本地提交；阶段 4 复审记录的两个 P2 已在后续有界工作树闭合）
 > 功能契约：[太极智囊 PRD](../requirements/2026-09-05-taiji-zhinang-prd.md)
 
 ## 当前状态卡
@@ -8,12 +8,12 @@
 | 项目 | 已验证状态 |
 | --- | --- |
 | 物理仓库 / Git common dir | `/Users/bwb/Documents/工作/taiji-agentv1.0` / `.git` |
-| 开发线与基线 | `main@ce4aadd17b526f50c96d436860db117105b7db27`；与未刷新本地跟踪引用 `origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e` 比较为 `4 0`，不能证明当前远端状态；阶段 3 已在本地提交，阶段 4 结论绑定当前未提交工作树 |
+| 开发线与基线 | `main@5f387e89bba3f14d303bdfbd0269f86889614389`；与未刷新本地跟踪引用 `origin/main@18a607bc96a5689b184e4631a9606ce1cbb24e1e` 比较为 `5 0`，不能证明当前远端状态；本次 P2 收口结论绑定当前未提交工作树 |
 | 写入边界 | 当前实施者是共享工作树及 Git index 唯一写入者；其他协作者只读 |
 | 当前证据层 | 本地源码与资源；生产 WebUI HTTP 路由、真实 `AIAgent` 到 loopback mock Provider、真实持久化/进程重启、真实 `write_file` 写盘/预览/下载，以及规定视口的 headless Chromium 证据；不外推为安装态、目标机、真实模型或发布态 |
 | 已完成 | 274 个中文角色资源对账；完整不可变角色快照；目录/筛选/详情/收藏/最近；幂等新建和草稿/File 安全；现有外壳内完整智囊 UI；角色持续注入；附件与真实文件产物；取消/模型失败恢复；下架、键盘、焦点、响应式、性能及原产品回归 |
-| 未完成 | 修正候选完整暂存内容的 fresh Sol 最终结论和通过后的本地提交。宽屏详情卡片选中态与收藏重渲染后的焦点恢复为已知 P2；axe 专用扫描、像素基线视觉回归、真实模型、安装态和目标机验收不在本轮已验证证据层 |
-| 当前出口 | 阶段 2 本地提交 `d3a108c6d373da767b55ecf82c1f7cd4b249bc99`，阶段 3 fresh Sol 终审通过后本地提交 `ce4aadd17b526f50c96d436860db117105b7db27`；阶段 4 首轮暂存终审的三项 P1 已闭合，修正候选 full 和最终浏览器主链通过，复审阶段性结论无 P0/P1、保留两项 P2。等待文档更新后的完整暂存最终结论；未获具体远端授权，不 push |
+| 未完成 | 本次 P2 收口候选的 fresh Sol 最终结论和通过后的本地提交；axe 专用扫描、像素基线视觉回归、真实模型、安装态和目标机验收不在本轮已验证证据层 |
+| 当前出口 | 阶段 2 提交 `d3a108c6d373da767b55ecf82c1f7cd4b249bc99`、阶段 3 提交 `ce4aadd17b526f50c96d436860db117105b7db27`、阶段 4 提交 `5f387e89bba3f14d303bdfbd0269f86889614389`；两个后续 P2 已完成浏览器 RED→GREEN，等待完整暂存 fresh Sol 结论；未获具体远端授权，不 push |
 
 ## 工具链与隔离环境
 
@@ -62,13 +62,13 @@
 | F03 分类、搜索、精选与全部角色 | 通过 | 正交筛选、24 条分页、固定 6 精选、竞态与 500 条性能通过 A03/A17 |
 | F04 我的收藏 | 通过 | profile 权威原子收藏、双 Store/双窗口、失败恢复和真实 WebUI 重启通过 A04/A12/A14 |
 | F05 最近使用 | 通过 | 真实受理最近、展示快照与可继续 tip 分离、删除/分支/复制回退和 UI 继续入口通过 A05/A12 |
-| F06 角色卡片及详情 | 通过 | 安全卡片、明确“查看详情”、完整详情、可重试与响应式 drawer/aside 通过 A06/A14/A15；宽屏 aside 当前卡片尚无选中高亮/`aria-selected`（P2） |
+| F06 角色卡片及详情 | 通过 | 安全卡片、明确“查看详情”、完整详情、可重试与响应式 drawer/aside 通过 A06/A14/A15；宽屏 aside 当前卡片以可见标记和 `aria-current` 同步 |
 | F07 完整角色说明与来源 | 通过 | 当前/历史说明、改编、版本、MIT、固定来源及 HTTP(S) 白名单通过 A06/A12/A15 |
 | F08 示例任务 | 通过 | 所选示例预填且 0 模型调用；普通创建空白；失败保留原 SID/草稿/File；切换隔离通过 A07 |
 | F09 使用此智囊 | 通过 | 可见 CTA、无模型创建、请求幂等、受理后可新建与继续并存通过 A05/A08/A09 |
 | F10 持续角色上下文 | 通过 | Provider 实际注入、可见角色标签、缓存/self-heal/压缩/重启/复制/分支/清空通过 A10/A11 |
 | F11 既有聊天与成果链路 | 通过 | 附件进入真实 Agent、`write_file` 真写盘、预览/下载/刷新、取消与失败不出假成果通过 A13/A16 |
-| F12 完整状态与可访问性 | 通过 | 加载/空态/错误/重试、原生键盘、焦点、五视口/边界/200% 和外网阻断通过 A01/A14/A17；收藏后的 grid DOM 重建尚未恢复对应按钮键盘焦点（P2） |
+| F12 完整状态与可访问性 | 通过 | 加载/空态/错误/重试、原生键盘、焦点、五视口/边界/200% 和外网阻断通过 A01/A14/A17；收藏 pending/成功/失败/刷新失败重绘保持焦点，主动移焦不抢回，空收藏回退到可见入口 |
 
 ## A01–A17 验收台账
 
@@ -167,6 +167,11 @@
 | 2026-09-05 | 修正候选原入口 `scripts/verify.sh --full` | PASS：full 启动后产品三文件保持冻结；local change safety；root `1334 tests in 544.330s, OK (skipped=2)`；Desktop `79/79`；DOCX `278/278`；Agent `220/220`；WebUI lint；WebUI `953 passed, 1 warning in 27.11s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`。日志 `/private/tmp/taiji-zhinang-stage4-review-fix-full.log`，SHA-256 `9135086839b36345c8572054976618af52b0b9038b2f263828d5d861c0a33245`。full 运行中仅为补实际浏览器证据修改正式 runner，full 不执行该 runner；最终 runner 字节随后由上述 `flow` 单独验证 |
 | 2026-09-05 | 修正候选 Sol 复审阶段性结论 | 旧三项 P1 均闭合，无新 P0/P1；记录两项非阻断 P2：宽屏详情 aside 缺少当前卡片选中样式/`aria-selected`，收藏触发目录重渲染后未恢复到对应按钮的键盘焦点。按本轮修正上限不再改产品，文档准确标注限制后重新绑定完整暂存内容 |
 | 2026-09-05 | 阶段 4 最终完整文件预算 | 修正候选为 `3,822,172` bytes / 21 files，低于单批 4 MiB 门禁；每个新增文件小于 1 MiB |
+| 2026-09-05 | 后续两个 P2 浏览器 RED | 真实 WebUI `selection-focus` 记录 7 项失败：详情开/切未同步卡片 current，收藏 pending、PUT 失败、刷新失败、成功和最后收藏移除均丢焦点；初始无选中、关闭/过滤清除和主动移焦不抢回已符合。报告 SHA-256 `428689ddad91f76350f96e7c06ddea5edcfe1a76b9c05d68593afd7b69a91b24` |
+| 2026-09-05 | 后续两个 P2 GREEN | 最终 runner SHA-256 `0a91f42543f95fe64c2ea3a7f0822ffbedfa81f2d804118da636bd2bb8e222a0`；`selection-focus` 17 checks、更新后 `faults` 16 checks、`test_zhinang_ui.py` 9 passed。选中态截图与 JSON 位于证据根 `stage4-p2-fix/`，SHA-256 分别为 `21b8b934aa3215c0d571d0c3a89ecdb6af44ef5572140c1b2ffe2a92a2b6d4c1`、`0077719b6d466d1ba4e55b291da629197fc7542ca03664b0a0995b218855578e`、`beb0a2fc8d7b4d4316a45f151399584ef6d20e16715fa184579b9cf6b700bc10` |
+| 2026-09-05 | P2 聚焦 pytest 环境修正 | 首次受限沙箱无法选择 loopback 端口；受控执行后又发现 conftest 自动选择了缺少 `agent.provider_credentials` 的旧 `~/.hermes/hermes-agent`。显式固定仓库 Agent 目录、解释器及 Node 24 后，同一断言 `9 passed`，未放宽产品断言 |
+| 2026-09-05 | 首次 P2 收口 fresh Sol 终审 | FAIL：收藏 pending 后用户把焦点移到同 grid 第二卡“查看详情”，成功 PUT 与 catalog 重绘后焦点落到 body；正式反例 `/private/tmp/p2-review-focus-probe.cjs` SHA-256 `2a197d202a9c3fbde62788dd97acfc5a7edc99de74cebff3b6ca8a963b889258`，RED JSON SHA-256 `fd06d8a8c65ebc525f6acec71dde13aacd931cb36dcc34a7cc9d2b0c30fa46ec` |
+| 2026-09-05 | P2 收口最终默认 `scripts/verify.sh` | PASS：local change safety；root `1334 tests in 602.744s, OK (skipped=2)`；WebUI lint；WebUI `953 passed, 1 warning in 26.91s`；branding Agent `24/24`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS`。日志 `/private/tmp/taiji-zhinang-p2-final3-default-verify.log`，SHA-256 `a08f16c226d3a0acee95668ca97a4593012d0ef8879bf1a856d1f0c008170de4` |
 
 ### 既有 Gateway 基线问题
 

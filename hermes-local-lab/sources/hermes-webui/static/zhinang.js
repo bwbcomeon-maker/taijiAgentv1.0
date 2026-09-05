@@ -101,13 +101,73 @@
     }).join('');
   }
 
+  function syncCardSelection(){
+    document.querySelectorAll('.zhinang-card[data-zhinang-role]').forEach(card=>{
+      const current=!!state.selectedRoleId&&card.dataset.zhinangRole===state.selectedRoleId;
+      card.classList.toggle('is-selected',current);
+      if(current)card.setAttribute('aria-current','true');
+      else card.removeAttribute('aria-current');
+    });
+  }
+
+  function catalogFocusSnapshot(grid){
+    const activeElement=document.activeElement;
+    if(!activeElement||!grid.contains(activeElement))return null;
+    const control=activeElement.closest('[data-zhinang-favorite],[data-zhinang-open],[data-zhinang-continue]');
+    const card=control&&control.closest('.zhinang-card');
+    if(!control||!card)return null;
+    const action=Object.prototype.hasOwnProperty.call(control.dataset,'zhinangFavorite')?'favorite'
+      :(Object.prototype.hasOwnProperty.call(control.dataset,'zhinangOpen')?'open':'continue');
+    const cards=Array.from(grid.querySelectorAll('.zhinang-card'));
+    return {roleId:card.dataset.zhinangRole,action,index:Math.max(0,cards.indexOf(card))};
+  }
+
+  function restoreCatalogFocus(grid,snapshot){
+    if(!snapshot)return;
+    const cards=Array.from(grid.querySelectorAll('.zhinang-card'));
+    const sameRole=cards.find(card=>card.dataset.zhinangRole===snapshot.roleId);
+    const fallbackCard=cards[Math.min(snapshot.index,Math.max(0,cards.length-1))];
+    const selector=`[data-zhinang-${snapshot.action}]`;
+    const fallback=(sameRole&&sameRole.querySelector(selector))
+      ||(fallbackCard&&fallbackCard.querySelector(selector))
+      ||(fallbackCard&&fallbackCard.querySelector('[data-zhinang-favorite],[data-zhinang-open],[data-zhinang-continue]'))
+      ||grid.querySelector('[data-zhinang-action="browse-all"],[data-zhinang-action="reset-filters"]');
+    if(fallback&&fallback.getClientRects().length)fallback.focus();
+  }
+
+  function favoriteValue(roleId){
+    if(state.selectedRole&&state.selectedRole.role_id===roleId)return !!state.selectedRole.favorite;
+    const role=state.catalog&&Array.isArray(state.catalog.items)
+      ?state.catalog.items.find(item=>item.role_id===roleId):null;
+    return !!(role&&role.favorite);
+  }
+
+  function syncFavoriteControls(roleId){
+    const favorite=favoriteValue(roleId),pending=state.favoritePending.has(roleId);
+    document.querySelectorAll('[data-zhinang-favorite]').forEach(button=>{
+      if(button.dataset.zhinangFavorite!==roleId)return;
+      button.setAttribute('aria-pressed',favorite?'true':'false');
+      if(pending)button.setAttribute('aria-disabled','true');
+      else button.removeAttribute('aria-disabled');
+      if(button.classList.contains('zhinang-favorite-text'))button.textContent=favorite?'取消收藏':'收藏';
+      else{
+        const icon=button.querySelector('[aria-hidden="true"]');
+        if(icon)icon.textContent=favorite?'★':'☆';
+        const name=button.closest('.zhinang-card')?.querySelector('h2')?.textContent||'';
+        button.setAttribute('aria-label',`${favorite?'取消收藏':'收藏'}${name}`);
+      }
+    });
+  }
+
   function cardHtml(role){
     const tags=(Array.isArray(role.tags)?role.tags:[]).slice(0,2);
     const disabled=!role.available;
+    const current=!!state.selectedRoleId&&role.role_id===state.selectedRoleId;
+    const pending=state.favoritePending.has(role.role_id);
     const recent=role.last_accepted_at?new Date(Number(role.last_accepted_at)*1000).toLocaleString('zh-CN'):'';
-    return `<article class="zhinang-card ${disabled?'is-unavailable':''}" data-zhinang-role="${esc(role.role_id)}">
+    return `<article class="zhinang-card ${disabled?'is-unavailable ':''}${current?'is-selected':''}" data-zhinang-role="${esc(role.role_id)}"${current?' aria-current="true"':''}>
       <div class="zhinang-card-top"><span class="zhinang-role-mark" aria-hidden="true">${esc(String(role.name||'智').slice(0,1))}</span>
-        <button type="button" class="zhinang-favorite" data-zhinang-favorite="${esc(role.role_id)}" aria-label="${role.favorite?'取消收藏':'收藏'}${esc(role.name)}" aria-pressed="${role.favorite?'true':'false'}" ${state.favoritePending.has(role.role_id)?'disabled':''}><span aria-hidden="true">${role.favorite?'★':'☆'}</span></button>
+        <button type="button" class="zhinang-favorite" data-zhinang-favorite="${esc(role.role_id)}" aria-label="${role.favorite?'取消收藏':'收藏'}${esc(role.name)}" aria-pressed="${role.favorite?'true':'false'}"${pending?' aria-disabled="true"':''}><span aria-hidden="true">${role.favorite?'★':'☆'}</span></button>
       </div>
       <h2>${esc(role.name||role.original_name||'未命名角色')}</h2>
       <p>${esc(role.summary||role.unavailable_reason||'')}</p>
@@ -129,6 +189,7 @@
   function renderCatalog(data){
     const grid=$('zhinangGrid');
     if(!grid)return;
+    const focusSnapshot=catalogFocusSnapshot(grid);
     const items=Array.isArray(data.items)?data.items:[];
     syncFilterControls();
     renderCategories(data.categories||[]);
@@ -148,6 +209,8 @@
       setStatus('ready',`共 ${Number(data.total||items.length)} 位智囊，每页 ${Number(data.page_size||24)} 位`);
     }
     if(state.selectedRoleId&&!items.some(item=>item.role_id===state.selectedRoleId))closeDetail({restoreFocus:false});
+    syncCardSelection();
+    restoreCatalogFocus(grid,focusSnapshot);
   }
 
   async function loadCatalog({force=false,preserveOnError=false}={}){
@@ -249,6 +312,7 @@
     if(detail){detail.hidden=true;detail.replaceChildren();}
     if(backdrop)backdrop.hidden=true;
     document.body.classList.remove('zhinang-detail-open');
+    syncCardSelection();
     if(restoreFocus)focusVisibleFallback();
     state.returnFocus=null;
   }
@@ -257,11 +321,12 @@
     const detail=$('zhinangDetail');
     if(!detail)return;
     state.selectedRole=role;
-    state.selectedRoleId=role.role_id||state.selectedRoleId;
+    state.selectedRoleId=options.historical?'':(role.role_id||state.selectedRoleId);
     detail.innerHTML=detailHtml(role,options);
     detail.hidden=false;
     document.body.classList.add('zhinang-detail-open');
     updateDetailMode();
+    syncCardSelection();
     focusDetailSurface();
   }
 
@@ -270,7 +335,7 @@
     abort(state.detailController);
     const controller=new AbortController();state.detailController=controller;
     const generation=++state.detailGeneration,profileGeneration=state.profileGeneration;
-    state.selectedRoleId=roleId;state.returnFocus=trigger||document.activeElement;
+    state.selectedRoleId=roleId;state.returnFocus=trigger||document.activeElement;syncCardSelection();
     const detail=$('zhinangDetail');
     if(detail){detail.hidden=false;detail.innerHTML='<div class="zhinang-detail-loading" role="status" tabindex="-1">正在加载角色详情…</div>';}
     updateDetailMode();
@@ -322,7 +387,7 @@
 
   async function setFavorite(roleId,favorite){
     if(!roleId||state.favoritePending.has(roleId))return;
-    state.favoritePending.add(roleId);renderCatalog(state.catalog||{items:[]});
+    state.favoritePending.add(roleId);renderCatalog(state.catalog||{items:[]});syncFavoriteControls(roleId);
     try{
       const saved=await api(`/api/zhinang/favorites/${encodeURIComponent(roleId)}`,{
         method:'PUT',body:JSON.stringify({favorite}),retryNetworkErrors:false,
@@ -332,17 +397,19 @@
       if(state.catalog&&Array.isArray(state.catalog.items))state.catalog.items.forEach(item=>{if(item.role_id===roleId)item.favorite=authoritative;});
       state.favoritePending.delete(roleId);
       if(state.catalog)renderCatalog(state.catalog);
+      syncFavoriteControls(roleId);
       const refreshed=await loadCatalog({force:true,preserveOnError:true});
       if(!refreshed&&active()){
         setStatus('error','收藏已保存，目录刷新失败。请重试刷新。');
         notify('收藏已保存，目录刷新失败。请重试刷新。','warning');
       }
-      if(state.selectedRole&&state.selectedRole.role_id===roleId)showDetail(state.selectedRole);
+      syncFavoriteControls(roleId);
     }catch(error){
       state.favoritePending.delete(roleId);
       notify(error&&error.message||'收藏状态保存失败');
       renderCatalog(state.catalog||{items:[]});
-    }finally{state.favoritePending.delete(roleId);}
+      syncFavoriteControls(roleId);
+    }finally{state.favoritePending.delete(roleId);syncFavoriteControls(roleId);}
   }
 
   async function createRoleTask(roleId,draftText=''){

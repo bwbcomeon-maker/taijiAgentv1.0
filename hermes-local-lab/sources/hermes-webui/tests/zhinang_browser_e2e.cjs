@@ -125,7 +125,7 @@ function clickRealZhinangNav(page,width){
 }
 async function waitCatalog(page){await page.locator('#mainZhinang').waitFor({state:'visible'});await page.locator('.zhinang-card').first().waitFor({state:'visible',timeout:15000});}
 async function waitAttribute(locator,name,value,timeout=10000){const until=Date.now()+timeout;while(Date.now()<until){if(await locator.getAttribute(name)===value)return;await delay(100);}throw new Error(`attribute timeout: ${name}=${value}`);}
-function attachErrors(page,label){page.on('console',msg=>{const expectedFault=(label==='fault-keyboard'&&/Failed to load resource:.*503/i.test(msg.text()))||(label==='draft-idempotency'&&/Failed to load resource:.*50[34]/i.test(msg.text()))||(expectedWebuiRestart&&label.startsWith('favorite-')&&/ERR_CONNECTION_(?:REFUSED|RESET)/i.test(msg.text()));if(msg.type()==='error'&&!expectedFault&&!/favicon|manifest|service.?worker|404/i.test(msg.text()))evidence.consoleErrors.push(`${label}: ${msg.text()}`);});page.on('pageerror',error=>evidence.pageErrors.push(`${label}: ${error.message}`));page.on('request',request=>{const url=new URL(request.url());if(/^https?:$/.test(url.protocol)&&!['127.0.0.1','localhost'].includes(url.hostname))evidence.externalRequests.push({label,url:url.href,method:request.method()});});}
+function attachErrors(page,label){page.on('console',msg=>{const expectedFault=((label==='fault-keyboard'||label==='selection-focus')&&/Failed to load resource:.*503/i.test(msg.text()))||(label==='draft-idempotency'&&/Failed to load resource:.*50[34]/i.test(msg.text()))||(expectedWebuiRestart&&label.startsWith('favorite-')&&/ERR_CONNECTION_(?:REFUSED|RESET)/i.test(msg.text()));if(msg.type()==='error'&&!expectedFault&&!/favicon|manifest|service.?worker|404/i.test(msg.text()))evidence.consoleErrors.push(`${label}: ${msg.text()}`);});page.on('pageerror',error=>evidence.pageErrors.push(`${label}: ${error.message}`));page.on('request',request=>{const url=new URL(request.url());if(/^https?:$/.test(url.protocol)&&!['127.0.0.1','localhost'].includes(url.hostname))evidence.externalRequests.push({label,url:url.href,method:request.method()});});}
 async function viewportPass(browser,base,width,height,boundary=false){
   const context=await browser.newContext({viewport:{width,height},locale:'zh-CN',acceptDownloads:true});
   const page=await context.newPage();attachErrors(page,`${width}x${height}`);
@@ -297,14 +297,91 @@ async function faultAndKeyboardPass(browser,base){
   await page.keyboard.press('Shift+Tab');check(await page.locator('.zhinang-detail-actions button').last().evaluate(node=>document.activeElement===node),'modal focus wraps backward');
   await page.keyboard.press('Escape');check(await trigger.evaluate(node=>document.activeElement===node),'detail retry close restores trigger focus');
   const favorite=page.locator('.zhinang-card .zhinang-favorite').first();const favoriteInitial=await favorite.getAttribute('aria-pressed'),favoriteTarget=favoriteInitial==='true'?'false':'true';
-  await favorite.focus();await page.keyboard.press('Enter');await page.waitForFunction(({selector,pressed})=>{const button=document.querySelector(selector);return button&&!button.disabled&&button.getAttribute('aria-pressed')===pressed;},{selector:'.zhinang-card .zhinang-favorite',pressed:favoriteInitial});
+  const failedFavoritePut=page.waitForResponse(response=>response.request().method()==='PUT'&&response.status()===503&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  await favorite.focus();await page.keyboard.press('Enter');await failedFavoritePut;await page.waitForFunction(({selector,pressed})=>{const button=document.querySelector(selector);return button&&!button.hasAttribute('aria-disabled')&&button.getAttribute('aria-pressed')===pressed;},{selector:'.zhinang-card .zhinang-favorite',pressed:favoriteInitial});
   check(await favorite.isEnabled(),'favorite PUT failure restores enabled control');
   check(await favorite.getAttribute('aria-pressed')===favoriteInitial,'favorite PUT failure preserves original state');
-  await favorite.focus();await page.keyboard.press('Enter');await waitAttribute(favorite,'aria-pressed',favoriteTarget);
+  const failedFavoriteRefresh=page.waitForResponse(response=>response.status()===503&&new URL(response.url()).pathname==='/api/zhinang/catalog');
+  await favorite.focus();await page.keyboard.press('Enter');await failedFavoriteRefresh;await waitAttribute(favorite,'aria-pressed',favoriteTarget);
   await page.locator('#zhinangStatus[data-state="error"]').waitFor();check((await page.locator('#zhinangStatus').textContent()).includes('收藏已保存'),'favorite success remains authoritative when refresh fails');
   const search=page.locator('#zhinangSearch');await search.fill('NO_MATCH_ZHINANG');await page.waitForTimeout(350);await page.locator('[data-zhinang-action="reset-filters"]').waitFor();await page.locator('[data-zhinang-action="reset-filters"]').click();await waitCatalog(page);check(await search.inputValue()==='','empty-state reset clears query');
   await page.locator('[data-zhinang-scope="favorites"]').click();await page.locator('.zhinang-card,.zhinang-empty').first().waitFor();await page.locator('[data-zhinang-scope="all"]').click();await waitCatalog(page);
   check(await page.locator('[data-zhinang-view="all"]').getAttribute('aria-pressed')==='true','all roles scope selects unabridged all view');
+  await context.close();
+}
+
+async function selectionAndFavoriteFocusPass(browser,base){
+  const context=await browser.newContext({viewport:{width:2000,height:1000},locale:'zh-CN'});const page=await context.newPage();attachErrors(page,'selection-focus');
+  let favoriteMode='pass',failNextCatalog=false,releaseDeferredPut=null,signalDeferredPut=null;
+  await page.route('**/*',async route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(!['127.0.0.1','localhost'].includes(url.hostname))return route.abort('blockedbyclient');
+    if(url.pathname==='/api/zhinang/catalog'&&failNextCatalog){failNextCatalog=false;return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'收藏刷新故障注入'})});}
+    if(request.method()==='PUT'&&url.pathname.startsWith('/api/zhinang/favorites/')){
+      const mode=favoriteMode;favoriteMode='pass';
+      if(mode==='fail')return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'收藏保存故障注入'})});
+      if(mode==='refresh-fail'){const response=await route.fetch();failNextCatalog=true;return route.fulfill({response});}
+      if(mode==='defer'){
+        if(signalDeferredPut)signalDeferredPut();
+        await new Promise(resolve=>{releaseDeferredPut=resolve;});
+      }
+    }
+    return route.continue();
+  });
+  const failures=[];
+  const verify=(value,label)=>{if(value)evidence.checks.push(label);else failures.push(label);};
+  const favoriteFocused=roleId=>page.evaluate(expected=>document.activeElement?.dataset?.zhinangFavorite===expected,roleId);
+  await page.goto(base,{waitUntil:'domcontentloaded'});await clickRealZhinangNav(page,2000);await waitCatalog(page);
+  verify(await page.locator('.zhinang-card[aria-current="true"]').count()===0,'catalog starts without a selected role card');
+  const first=page.locator('.zhinang-card').nth(0),second=page.locator('.zhinang-card').nth(1);
+  const firstId=await first.getAttribute('data-zhinang-role'),secondId=await second.getAttribute('data-zhinang-role'),secondName=await second.locator('h2').textContent();
+  await first.locator('[data-zhinang-open]').click();await page.locator('#zhinangDetailTitle').waitFor();
+  verify(await page.locator('#zhinangDetail').getAttribute('data-mode')==='aside','wide catalog opens detail as an aside');
+  verify(await first.getAttribute('aria-current')==='true'&&await first.evaluate(node=>node.classList.contains('is-selected')),'opening detail marks only the corresponding card current');
+  const selectedShot=path.join(OUT,'selected-card-aside-2000x1000.png');await page.screenshot({path:selectedShot,fullPage:true});evidence.screenshots.push({path:selectedShot,sha256:sha(selectedShot)});
+  await second.locator('[data-zhinang-open]').click();await page.waitForFunction(expected=>document.querySelector('#zhinangDetailTitle')?.textContent===expected,secondName);
+  verify(await first.getAttribute('aria-current')===null&&!await first.evaluate(node=>node.classList.contains('is-selected'))&&await second.getAttribute('aria-current')==='true','switching detail moves the current-card state');
+  await page.locator('[data-zhinang-close]').click();
+  verify(await page.locator('.zhinang-card[aria-current="true"],.zhinang-card.is-selected').count()===0,'closing detail clears the current-card state');
+  await first.locator('[data-zhinang-open]').click();await page.locator('#zhinangDetailTitle').waitFor();
+  const search=page.locator('#zhinangSearch');await search.fill('NO_MATCH_SELECTION_FOCUS');await delay(350);await page.locator('[data-zhinang-action="reset-filters"]').waitFor();
+  verify(await page.locator('#zhinangDetail').isHidden()&&await page.locator('.zhinang-card[aria-current="true"],.zhinang-card.is-selected').count()===0,'filtering out the current role closes detail and clears selection');
+  await page.locator('[data-zhinang-action="reset-filters"]').click();await waitCatalog(page);
+  const card=page.locator(`[data-zhinang-role="${firstId}"]`),favorite=card.locator('.zhinang-favorite');
+  const initial=await favorite.getAttribute('aria-pressed'),target=initial==='true'?'false':'true';
+  favoriteMode='fail';const failedPut=page.waitForResponse(response=>response.request().method()==='PUT'&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  await favorite.focus();await page.keyboard.press('Enter');await failedPut;await page.waitForFunction(({id,value})=>document.querySelector(`[data-zhinang-role="${id}"] .zhinang-favorite`)?.getAttribute('aria-pressed')===value,{id:firstId,value:initial});
+  verify(await favoriteFocused(firstId),'PUT failure keeps keyboard focus on the rebuilt favorite control');
+  favoriteMode='refresh-fail';const refreshFailed=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/zhinang/catalog'&&response.status()===503);
+  await favorite.focus();await page.keyboard.press('Enter');await refreshFailed;await page.locator('#zhinangStatus[data-state="error"]').waitFor();
+  verify(await favorite.getAttribute('aria-pressed')===target&&await favoriteFocused(firstId),'saved favorite with refresh failure keeps authoritative state and focus');
+  const successPut=page.waitForResponse(response=>response.request().method()==='PUT'&&response.ok()&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  const successCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog');
+  await favorite.focus();await page.keyboard.press('Enter');await Promise.all([successPut,successCatalog]);await waitAttribute(favorite,'aria-pressed',initial);
+  verify(await favoriteFocused(firstId),'successful favorite refresh keeps keyboard focus on the rebuilt control');
+  favoriteMode='defer';let deferredStartedResolve;const deferredStarted=new Promise(resolve=>{deferredStartedResolve=resolve;});signalDeferredPut=deferredStartedResolve;
+  const deferredPut=page.waitForResponse(response=>response.request().method()==='PUT'&&response.ok()&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  const deferredCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog');
+  await favorite.focus();await page.keyboard.press('Enter');await deferredStarted;
+  verify(await favoriteFocused(firstId),'pending favorite request retains keyboard focus');
+  await search.focus();releaseDeferredPut();await Promise.all([deferredPut,deferredCatalog]);await waitAttribute(favorite,'aria-pressed',target);
+  verify(await search.evaluate(node=>document.activeElement===node),'async favorite completion does not steal focus after the user moves it');
+  favoriteMode='defer';let movedStartedResolve;const movedStarted=new Promise(resolve=>{movedStartedResolve=resolve;});signalDeferredPut=movedStartedResolve;
+  const movedPut=page.waitForResponse(response=>response.request().method()==='PUT'&&response.ok()&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  const movedCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog');
+  await favorite.focus();await page.keyboard.press('Enter');await movedStarted;
+  const movedTarget=page.locator(`[data-zhinang-role="${secondId}"] [data-zhinang-open]`);await movedTarget.focus();releaseDeferredPut();await Promise.all([movedPut,movedCatalog]);await waitAttribute(favorite,'aria-pressed',initial);
+  verify(await movedTarget.evaluate(node=>document.activeElement===node),'async favorite completion preserves the user-selected in-grid focus target');
+  const restorePut=page.waitForResponse(response=>response.request().method()==='PUT'&&response.ok()&&new URL(response.url()).pathname.includes('/api/zhinang/favorites/'));
+  const restoreCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog');
+  await favorite.focus();await page.keyboard.press('Enter');await Promise.all([restorePut,restoreCatalog]);await waitAttribute(favorite,'aria-pressed',target);
+  const favoritesCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog'&&new URL(response.url()).searchParams.get('scope')==='favorites');
+  await page.locator('[data-zhinang-scope="favorites"]').click();await favoritesCatalog;await card.waitFor();
+  const unfavorite=card.locator('.zhinang-favorite');const emptyCatalog=page.waitForResponse(response=>response.ok()&&new URL(response.url()).pathname==='/api/zhinang/catalog'&&new URL(response.url()).searchParams.get('scope')==='favorites');
+  await unfavorite.focus();await page.keyboard.press('Enter');await emptyCatalog;await page.getByText('还没有收藏的智囊。',{exact:true}).waitFor();
+  verify(await page.locator('[data-zhinang-action="browse-all"]').evaluate(node=>document.activeElement===node),'removing the focused last favorite moves focus to the visible browse-all fallback');
+  signalDeferredPut=null;
+  if(failures.length){const report=path.join(OUT,'e2e-red-selection-focus.json');fs.writeFileSync(report,JSON.stringify({status:'RED',failures,checks:evidence.checks},null,2));throw new Error(`P2 RED: ${failures.join('; ')}; report=${report}`);}
   await context.close();
 }
 
@@ -458,7 +535,7 @@ async function zoomPass(browser,base){
 
 async function main(){
   const scope=process.env.ZHINANG_E2E_SCOPE||'viewports';
-  const allowedScopes=new Set(['viewports','flow','faults','draft-idempotency','lifecycle','recovery','performance','removed','regression','serve']);
+  const allowedScopes=new Set(['viewports','flow','faults','selection-focus','draft-idempotency','lifecycle','recovery','performance','removed','regression','serve']);
   if(!allowedScopes.has(scope))throw new Error(`unsupported ZHINANG_E2E_SCOPE: ${scope}`);
   fs.mkdirSync(OUT,{recursive:true});
   const root=fs.mkdtempSync('/private/tmp/taiji-zhinang-stage4-e2e-');
@@ -506,6 +583,7 @@ async function main(){
       }
       if(scope==='flow')await realFlow(browser,base,workspace,attachment);
       if(scope==='faults')await faultAndKeyboardPass(browser,base);
+      if(scope==='selection-focus')await selectionAndFavoriteFocusPass(browser,base);
       if(scope==='draft-idempotency')await draftAndIdempotencyPass(browser,base,attachment);
       if(scope==='lifecycle')await favoriteLifecyclePass(browser,base,restartWebui,state);
       if(scope==='recovery')await cancellationAndRecoveryPass(browser,base);

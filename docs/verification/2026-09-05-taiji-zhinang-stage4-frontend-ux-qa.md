@@ -1,11 +1,11 @@
 # 太极智囊阶段 4 前端 UX QA 报告
 
 > 日期：2026-09-05
-> 证据层：`main@ce4aadd17b526f50c96d436860db117105b7db27` 之上的阶段 4 本地工作树、真实源码 WebUI、真实 `AIAgent`、loopback mock Provider 与隔离持久状态。本文不代表安装包、客户终端、真实模型或发布态验收。
+> 证据层：`main@5f387e89bba3f14d303bdfbd0269f86889614389` 之上的 P2 收口工作树、真实源码 WebUI、真实 `AIAgent`、loopback mock Provider 与隔离持久状态。本文不代表安装包、客户终端、真实模型或发布态验收。
 
 ## 结论
 
-智囊库在现有太极外壳内的入口、目录、筛选、收藏、最近任务、完整详情、示例创建、角色标签、聊天与成果链已经可操作。主流程和已注入故障均有可复现浏览器证据，独立 UX 复核原有范围内没有遗留 P0/P1/P2。首轮完整暂存 Sol 终审发现的三项成果公开投影 P1 已按确证反例修正；修正候选复审确认旧三项闭合且无新 P0/P1，同时记录下述两项非阻断 P2，当前按“完成但有已知限制”交付复审。
+智囊库在现有太极外壳内的入口、目录、筛选、收藏、最近任务、完整详情、示例创建、角色标签、聊天与成果链已经可操作。阶段 4 首轮复审记录的宽屏详情卡片选中态和收藏重绘焦点两个 P2，已在后续有界任务中以浏览器 RED 固定并修正：详情卡片使用适合 `article` 的 `aria-current`，收藏异步重绘按用户当前焦点意图恢复。当前受影响范围没有已知 P0/P1/P2。
 
 面向使用者的操作与边界说明见[太极智囊使用说明](../taiji-zhinang-user-guide.md)。
 
@@ -18,7 +18,7 @@
 - 详情显示 AI 角色身份、完整说明、限制、改编说明、来源与 MIT 许可；非 HTTP(S) 来源降为不可点击文本；示例明确标注“示例，非已生成文件”。
 - “使用此智囊”创建空白角色任务；“使用此示例”只预填所选文本且不自动调用模型。已有最近任务时，新建与继续同时存在。
 - 智囊任务显示可点击角色标签，空态、草稿态和消息态均可打开历史角色详情；固定角色任务禁用 `/personality`，普通聊天保留原入口。
-- 收藏写入、详情加载、空态、重试、失败恢复、焦点圈定、Escape 关闭和关闭后焦点恢复均有交互状态。
+- 收藏写入、详情加载、空态、重试、失败恢复、焦点圈定、Escape 关闭和关闭后焦点恢复均有交互状态；宽屏详情同步突出当前卡片，收藏重绘保持键盘焦点且不会抢回用户已主动移走的焦点。
 - 真实 `write_file` 成功后显示成果、预览、下载并在刷新后恢复；失败或取消不会把既有同名文件误报为新成果。
 
 ## F01–F12 功能契约表
@@ -28,15 +28,15 @@
 | F01 入口与外壳 | PRD 4.1；所有现有用户；三处“智囊库”导航 | 复用现有 panel 状态 | 当前项含文字/图标选中，窄屏先关闭菜单 | `viewports`、`regression` / 通过 |
 | F02 角色目录 | PRD 4.2；寻找专业方法的用户；太极智囊主区 | `GET /api/zhinang/catalog` | skeleton、错误重试、空态恢复；卡片可聚焦 | `flow`、`performance` / 通过 |
 | F03 搜索筛选分页 | PRD 4.2；需要缩小角色范围的用户；搜索/领域/视图/分页 | catalog query：scope/category/view/query/page | 200 ms 防抖、旧响应丢弃、筛选回第一页、24 条当前页 | `faults`、`viewports`、`performance` / 通过 |
-| F04 收藏 | PRD 4.3；回访常用角色的用户；卡片/详情收藏按钮 | `PUT /api/zhinang/favorites/{role_id}` | `aria-pressed`、pending 禁用；保存/刷新失败可重试且不假成功 | `faults`、`lifecycle` / 通过 |
+| F04 收藏 | PRD 4.3；回访常用角色的用户；卡片/详情收藏按钮 | `PUT /api/zhinang/favorites/{role_id}` | `aria-pressed`、pending `aria-disabled`；保存/刷新失败可重试且不假成功；重绘只在用户仍停留于原控件时恢复焦点 | `faults`、`selection-focus`、`lifecycle` / 通过 |
 | F05 最近使用 | PRD 4.4；继续真实任务的用户；最近使用与卡片继续按钮 | catalog `view=recent` | 只认已受理、可访问 tip；无最近显示专用空态 | `flow`、`removed` / 通过 |
-| F06 卡片与详情 | PRD 5.1–5.2；评估角色的用户；查看详情/整卡安全区域 | `GET /api/zhinang/roles/{role_id}` | drawer/dialog/aside；加载、失败、retry；关闭恢复滚动与焦点；宽屏 aside 打开后卡片尚无选中高亮/`aria-selected`（P2） | `flow`、`faults`、独立 UX / 通过，带 P2 限制 |
+| F06 卡片与详情 | PRD 5.1–5.2；评估角色的用户；查看详情/整卡安全区域 | `GET /api/zhinang/roles/{role_id}` | drawer/dialog/aside；加载、失败、retry；关闭恢复滚动与焦点；宽屏 aside 以可见“当前查看”和 `aria-current` 同步对应卡片 | `flow`、`faults`、`selection-focus`、独立 UX / 通过 |
 | F07 来源说明 | PRD 5.2；核对角色来源与限制的用户；详情来源/许可区 | 当前详情和 `session-role` 安全投影 | 完整文本可展开；仅 HTTP(S) 可链接；不公开有效 prompt | `flow`、A15 注入、独立 UX / 通过 |
 | F08 示例任务 | PRD 5.3；需要起步文本的用户；“使用此示例” | draft save + create session | 仅预填所选示例、0 模型调用；失败留在原任务 | `flow`、`draft-idempotency` / 通过 |
 | F09 使用智囊 | PRD 6.1；开始专业任务的用户；“使用此智囊” | `POST /api/sessions` 携 role/request id | 普通创建空白；pending 禁用；超时以同 request id 重试 | `flow`、`draft-idempotency` / 通过 |
 | F10 固定角色 | PRD 6.2；持续对话用户；聊天顶部角色标签 | `GET /api/zhinang/session-role`，Provider 快照注入 | 标签三态可点；历史详情；固定任务禁用 personality | `flow`、`lifecycle`、独立 UX / 通过 |
 | F11 聊天与成果 | PRD 7；提交附件和取回文件的用户；原聊天与成果 Tab | chat stream、windowed session、workspace/list/download | busy/stop、失败恢复；只显示带成功状态、非空工具 ID 与名称匹配的公开成果路径 | `flow`、`recovery`、Anthropic HTTP/Node 聚焦 / 通过 |
-| F12 状态与可访问性 | PRD 8–9；键盘/窄屏及异常场景用户；全路径 | 各接口 generation/abort 防竞态 | Tab/Shift+Tab/Escape/详情焦点恢复、五视口/边界/200%、外网零请求；收藏后目录重渲染尚未恢复触发按钮焦点（P2） | `faults`、`viewports`、`performance` / 通过，带 P2 限制 |
+| F12 状态与可访问性 | PRD 8–9；键盘/窄屏及异常场景用户；全路径 | 各接口 generation/abort 防竞态 | Tab/Shift+Tab/Escape/详情焦点恢复、收藏 pending/成功/失败/刷新失败焦点、空收藏可见回退、五视口/边界/200%、外网零请求 | `faults`、`selection-focus`、`viewports`、`performance` / 通过 |
 
 ## 浏览器证据
 
@@ -45,7 +45,8 @@
 | Scope | 结果 | 主要证明 | 证据 SHA-256 |
 | --- | ---: | --- | --- |
 | `flow` | 45 checks / 9 Provider requests | 目录、示例 0 调用、新建/继续、附件、真实工具写盘、预览/下载/刷新、失败不出假成果、assistant-only diff 刷新前后不出卡、历史详情；绑定 runner SHA-256 `e8ec954c925d7443d8d77621a625c9cbdbfdd0e8a429cb0c9d0236faedb02e1a` | `aa53751272dfe63aa7a0de2ad8f7bb410623d33c54d673a2d5be2befb8437107` |
-| `faults` | 14 checks | 目录/详情失败与重试、收藏成功后刷新失败、收藏 PUT 失败、modal 加载焦点与键盘圈定 | `5ca78ca2d8253fa186de0b430e398ef90aff8cabb37f5c6ba350507e56e3b14a` |
+| `faults` | 16 checks | 目录/详情失败与重试、收藏成功后刷新失败、收藏 PUT 失败、modal 加载焦点与键盘圈定；响应完成后控件状态与详情焦点恢复 | `beb0a2fc8d7b4d4316a45f151399584ef6d20e16715fa184579b9cf6b700bc10` |
+| `selection-focus` | 17 checks | 2000×1000 宽屏 aside 初始/开/切/关/过滤选中态；收藏 pending、PUT 失败、刷新失败、成功、移焦到搜索或另一卡详情、最后收藏移除焦点；最终 runner SHA-256 `0a91f42543f95fe64c2ea3a7f0822ffbedfa81f2d804118da636bd2bb8e222a0` | `0077719b6d466d1ba4e55b291da629197fc7542ca03664b0a0995b218855578e` |
 | `draft-idempotency` | 11 checks | 原草稿保存失败、原生 File 保持、双击并发、受理后 504 与同 request_id 重试 | `c4c584f874ad652ff6580a26e7f2795d1a850a719f01977c3c1d2968375d5dc1` |
 | `lifecycle` | 19 checks / 4 Provider requests | 双窗口/profile 收藏、真实 WebUI 重启、同 SID 角色任务重启后继续进入 Provider | `74efcf70492c66f7d004b69f7be226e5d1e17a25ff2bb2ac2fe002ba4355a78d` |
 | `recovery` | 12 checks / 7 Provider requests | 首 token 后取消、journal/socket 终止、模型 500、两次恢复、无重复用户消息和假成果 | `9b74c37315e07b92d96b52af6f0de4f736057d2a1613b52331730c862fac5faa` |
@@ -54,9 +55,11 @@
 | `viewports` | 87 checks | 五个规定视口、900/901/902、1023/1024/1025 和 200% 缩放 | `b92ec6f55c994ba4b7da4a10f361d1c5621a5682e8d9c80423567f72620cc849` |
 | `performance` | 67 checks | 500 条真实 HTTP 目录、24 条当前页、30 次 API 与浏览器连续查询、长内容 | `42f96f097b14140f44118b8a51723fcf54ce658b948c0d76671e520789a54c4b` |
 
-除修正后 `flow` 外，上述 JSON 和截图位于 `/Users/bwb/.codex/visualizations/2026/09/05/01a06f06-91f4-7823-a594-68ae33903fd7/stage4-e2e/`；最终 `flow` 位于同一证据根的 `stage4-review-fix-final2-e2e/`。主流程连接生产 `server.py` 与真实 `AIAgent`，Provider 只由 loopback fixture 替代；`faults` 和 `removed` 在浏览器路由层注入指定故障/下架投影，不能替代后端契约。阶段 3 已用真实 HTTP 和持久化测试覆盖目录、收藏、最近与下架行为。
+除修正后 `flow` 外，阶段 4 JSON 和截图位于 `/Users/bwb/.codex/visualizations/2026/09/05/01a06f06-91f4-7823-a594-68ae33903fd7/stage4-e2e/`；最终 `flow` 位于同一证据根的 `stage4-review-fix-final2-e2e/`。本次 P2 收口的 `selection-focus`、更新后 `faults` 和选中态截图位于 `stage4-p2-fix/`，截图 SHA-256 为 `21b8b934aa3215c0d571d0c3a89ecdb6af44ef5572140c1b2ffe2a92a2b6d4c1`。主流程连接生产 `server.py` 与真实 `AIAgent`，Provider 只由 loopback fixture 替代；故障 scope 在浏览器路由层注入指定失败，不能替代后端契约。阶段 3 已用真实 HTTP 和持久化测试覆盖目录、收藏、最近与下架行为。
 
 修正轮另以隔离 pytest 服务实际请求 `GET /api/session?messages=1&resolve_model=0&msg_limit=30`，验证 Anthropic `content[].tool_use` 在 session-level summaries 被窗口策略清空后仍携带同 ID/名称的成功公开成果路径；固定 Node 24 直接运行生产 `collectSessionArtifacts()`，验证该形状能生成成果卡，而 failed/cancelled/running 私有 args/result 和 assistant-only diff 均不能生成成果卡。三份受影响测试文件最终为 `87 passed`。
+
+后续 P2 收口使用同一固定 Node 24、Playwright、Chromium、仓库 Agent Python 和隔离服务边界。`test_zhinang_ui.py` 为 `9 passed`；最终默认 `scripts/verify.sh` 为 `verification: PASS`，日志 `/private/tmp/taiji-zhinang-p2-final3-default-verify.log` 的 SHA-256 为 `a08f16c226d3a0acee95668ca97a4593012d0ef8879bf1a856d1f0c008170de4`。
 
 `lifecycle` 的多 profile 检查使用隔离测试 wrapper，仅在该 fixture 内关闭产品 single-runtime guard；生产 `TAIJI_RUNTIME_HOME` 模式仍固定为 default，不把测试能力外推为档案切换 UI。最终报告绑定 SID `52ab2f9d1305`：重启前后完整 schema 2 snapshot SHA-256 均为 `eed29a2f226c4dfcd7413581dc531556ad452b2c6af5e08b5d4723ef615ad566`，`effective_prompt_sha256` 均为 `3e28b941fc912df29f9041ddcb73ea8fff223dbed25c5a7fd48e93035e788686`，两次实际 Provider 角色系统上下文 SHA-256 均为 `1b4ac0b11051f6b9f50bf88de3235a26a2f66193e858dda64880d800466661a3`。
 
@@ -74,14 +77,12 @@
 
 首轮完整暂存 Sol 终审又以反例确认三项 P1：公开事件会暴露 running/failed/cancelled 或无工具 ID 的 `artifact_path`；Anthropic `tool_use` 没有收到成功摘要回写而在 `msg_limit` 刷新后丢成果；前端仍会从失败工具的私有 args/result 或纯 assistant diff 猜测成果。修正后仅成功、非错误、带非空工具 ID 且名称匹配的公开投影能进入成果列表；Provider 请求会移除这些 WebUI 专用字段，内部 diff 推断只保留给预览缓存失效。正式审查报告 `/private/tmp/taiji-zhinang-stage4-final-sol-review.md` 的 SHA-256 为 `6b0e805d0553d434573b73b62a2c5c9b130628762af9180fb45e5d60964e2ef5`；RED 日志分别为 `25f25242cd37807bff494ca181b906b7e828d9529e7c45c3d42d697c99428af5` 和 `3e09c70ca2d3e554cbee82ebf13f08866e1a22f29946c310ba758f23d0db8b18`。
 
-修正候选复审确认上述三项 P1 均已闭合，未发现新 P0/P1；保留两项 P2：`zhinang.js` 的卡片渲染尚未根据 `selectedRoleId` 设置选中样式或 `aria-selected`，因此宽屏 aside 展开详情时缺少当前卡片高亮；收藏成功或失败后的 `renderCatalog()` 会替换 grid DOM，尚未把键盘焦点恢复到重建后的收藏按钮，现有 E2E 在操作前主动 `.focus()`，不构成收藏后焦点保持证据。这两项不阻塞目录、详情、收藏持久化或主流程，但属于后续可访问性与状态表达改进项。
+修正候选复审记录的两个 P2 已在后续有界任务闭合。目录初始不强制选中；打开、切换、关闭详情以及过滤移除当前角色时，卡片的 `aria-current` 与可见“当前查看”状态保持一致。收藏 grid 重绘前捕获用户实际停留的稳定卡片操作及角色、操作类型和相邻索引；重绘后恢复同一收藏/查看详情/继续控件，若角色被移除则回退到相邻操作或“浏览全部角色”，用户主动把焦点移到搜索框后也不会被抢回。首轮 RED 报告 SHA-256 为 `428689ddad91f76350f96e7c06ddea5edcfe1a76b9c05d68593afd7b69a91b24`；fresh Sol 追加的 grid 内移焦 RED 为 `fd06d8a8c65ebc525f6acec71dde13aacd931cb36dcc34a7cc9d2b0c30fa46ec`，GREEN 由上述最终 `selection-focus` 与 `faults` 证明。
 
 恢复专项的历史失败最终定位为测试 Provider 对合并用户消息按“是否出现旧 marker”分派，导致恢复请求进入旧取消/失败分支；修正为按各 marker 最后出现位置识别当前意图后通过。该项是 fixture 分类错误，不是产品修正。
 
 ## 仍未覆盖的证据层
 
-- 宽屏详情 aside 打开时当前卡片的选中高亮与 `aria-selected` 尚未实现（P2）。
-- 收藏动作触发目录 DOM 重建后，键盘焦点尚未自动恢复到对应收藏按钮（P2）。
 - 未运行 axe 等专用可访问性扫描器；当前证据为原生键盘操作、焦点、ARIA/语义断言和独立人工交互。
 - 未运行像素基线式自动视觉回归；当前证据为规定视口截图、几何/裁剪/hit-test 断言和独立视觉审查。
 - 未使用真实外部模型、OAuth、联网工具或客户数据；模型与工具协议由 loopback Provider 驱动。
