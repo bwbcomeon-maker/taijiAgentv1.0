@@ -62,8 +62,8 @@
 | F03 分类、搜索、精选与全部角色 | 通过 | 正交筛选、24 条分页、固定 6 精选、竞态与 500 条性能通过 A03/A17 |
 | F04 我的收藏 | 通过 | profile 权威原子收藏、双 Store/双窗口、失败恢复和真实 WebUI 重启通过 A04/A12/A14 |
 | F05 最近使用 | 通过 | 真实受理最近、展示快照与可继续 tip 分离、删除/分支/复制回退和 UI 继续入口通过 A05/A12 |
-| F06 角色卡片及详情 | 通过 | 安全卡片、明确“查看详情”、完整详情、可重试与响应式 drawer/aside 通过 A06/A14/A15；宽屏 aside 当前卡片以可见标记和 `aria-current` 同步 |
-| F07 完整角色说明与来源 | 通过 | 当前/历史说明、改编、版本、MIT、固定来源及 HTTP(S) 白名单通过 A06/A12/A15 |
+| F06 角色卡片及详情 | 通过 | 安全卡片、明确“查看详情”、摘要、能力、限制、开场示例、可重试与响应式 drawer/aside 通过 A06/A14/A15；五类内部内容已从当前和历史详情隐藏；宽屏 aside 当前卡片以可见标记和 `aria-current` 同步 |
+| F07 角色来源治理 | 通过 | 原文、改编、版本、许可和固定来源继续由内部目录、审计与会话快照保留，不在当前或历史详情 UI 展示 |
 | F08 示例任务 | 通过 | 所选示例预填且 0 模型调用；普通创建空白；失败保留原 SID/草稿/File；切换隔离通过 A07 |
 | F09 使用此智囊 | 通过 | 可见 CTA、无模型创建、请求幂等、受理后可新建与继续并存通过 A05/A08/A09 |
 | F10 持续角色上下文 | 通过 | Provider 实际注入、可见角色标签、缓存/self-heal/压缩/重启/复制/分支/清空通过 A10/A11 |
@@ -79,7 +79,7 @@
 | A03 筛选分页 | 通过 | 中英文/标签搜索、领域、精选、收藏、最近正交与稳定 24 条分页通过；500 条 30 次真实 HTTP/浏览器性能见 `performance` 67 checks |
 | A04 收藏持久化 | 通过 | 两独立 Store 并发、磁盘故障不变、双窗口、profile 隔离与真实 WebUI 重启见 `lifecycle` 19 checks |
 | A05 使用事实 | 通过 | sync/streaming/Gateway 受理、最近 tip 安全解析及删除回退通过；浏览器验证示例 0 调用、受理后新建与继续并存 |
-| A06 详情真实性 | 通过 | 当前详情来自固定目录、历史详情来自会话快照，含原文/改编/版本/MIT/来源且不泄露内部提示词；浏览器完整显示 |
+| A06 详情真实性 | 通过 | 当前详情来自固定目录、历史详情来自会话快照；浏览器确认摘要、能力、限制和开场示例可见，交付示例、原始角色说明、适配说明、上游来源和完整 MIT 许可证均不显示 |
 | A07 示例与草稿 | 通过 | Node 竞态契约及 `draft-idempotency` 11 checks：选例 0 调用、失败保留原 SID/文本/原生 File、成功后隔离 |
 | A08 创建幂等 | 通过 | HTTP 顺序/并发/冲突/重启 replay 与浏览器双击、受理后 504、同 request_id 重试均通过 |
 | A09 环境不被替换 | 通过 | 无模型创建、非法上下文拒绝；浏览器断言 active profile/workspace/model/provider 与 config 文件 SHA 不变 |
@@ -180,3 +180,6 @@
 本批 diff 未修改 `_stream_gateway_run_events` 的定义。为排除导入路径或猴子补丁影响，使用 `git archive HEAD` 解出独立 `/private/tmp/taiji-zhinang-head-baseline`，以相同隔离环境单独执行首个代表 node ID；纯 `HEAD@266dfd73` 同样得到上述 TypeError。`scripts/verify.sh` 的 WebUI 952 注册计划只列品牌、模型配置、审批、专家团前端等选择器，不包含 `test_webui_gateway_chat_backend.py`，因此历史 952 通过与该问题不矛盾。本阶段不扩大范围修复该既有签名问题，也不把它表述为智囊核心阻断。
 
 阶段 4 修正候选在精确暂存后运行 `scripts/check-local-change-safety.py` 和一次必要的 `scripts/verify.sh --full`，并记录完整文件字节；任何 staged bytes 变化都会使终审失效。完整暂存内容须经新的 Sol 终审 PASS 后才能本地提交。
+
+| 2026-09-05 | 智囊详情精简：隐藏交付示例、原始角色说明、适配说明、上游来源和完整 MIT 许可证 | 源码静态契约 9/9 PASS，`node --check` 与 WebUI runtime ESLint PASS；隔离源码 WebUI 在 Codex in-app Chromium 实测详情打开、窄屏展示、Escape 关闭及焦点回到“查看详情”均通过，五类目标内容未出现在可访问树或截图中。项目 `--browser-smoke` 因仓库 Python 环境未安装 Playwright 返回前置条件缺失，改用同一源码服务的浏览器自动化完成受影响路径验收 |
+| 2026-09-05 | 智囊详情精简默认 `scripts/verify.sh` | 使用仓库准备的 Node `22.23.1`：local change safety PASS；root `1334 tests in 679.771s, OK (skipped=2)`；WebUI lint PASS；WebUI `953 passed, 1 warning`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS` |

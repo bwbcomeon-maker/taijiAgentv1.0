@@ -29,14 +29,6 @@
   const esc=value=>String(value==null?'':value).replace(/[&<>"']/g,ch=>({
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[ch]));
-  function safeHttpUrl(value){
-    const raw=String(value||'').trim();
-    if(!raw)return '';
-    try{
-      const url=new URL(raw);
-      return url.protocol==='http:'||url.protocol==='https:'?url.href:'';
-    }catch(_){return '';}
-  }
   const currentProfile=()=>String((typeof S!=='undefined'&&S&&S.activeProfile)||'default');
   const active=()=>{
     const main=document.querySelector('main.main');
@@ -250,13 +242,6 @@
 
   function detailHtml(role,{historical=false}={}){
     const disabled=!historical&&!role.available;
-    const examples=(Array.isArray(role.deliverable_examples)?role.deliverable_examples:[]).map((item,index)=>{
-      const title=typeof item==='object'&&item?item.title||`示例 ${index+1}`:`示例 ${index+1}`;
-      const content=typeof item==='object'&&item?item.structure||item.content||item.description||JSON.stringify(item):item;
-      return `<details><summary>${esc(title)}</summary><p class="zhinang-example-label">示例，非已生成文件</p><p>${esc(content)}</p></details>`;
-    }).join('');
-    const sourceUrl=safeHttpUrl(role.source_url);
-    const source=sourceUrl?`<a href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(role.source_path||'查看上游')}</a>`:`<span>${esc(role.source_path||'内置角色')}</span>`;
     const actions=[];
     if(!historical&&!disabled){
       actions.push(`<button type="button" class="zhinang-primary" data-zhinang-create="${esc(role.role_id)}" ${state.createPending?'disabled':''}>${state.createPending?'正在创建…':'使用此智囊'}</button>`);
@@ -268,12 +253,7 @@
       <p class="zhinang-detail-summary">${esc(role.summary||'')}</p>
       <section><h3>能力范围</h3>${detailList(role.capabilities)}</section>
       <section><h3>适用边界</h3><p>${esc(role.limitations||'请结合任务背景核对输出。')}</p></section>
-      <section><h3>交付物示例</h3><p class="zhinang-examples-note">以下均为示例，非已生成文件。</p>${examples}</section>
       <section><h3>开场示例</h3>${historical?detailList(role.starter_examples):starterExamplesHtml(role.starter_examples)}</section>
-      <details><summary>原始角色说明</summary><pre>${esc(role.raw_source||'')}</pre></details>
-      <section><h3>适配说明</h3><p>${esc(role.adaptation_note||'')}</p></section>
-      <section class="zhinang-source"><h3>上游来源</h3>${source}<small>固定提交：${esc(role.upstream_commit||'内置')}</small></section>
-      <details><summary>完整 MIT 许可证</summary><pre>${esc(role.license||'')}</pre></details>
       <div class="zhinang-detail-actions">${!historical&&!disabled?'<p class="zhinang-create-note">将创建新任务，补充需求后开始。</p>':''}${actions.join('')}${!historical?`<button type="button" class="zhinang-favorite-text" data-zhinang-favorite="${esc(role.role_id)}" aria-pressed="${role.favorite?'true':'false'}">${role.favorite?'取消收藏':'收藏'}</button>`:''}</div>
     </div>`;
   }

@@ -79,20 +79,14 @@ def test_zhinang_card_selection_and_favorite_focus_survive_catalog_redraws():
     assert "content:'当前查看'" in style
 
 
-def test_zhinang_details_are_accessible_and_distinguish_examples_from_files():
+def test_zhinang_details_are_accessible_and_hide_internal_role_metadata():
     script = _read("zhinang.js")
     style = _read("zhinang.css")
 
     for marker in (
         "能力范围",
         "适用边界",
-        "交付物示例",
-        "示例，非已生成文件",
         "开场示例",
-        "原始角色说明",
-        "适配说明",
-        "上游来源",
-        "完整 MIT 许可证",
         "role=\"dialog\"",
         "aria-modal",
         "focusableElements",
@@ -100,19 +94,27 @@ def test_zhinang_details_are_accessible_and_distinguish_examples_from_files():
     ):
         assert marker in script
 
+    for hidden_marker in (
+        "交付物示例",
+        "示例，非已生成文件",
+        "原始角色说明",
+        "适配说明",
+        "上游来源",
+        "完整 MIT 许可证",
+    ):
+        assert hidden_marker not in script
+
     assert "@media (max-width:700px)" in style
     assert "@media (min-width:1180px)" in style
     assert "prefers-reduced-motion" in style
     assert ":focus-visible" in style
 
 
-def test_zhinang_detail_only_links_http_upstream_sources():
+def test_zhinang_detail_does_not_render_upstream_source_links():
     script = _read("zhinang.js")
 
-    assert "function safeHttpUrl" in script
-    assert "url.protocol==='http:'||url.protocol==='https:'" in script
-    assert "const sourceUrl=safeHttpUrl(role.source_url)" in script
-    assert 'href="${esc(sourceUrl)}"' in script
+    assert "const sourceUrl=safeHttpUrl(role.source_url)" not in script
+    assert 'href="${esc(sourceUrl)}"' not in script
 
 
 def test_zhinang_session_role_uses_a_desktop_safe_area_outside_the_welcome_hero():
