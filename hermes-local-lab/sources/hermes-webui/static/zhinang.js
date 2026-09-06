@@ -170,12 +170,12 @@
     const recent=role.last_accepted_at?new Date(Number(role.last_accepted_at)*1000).toLocaleString('zh-CN'):'';
     return `<article class="zhinang-card ${disabled?'is-unavailable ':''}${current?'is-selected':''}" data-zhinang-role="${esc(role.role_id)}"${current?' aria-current="true"':''}>
       <div class="zhinang-card-top">${roleImageHtml(role)}
+        <div class="zhinang-card-heading"><h2>${esc(role.name||role.original_name||'未命名角色')}</h2><span>${esc(role.category||'')}</span></div>
         <button type="button" class="zhinang-favorite" data-zhinang-favorite="${esc(role.role_id)}" aria-label="${role.favorite?'取消收藏':'收藏'}${esc(role.name)}" aria-pressed="${role.favorite?'true':'false'}"${pending?' aria-disabled="true"':''}><span aria-hidden="true">${role.favorite?'★':'☆'}</span></button>
       </div>
-      <h2>${esc(role.name||role.original_name||'未命名角色')}</h2>
       <p>${esc(role.summary||role.unavailable_reason||'')}</p>
-      <div class="zhinang-card-tags">${tags.map(tag=>`<span>${esc(tag)}</span>`).join('')}</div>
-      <div class="zhinang-card-foot"><span>${esc(role.category||'')}</span><button type="button" data-zhinang-open="${esc(role.role_id)}">查看详情</button>${recent?`<time>${esc(recent)}</time>`:''}</div>
+      <div class="zhinang-card-foot"><div class="zhinang-card-tags">${tags.map(tag=>`<span>${esc(tag)}</span>`).join('')}</div><button type="button" data-zhinang-open="${esc(role.role_id)}">查看详情 <span aria-hidden="true">→</span></button></div>
+      ${recent?`<time class="zhinang-card-recent">${esc(recent)}</time>`:''}
       ${disabled?'<span class="zhinang-unavailable">当前版本不可用</span>':''}
       ${role.continue_session_id?`<button type="button" class="zhinang-continue" data-zhinang-continue="${esc(role.continue_session_id)}">继续最近任务</button>`:''}
     </article>`;

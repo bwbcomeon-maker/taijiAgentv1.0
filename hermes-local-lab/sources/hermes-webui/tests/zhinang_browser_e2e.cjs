@@ -651,7 +651,7 @@ async function imagesPass(browser,base){
 
 async function main(){
   const scope=process.env.ZHINANG_E2E_SCOPE||'viewports';
-  const allowedScopes=new Set(['viewports','flow','faults','selection-focus','draft-idempotency','lifecycle','recovery','performance','removed','regression','images','serve']);
+  const allowedScopes=new Set(['viewports','flow','faults','selection-focus','draft-idempotency','lifecycle','recovery','performance','removed','regression','images','compact-layout','serve']);
   if(!allowedScopes.has(scope))throw new Error(`unsupported ZHINANG_E2E_SCOPE: ${scope}`);
   fs.mkdirSync(OUT,{recursive:true});
   const root=fs.mkdtempSync('/private/tmp/taiji-zhinang-stage4-e2e-');
@@ -701,6 +701,7 @@ async function main(){
         await zoomPass(browser,base);
       }
       if(scope==='images')await imagesPass(browser,base);
+      if(scope==='compact-layout')await require('./zhinang_compact_layout.cjs')({browser,base,OUT,evidence,check});
       if(scope==='flow')await realFlow(browser,base,workspace,attachment);
       if(scope==='faults')await faultAndKeyboardPass(browser,base);
       if(scope==='selection-focus')await selectionAndFavoriteFocusPass(browser,base);
