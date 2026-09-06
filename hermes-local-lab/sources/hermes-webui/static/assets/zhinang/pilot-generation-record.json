@@ -1,0 +1,1069 @@
+{
+  "catalog_version": "agency-agents-af128a92888f-source-v1",
+  "generation_batch": "92e0b70bdc4c2c94cff2943f7decd5f79dea20b75b206853a93186110fca292f",
+  "images": [
+    {
+      "bytes": 16710,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-87ddbddb-00f4-45fb-862f-b297f7b9aaf6.png",
+      "generated_source_sha256": "91b78c5d4ab9a0db9c204b3c768f7d43a09659919d2bfb65dbeff7b278f028c7",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-a2db26ce-110d-4328-b0ca-02c68c281863.png",
+          "reason": "尺寸重试仍为1254x1254；保留首次构图，后续采用可审计规范化。",
+          "selection": "not_selected",
+          "sha256": "9ed7c9196c55efbf11e01158f3f84399cff653b42558f5c75e7ae9cbdee4e6bd"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-87ddbddb-00f4-45fb-862f-b297f7b9aaf6.png",
+          "reason": "人物连接客户对话、架构节点与PoC清单；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "91b78c5d4ab9a0db9c204b3c768f7d43a09659919d2bfb65dbeff7b278f028c7"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "梳理架构、集成、安全和技术决策标准",
+          "将产品能力映射到客户业务目标，明确差距与依赖",
+          "设计围绕客户痛点的演示叙事和验证重点",
+          "制定有范围、时间、测量方法和决策节点的 PoC 计划",
+          "用事实、影响和应对动作组织技术异议与竞争比较"
+        ],
+        "category": "售前与方案",
+        "name": "售前方案顾问",
+        "summary": "把客户需求、技术约束与产品能力连接起来，梳理方案、演示重点和 PoC 验收路径。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "3fc92b88e9b2af0d557f42a3e22e57bcac8f5c6f1e2fcc3e3801acf3e1c761a7",
+      "path": "static/assets/zhinang/roles/sales-engineer-52d4228afb02.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: consultant connecting customer dialogue, architecture nodes, and PoC checklist.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "5245f6ace4cfb9dfc498def5e19645687a658519821c43833f02954bd6a908a5",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:sales/sales-engineer",
+      "sha256": "7cbf8ede501a6527e35607c3935d203c651a222ffbed4daddeb3d6357519ae2f",
+      "source": {
+        "filename": "sales-engineer.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "3fc92b88e9b2af0d557f42a3e22e57bcac8f5c6f1e2fcc3e3801acf3e1c761a7",
+        "width": 1024
+      },
+      "source_sha256": "3fc92b88e9b2af0d557f42a3e22e57bcac8f5c6f1e2fcc3e3801acf3e1c761a7",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "人物连接客户对话、架构节点与PoC清单；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17018,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-128ca8f6-2db8-4321-a449-5e65182fd0c0.png",
+      "generated_source_sha256": "02949587ac57d979b18d021241181afb3a0025c86f08c050c81c9ce28335ad44",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-128ca8f6-2db8-4321-a449-5e65182fd0c0.png",
+          "reason": "顾问整理需求文档、证据块与评审靶心；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "02949587ac57d979b18d021241181afb3a0025c86f08c050c81c9ce28335ad44"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "拆解招标要求、评审因素及其权重",
+          "形成围绕客户问题且有证据支持的响应主题",
+          "组织从问题理解到解决路径和预期成果的提案结构",
+          "编写与客户背景一致的执行摘要和证据提纲",
+          "检查章节中的主题一致性、合规响应与差异化表达"
+        ],
+        "category": "售前与方案",
+        "name": "投标策略顾问",
+        "summary": "围绕客户需求和评审标准，组织响应主题、证据与方案叙事。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "e58ec1d26d18fb665ae7ab206bd9574b38bffb6b46d565986616fcbd78f2d18d",
+      "path": "static/assets/zhinang/roles/sales-proposal-strategist-61e00908afe5.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: consultant arranging requirement document, evidence blocks, and evaluation target.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "d96a98c52a09d1ca990d19bad28af826c6bd02bfcf7fb9998d84e1ce13f672c5",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:sales/sales-proposal-strategist",
+      "sha256": "c0e1ad56c2cf3f94e46cf392a0c5f7057511a20e52131c8a2695eb6223c28bad",
+      "source": {
+        "filename": "sales-proposal-strategist.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "e58ec1d26d18fb665ae7ab206bd9574b38bffb6b46d565986616fcbd78f2d18d",
+        "width": 1024
+      },
+      "source_sha256": "e58ec1d26d18fb665ae7ab206bd9574b38bffb6b46d565986616fcbd78f2d18d",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "顾问整理需求文档、证据块与评审靶心；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 16558,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-0411bd9a-a083-48d3-8e92-4a3fc742cec4.png",
+      "generated_source_sha256": "9d72d60709ea8f5c2c753c482e3e4cec0c76296e9008f63f09e24a3258bbc91d",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-0411bd9a-a083-48d3-8e92-4a3fc742cec4.png",
+          "reason": "产品负责人平衡用户洞察、路线图卡片与验收勾选；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "9d72d60709ea8f5c2c753c482e3e4cec0c76296e9008f63f09e24a3258bbc91d"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "区分用户问题、业务目标和待验证的方案假设",
+          "组织机会评估、用户故事与验收标准",
+          "结合价值、投入、置信度和依赖安排优先级",
+          "划分当前与后续范围，说明取舍和范围变更影响",
+          "规划发布准备、结果指标和反馈复盘"
+        ],
+        "category": "产品与研发",
+        "name": "产品经理",
+        "summary": "把初步想法整理成有用户证据、明确范围和验收指标的产品计划。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "8469b0467e868ed0952f09a9a11cd1115e585e2b28fd44a664d5239e28eb2d85",
+      "path": "static/assets/zhinang/roles/product-manager-561395cfd773.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: product lead balancing user insight, prioritized roadmap cards, and acceptance check.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "d2e381249c471303092781ef539b7f0df29ae44f5483ea0b6765546888c4cf08",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:product/product-manager",
+      "sha256": "3a656774b4e5022f76a3a04d80df650c5dc7a9646cd83d393d9ca96513ffcf59",
+      "source": {
+        "filename": "product-manager.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "8469b0467e868ed0952f09a9a11cd1115e585e2b28fd44a664d5239e28eb2d85",
+        "width": 1024
+      },
+      "source_sha256": "8469b0467e868ed0952f09a9a11cd1115e585e2b28fd44a664d5239e28eb2d85",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "产品负责人平衡用户洞察、路线图卡片与验收勾选；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17970,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-27c91b6b-c5d6-48f5-9cd8-7b8b033902cb.png",
+      "generated_source_sha256": "6c83d20a61153d5b2ce21782a5230d1572c103bef90eb9d31a5f84f5a50fa748",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-27c91b6b-c5d6-48f5-9cd8-7b8b033902cb.png",
+          "reason": "技术架构师连接模块、依赖链与韧性盾牌；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "6c83d20a61153d5b2ce21782a5230d1572c103bef90eb9d31a5f84f5a50fa748"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "识别领域边界、业务不变量和上下游关系",
+          "比较分层、模块化单体、微服务或事件驱动等方案的适用条件",
+          "分析一致性、可用性、耦合、复杂度与可维护性的取舍",
+          "用架构决策记录说明背景、备选方案和后果",
+          "梳理依赖方向、故障模式和可逆的演进步骤"
+        ],
+        "category": "产品与研发",
+        "name": "技术架构顾问",
+        "summary": "结合业务边界、现有系统和团队能力，分析技术方案的取舍与演进路径。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "de7c2b2ca3514805f27b4f3fccb12020dbed2e65b1de12fefd2887a704a580df",
+      "path": "static/assets/zhinang/roles/engineering-software-architect-f8cb4f0c3323.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: architect connecting modular system blocks with dependency and resilience symbols.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "793542f904119fe03343ccd138404179ab74fb9d6e26ba25ed4a0617accf7695",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:engineering/engineering-software-architect",
+      "sha256": "b306b465474233320c543ee4daca2e95b7cc2f7f0d48d6f568a4cbd9605f1ac8",
+      "source": {
+        "filename": "engineering-software-architect.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "de7c2b2ca3514805f27b4f3fccb12020dbed2e65b1de12fefd2887a704a580df",
+        "width": 1024
+      },
+      "source_sha256": "de7c2b2ca3514805f27b4f3fccb12020dbed2e65b1de12fefd2887a704a580df",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "技术架构师连接模块、依赖链与韧性盾牌；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17878,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-e4014752-ff98-4b6c-88ae-f259ac4c46fb.png",
+      "generated_source_sha256": "e5bde212a8bb2d0a947834dce3a1fdf89109413d0fd5508cfea44028b7682541",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-8db5d10f-5039-4c64-87d3-64df9197fbb2.png",
+          "reason": "出现太极符号与装饰杂物，未入选。",
+          "selection": "not_selected",
+          "sha256": "f5ef2303e8418d14b30e7baf61e26f1095627c416c506db5c009937751f14f1f"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-e4014752-ff98-4b6c-88ae-f259ac4c46fb.png",
+          "reason": "创作者组织受众、故事结构和图文音视频；重试已去除太极符号与装饰杂物。",
+          "selection": "selected",
+          "sha256": "e5bde212a8bb2d0a947834dce3a1fdf89109413d0fd5508cfea44028b7682541"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "明确受众、内容支柱和编辑排期",
+          "组织品牌叙事并保持语气与信息一致",
+          "起草文章、社媒文案及视频或播客脚本提纲",
+          "根据渠道特点复用内容并比较表达版本",
+          "基于已有数据提出互动与内容效果的检验指标"
+        ],
+        "category": "市场与增长",
+        "name": "内容策划顾问",
+        "summary": "围绕目标受众和品牌表达，规划选题、内容结构及跨渠道改写。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "dfa291e1457c17daac59405b2d50dd20df563da3ce8a7f329ca56cc67bdca3ab",
+      "path": "static/assets/zhinang/roles/marketing-content-creator-c46599cbcb66.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: creator arranging audience, story structure, and multichannel content objects.\nNo yin-yang symbol, no brand symbol, no plants, no clouds or decorative tabletop props. Keep only the creator and the audience, story-structure and multichannel content symbols.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "9a19bb93f68c554eab59a154433bdcb217980218a5d639b4999aeed180a8cc9c",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:marketing/marketing-content-creator",
+      "sha256": "8e8373ad55c7d3f0bb52559bd1871b727a33e2761d8ae84a4defe550bca5f78a",
+      "source": {
+        "filename": "marketing-content-creator.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "dfa291e1457c17daac59405b2d50dd20df563da3ce8a7f329ca56cc67bdca3ab",
+        "width": 1024
+      },
+      "source_sha256": "dfa291e1457c17daac59405b2d50dd20df563da3ce8a7f329ca56cc67bdca3ab",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "创作者组织受众、故事结构和图文音视频；重试已去除太极符号与装饰杂物。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 11520,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-3e6b82d2-6d03-4c85-968c-438de039d5fa.png",
+      "generated_source_sha256": "247ef44e49e3fbf7a120a34702a56731a20bb28842445be2eeeb940dccbe4066",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-4494ddd5-c8da-4d29-8928-6cf56ce5b240.png",
+          "reason": "crawler误画为履带，角色语义不符。",
+          "selection": "not_selected",
+          "sha256": "64078adcd5119945bb15fd275ef368990043069183fe8bf17713b97f9895838f"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-8bafa9a3-1c28-4f2c-9785-e3233047f6ec.png",
+          "reason": "角色语义通过，但透明背景不符合固定背景；作为背景编辑输入。",
+          "selection": "not_selected",
+          "sha256": "8bf94226bcacb00cf912739c7474c7f688dfaccfbce7bd16ae126b056621dd12"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-c042dd0c-be28-4d4e-badd-d25f4901eaae.png",
+          "reason": "审查P2：96px下地球、植物、书和额外面板过密，替换为人物、三个网页节点与单一信标。",
+          "selection": "not_selected",
+          "sha256": "20d8db2d9f3a4d8a1a403a490db9377a5b754a039ce8e56c99f0a574b76f0064"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-3e6b82d2-6d03-4c85-968c-438de039d5fa.png",
+          "reason": "审查修复：96px下人物、三个链接网页节点和单一信标清晰；无文字、水印、品牌符号或多余装饰。",
+          "selection": "selected",
+          "sha256": "247ef44e49e3fbf7a120a34702a56731a20bb28842445be2eeeb940dccbe4066"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "用评分卡核查 robots.txt、站点地图、llms.txt、访问日志和 AI 爬虫放行策略",
+          "评估关键页面的语义 HTML、Markdown 替代、标题结构、结构化数据与 JavaScript 依赖",
+          "按内容类型制定 token 预算、拆分和摘要建议，识别可能被截断的页面",
+          "梳理 agent-permissions.json、动作声明和任务表单等面向浏览代理的基础条件"
+        ],
+        "category": "市场与增长",
+        "name": "AI 搜索基础设施顾问",
+        "summary": "审查网站面向 AI 爬虫、引用系统和浏览代理的可发现性、可解析性与能力声明前提，并给出分阶段修复清单。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "0383683deb59d003aa7b09e4f28ff5d01a03848b6675d87b78c40af88278107f",
+      "path": "static/assets/zhinang/roles/marketing-aeo-foundations-7105f32e5a17.webp",
+      "prompt": "Create one square PNG role illustration. Subject: specialist inspecting crawler path, structured content nodes, and citation beacon.\nExtremely minimal occupational icon for clear recognition at 96 pixels: one friendly professional search analyst shown waist-up, exactly three large structured webpage tiles connected in a simple path on one frosted-glass board, and exactly one small glowing source-verification beacon. These are the ONLY scene elements. The analyst uses one hand to indicate the connected webpage tiles. Large simple shapes, ample negative space, no tiny details. No globe, plant, books, extra panels, magnifying glass, pedestal, desk, extra documents or decorative objects. No yin-yang, currency, punctuation or brand symbols. Solid opaque pale ice-blue background, no transparent pixels. No text, letters, numbers, logos or watermarks.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "aed2b679ce3516bd3173d42005a712c53c37c7a48330598d403623b290f34661",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:marketing/marketing-aeo-foundations",
+      "sha256": "9c9e1a743e0c737c51646637347230821a182d8e735e298ce2a3478132376cc2",
+      "source": {
+        "filename": "marketing-aeo-foundations.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "0383683deb59d003aa7b09e4f28ff5d01a03848b6675d87b78c40af88278107f",
+        "width": 1024
+      },
+      "source_sha256": "0383683deb59d003aa7b09e4f28ff5d01a03848b6675d87b78c40af88278107f",
+      "state": "review",
+      "visual_check": {
+        "checked_thumbnail_dimensions": [
+          96,
+          96
+        ],
+        "no_text_or_watermark": true,
+        "notes": "极简半身专业人物、三个结构化网页节点和单一引用信标；96px可辨认，无地球、植物、书、额外面板或装饰；不透明淡冰蓝背景。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 16910,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "edit_reference": {
+        "filename": "exec-f5eda5a7-2ebb-4919-8c4e-d8838616e8db.png",
+        "sha256": "e1e897164169dd1feb2421c4e325df17bd7d6a04633e45e01bf15b836b656104"
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-01117f23-9f31-4fa9-bb5c-67ecd386f90a.png",
+      "generated_source_sha256": "ac318df80231fe94cdd9f4c01b6c0ad6b3153e3263c79bb4ac9c522454de1883",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-f5eda5a7-2ebb-4919-8c4e-d8838616e8db.png",
+          "reason": "出现太极符号，作为去符号编辑输入。",
+          "selection": "not_selected",
+          "sha256": "e1e897164169dd1feb2421c4e325df17bd7d6a04633e45e01bf15b836b656104"
+        },
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-01117f23-9f31-4fa9-bb5c-67ecd386f90a.png",
+          "reason": "审阅者用放大镜比较两份文档的一致性与问题标记；编辑已去除太极符号。",
+          "selection": "selected",
+          "sha256": "ac318df80231fe94cdd9f4c01b6c0ad6b3153e3263c79bb4ac9c522454de1883"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "围绕文档目标检查章节结构和论述完整性",
+          "核对同一概念、数字、日期和范围的前后一致性",
+          "指出缺少证据、含糊承诺和未回答的问题",
+          "按影响排序问题并给出明确修改方向",
+          "区分已确认问题、需要补充材料的判断和编辑建议"
+        ],
+        "category": "文档与研究",
+        "name": "文档审阅助手",
+        "summary": "检查材料中的逻辑、遗漏、术语和前后表述一致性，给出可定位的修改建议。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "3eac0c704f7bba654d353053dfa38d35143b43859520587ec3277c24731bebbe",
+      "path": "static/assets/zhinang/roles/document-reviewer-a3d918824287.webp",
+      "prompt": "Edit the image by removing the yin-yang symbol and its small top-left panel entirely, leaving the pale ice-blue background in that area. Keep the reviewer, two compared documents, consistency markers and lens unchanged. No yin-yang, no brand symbol.\nSubject: reviewer comparing two documents with consistency markers and issue lens.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "6887b49b7759497335fee3d9dbd89252c53ab73dcb12657fdac930c6ae884c33",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "taiji:document-reviewer",
+      "sha256": "d1d4803654ec69432c34d4035b97464ad5c06c413accb8fde9f2b5be6915d592",
+      "source": {
+        "filename": "document-reviewer.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "3eac0c704f7bba654d353053dfa38d35143b43859520587ec3277c24731bebbe",
+        "width": 1024
+      },
+      "source_sha256": "3eac0c704f7bba654d353053dfa38d35143b43859520587ec3277c24731bebbe",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "审阅者用放大镜比较两份文档的一致性与问题标记；编辑已去除太极符号。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17586,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-98afeeb9-0428-4af5-9762-eaa0b98a05d1.png",
+      "generated_source_sha256": "7f3328d596ae82ea1b1adf679611505a9aaea29089d36125c2e315fe10d9aaca",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-98afeeb9-0428-4af5-9762-eaa0b98a05d1.png",
+          "reason": "申请写作者连接目标、预算方块、证据镜与评估清单；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "7f3328d596ae82ea1b1adf679611505a9aaea29089d36125c2e315fe10d9aaca"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "解析资助指南中的资格、主题、材料、预算和截止时间要求",
+          "把问题、目标、活动、产出、成果与评估方法建立逻辑链",
+          "设计项目叙事、工作计划、预算说明、合作方材料和风险检查表",
+          "梳理证据来源、引用、数据缺口和不可夸大的影响表述",
+          "为获批后的进度、产出、成果和资金使用报告建立结构"
+        ],
+        "category": "文档与研究",
+        "name": "资助申请写作顾问",
+        "summary": "将组织项目目标、证据、预算和评估计划整理为符合资助指南的申请材料与后续报告结构。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "df9158e22d2476abb646bcfe9a16c31d0bedf5bbe5a70e8ac237bf330fee4fc0",
+      "path": "static/assets/zhinang/roles/grant-writer-047374a1b7a6.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: writer connecting project goal, budget blocks, evidence, and evaluation plan.\nNo yin-yang symbol or brand symbol; the palette name describes colors only. All document and budget information is abstract graphical blocks, without written characters or currency signs.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "8f10123a21df96e67597b9f9ae5aa1a7971798c4ec3444922fca43a4f3d6479a",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:specialized/grant-writer",
+      "sha256": "8ac7675fda0abe733cdc961a2b50c34eadfdc4194464379b5a59d2b30d4ad7c7",
+      "source": {
+        "filename": "grant-writer.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "df9158e22d2476abb646bcfe9a16c31d0bedf5bbe5a70e8ac237bf330fee4fc0",
+        "width": 1024
+      },
+      "source_sha256": "df9158e22d2476abb646bcfe9a16c31d0bedf5bbe5a70e8ac237bf330fee4fc0",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "申请写作者连接目标、预算方块、证据镜与评估清单；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 20480,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-b1898553-b421-4841-9060-37e56be13f9e.png",
+      "generated_source_sha256": "6f7ce6cab045158b4db7f0c96ab1ba644b9ae6dacf7385c10ac679c2adbb4b04",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-b1898553-b421-4841-9060-37e56be13f9e.png",
+          "reason": "运营人员匹配发票、审批路线与审计资料；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "6f7ce6cab045158b4db7f0c96ab1ba644b9ae6dacf7385c10ac679c2adbb4b04"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "梳理发票、采购订单、供应商信息与付款申请的核验顺序",
+          "设计以发票编号为核心的重复付款防护和异常处置",
+          "比较付款渠道、结算时效、成本与适用条件",
+          "生成待付、已付、失败与待复核项目的审计型汇总",
+          "为定期账单设计审批阈值、失败重试和人工升级规则"
+        ],
+        "category": "运营与管理",
+        "name": "应付账款运营顾问",
+        "summary": "围绕供应商发票、付款审批、去重和审计记录梳理应付流程，帮助形成可核查的付款运营方案。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "1ea9fc7f1340995b8f0c6bfdaf29fb5f47616db99f52d62812e6e217e1c97c62",
+      "path": "static/assets/zhinang/roles/accounts-payable-agent-709838ab24c7.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: operator matching invoice, approval route, duplicate check, and audit record.\nNo yin-yang symbol or brand symbol; the palette name describes colors only. All document and budget information is abstract graphical blocks, without written characters or currency signs.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "8e2f69caa174aa5f1fc23df6f281c4fa316b13996b02aaf2f8f4e98fc7804d27",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:specialized/accounts-payable-agent",
+      "sha256": "c23d5a119c5df398ed7917f8129152177b733c40cedf3912d48e58ae43401e10",
+      "source": {
+        "filename": "accounts-payable-agent.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "1ea9fc7f1340995b8f0c6bfdaf29fb5f47616db99f52d62812e6e217e1c97c62",
+        "width": 1024
+      },
+      "source_sha256": "1ea9fc7f1340995b8f0c6bfdaf29fb5f47616db99f52d62812e6e217e1c97c62",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "运营人员匹配发票、审批路线与审计资料；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17570,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-945c6106-5ad8-4b56-9146-fda79588da48.png",
+      "generated_source_sha256": "f8ba90d79dc6768690bb8971f9916994c7e1c58947162da99fdfbe54d3cb1f74",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-945c6106-5ad8-4b56-9146-fda79588da48.png",
+          "reason": "治理负责人监督工作流、人工检查点、盾牌与审计轨迹；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "f8ba90d79dc6768690bb8971f9916994c7e1c58947162da99fdfbe54d3cb1f74"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "从节省时间、数据关键性、外部依赖和扩展性评估自动化候选",
+          "在批准、试点、局部自动化、延后或拒绝之间给出明确结论",
+          "设计触发、校验、处理、外部动作、结果验证、日志和错误分支",
+          "定义幂等、超时、受控重试、告警和人工恢复要求",
+          "梳理集成系统的事实来源、权限、字段映射、限流与责任人"
+        ],
+        "category": "运营与管理",
+        "name": "自动化治理架构顾问",
+        "summary": "先评估自动化的价值、数据风险和可维护性，再给出带人工兜底、审计和测试条件的实施建议。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "dee48aa48f03a620be1c60d112f3a1b8f8f4e09b8aa3e5dd4c285a809b84aabc",
+      "path": "static/assets/zhinang/roles/automation-governance-architect-062bbe654392.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: governance lead supervising workflow nodes, human checkpoint, shield, and audit trail.\nNo yin-yang symbol or brand symbol; the palette name describes colors only. All document information is abstract graphical blocks, without written characters.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "b368d23e6a9c87d20b3cf3e2cb8910fd6c7a5df2bdabdcbd0c0b9f6ceeb9b3b1",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:specialized/automation-governance-architect",
+      "sha256": "8b970355958d375e63d4663dccffe94dea64ab8d2b9bfb166c98963aa77ae5aa",
+      "source": {
+        "filename": "automation-governance-architect.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "dee48aa48f03a620be1c60d112f3a1b8f8f4e09b8aa3e5dd4c285a809b84aabc",
+        "width": 1024
+      },
+      "source_sha256": "dee48aa48f03a620be1c60d112f3a1b8f8f4e09b8aa3e5dd4c285a809b84aabc",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "治理负责人监督工作流、人工检查点、盾牌与审计轨迹；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 18384,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-279a2db7-ebe9-4083-94ab-41d5bc10dcf9.png",
+      "generated_source_sha256": "a38fa98f6cf7005e9dd2a7e8672c90caf28b4e33e8b00115a037f2e0f414f8d3",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-279a2db7-ebe9-4083-94ab-41d5bc10dcf9.png",
+          "reason": "引导者连接多样用户剪影、交流手势与包容界面；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "a38fa98f6cf7005e9dd2a7e8672c90caf28b4e33e8b00115a037f2e0f414f8d3"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "识别界面、流程、文案和图像中可能忽视的文化与身份语境",
+          "制定面向目标市场的文化研究问题、访谈与验证计划",
+          "审查日期、姓名、语言、家庭结构和象征表达等本地化风险",
+          "将包容性观察转化为有优先级的设计改进假设",
+          "设计代表性用户测试与反馈闭环的记录结构"
+        ],
+        "category": "设计与体验",
+        "name": "跨文化包容性体验顾问",
+        "summary": "帮助审视界面流程、文案和视觉素材中的文化语境与潜在排斥，形成可研究、可验证的包容性改进建议。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "3f123f6e73d8be5457a44e3cbb6a36b0711d6aee03cfbdf7271e1634d8c296f6",
+      "path": "static/assets/zhinang/roles/specialized-cultural-intelligence-strategist-b456450239e9.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: facilitator connecting diverse user silhouettes, dialogue, and inclusive interface panel.\nNo yin-yang symbol or brand symbol; the palette name describes colors only. All interface information is abstract graphical blocks, without written characters.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "c6fd61738271d286a7eb492b80d7bc23845ce1fb1e24405c6ed7c5efcd9249ac",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:specialized/specialized-cultural-intelligence-strategist",
+      "sha256": "2011711cfb70e59fd208aa217e6626d42709761053f91051f691406ef67a7cd1",
+      "source": {
+        "filename": "specialized-cultural-intelligence-strategist.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "3f123f6e73d8be5457a44e3cbb6a36b0711d6aee03cfbdf7271e1634d8c296f6",
+        "width": 1024
+      },
+      "source_sha256": "3f123f6e73d8be5457a44e3cbb6a36b0711d6aee03cfbdf7271e1634d8c296f6",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "引导者连接多样用户剪影、交流手势与包容界面；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    },
+    {
+      "bytes": 17406,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "generated_source_filename": "exec-9d0c43da-4eb5-4024-876a-d030de68f450.png",
+      "generated_source_sha256": "bf814217c4f39bff1c2d1e89805b0ea5c85929b2af1fbf9c7f1734f7b27fe4cb",
+      "generation_attempts": [
+        {
+          "dimensions": [
+            1254,
+            1254
+          ],
+          "filename": "exec-9d0c43da-4eb5-4024-876a-d030de68f450.png",
+          "reason": "品牌守护者对齐色卡、材质、信息气泡与一致性盾牌；无文字、水印或品牌标记。",
+          "selection": "selected",
+          "sha256": "bf814217c4f39bff1c2d1e89805b0ea5c85929b2af1fbf9c7f1734f7b27fe4cb"
+        }
+      ],
+      "generation_tool": "built-in image_gen",
+      "height": 512,
+      "input_snapshot": {
+        "capabilities": [
+          "梳理品牌目的、愿景、使命、价值观、个性与目标受众",
+          "构建标志、色彩、字体、版式和语气的品牌识别框架",
+          "审阅不同触点的品牌一致性并提出修正优先级",
+          "规划品牌延展、更新、文化适配与品牌资产观测的待验证假设"
+        ],
+        "category": "设计与体验",
+        "name": "品牌战略与一致性顾问",
+        "summary": "围绕品牌定位、视觉与语言体系、跨触点一致性及演进风险，协助团队形成可审阅的品牌决策与规范。"
+      },
+      "model": "image-2.0",
+      "model_identifier_source": "Image 2.0 built-in tool; backend identifier is not separately returned",
+      "normalization_method": "Pillow LANCZOS",
+      "normalized_source_dimensions": [
+        1024,
+        1024
+      ],
+      "normalized_source_sha256": "053cd25875d2c38d3a149fac1939808352f79b5a12594dd57cd895740fd2a341",
+      "path": "static/assets/zhinang/roles/design-brand-guardian-00d3e9f2f3c1.webp",
+      "prompt": "Create one 1024x1024 PNG role illustration. Subject: brand guardian aligning color/material samples, message system, and consistency shield.\nNo yin-yang symbol or brand symbol; the palette name describes colors only. Show unbranded color and material swatches, abstract dialogue shapes and a check shield without written characters.\nPremium lightweight 3D icon scene; friendly professional character or occupational subject; frosted-glass information board; soft matte polymer; Taiji blue, cyan, deep navy, white and cool gray; pale ice-blue background; centered square composition; large simple silhouette readable at 96px; no text, letters, numbers, logo, watermark or frame; avoid generic robots, childish toys, clutter and tiny details.",
+      "prompt_sha256": "5da4e3f1c0221e00670f413a6f0b84ea876fe089909e840aff7867a7534114ff",
+      "reviewed_at": null,
+      "reviewer": null,
+      "role_id": "agency:design/design-brand-guardian",
+      "sha256": "8ba8cc75ab0a87c91bb5046f338ddd5f176b6cdb985cd062a87dd453648dc545",
+      "source": {
+        "filename": "design-brand-guardian.png",
+        "format": "PNG",
+        "height": 1024,
+        "sha256": "053cd25875d2c38d3a149fac1939808352f79b5a12594dd57cd895740fd2a341",
+        "width": 1024
+      },
+      "source_sha256": "053cd25875d2c38d3a149fac1939808352f79b5a12594dd57cd895740fd2a341",
+      "state": "review",
+      "visual_check": {
+        "no_text_or_watermark": true,
+        "notes": "品牌守护者对齐色卡、材质、信息气泡与一致性盾牌；无文字、水印或品牌标记。",
+        "role_match": true,
+        "status": "agent_checked"
+      },
+      "width": 512
+    }
+  ],
+  "schema_version": "taiji-zhinang-pilot-generation/v1"
+}

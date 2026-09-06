@@ -13764,6 +13764,7 @@ def handle_get(handler, parsed) -> bool:
             CatalogResourceError,
             ZhinangFavoritesError,
             query_catalog_roles,
+            review_images_enabled,
         )
 
         query = parse_qs(parsed.query or "", keep_blank_values=True)
@@ -13784,6 +13785,7 @@ def handle_get(handler, parsed) -> bool:
                 if view == "recent"
                 else {}
             )
+            include_review = review_images_enabled(handler.client_address[0], STATE_DIR)
             result = query_catalog_roles(
                 favorites=favorites,
                 recent=recent,
@@ -13792,6 +13794,7 @@ def handle_get(handler, parsed) -> bool:
                 view=view,
                 query=query.get("query", [""])[0],
                 page=page,
+                include_review=include_review,
             )
         except (TypeError, ValueError):
             return j(handler, {
@@ -13811,6 +13814,7 @@ def handle_get(handler, parsed) -> bool:
             ZhinangFavoritesError,
             current_role_detail,
             removed_role_detail,
+            review_images_enabled,
         )
 
         raw_role_id = parsed.path[len("/api/zhinang/roles/"):]
@@ -13821,10 +13825,12 @@ def handle_get(handler, parsed) -> bool:
         profile = str(get_active_profile_name() or "default")
         try:
             favorites = _zhinang_profile_favorites(profile)
+            include_review = review_images_enabled(handler.client_address[0], STATE_DIR)
             try:
                 role = current_role_detail(
                     role_id,
                     favorite=role_id in favorites,
+                    include_review=include_review,
                 )
             except CatalogResourceError as exc:
                 if exc.code != "role_not_found":
@@ -13834,6 +13840,7 @@ def handle_get(handler, parsed) -> bool:
                     role_id,
                     favorite=favorites.get(role_id),
                     recent=recent.get(role_id),
+                    include_review=include_review,
                 )
         except ZhinangFavoritesError as exc:
             return j(handler, {"error": str(exc), "code": exc.code}, status=500)
@@ -13858,7 +13865,7 @@ def handle_get(handler, parsed) -> bool:
             get_active_profile_name(),
         ):
             return bad(handler, "Session not found", 404)
-        from api.zhinang import session_has_zhinang_binding
+        from api.zhinang import review_images_enabled, session_has_zhinang_binding
 
         snapshot = getattr(session, "zhinang_role_snapshot", None)
         if not session_has_zhinang_binding(session):
@@ -13866,7 +13873,11 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.zhinang import public_session_role_detail_projection
 
-            role = public_session_role_detail_projection(snapshot)
+            include_review = review_images_enabled(handler.client_address[0], STATE_DIR)
+            role = public_session_role_detail_projection(
+                snapshot,
+                include_review=include_review,
+            )
         except Exception as exc:
             return j(
                 handler,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -18,11 +19,28 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from urllib.parse import quote
 
+from api.paths import _platform_default_hermes_home
 
 AGENCY_AGENTS_COMMIT = "af128a92888fd7d7c389b6cb37f1820be1b3cd9d"
 AGENCY_AGENTS_REPOSITORY = "https://github.com/msitarzewski/agency-agents"
 CATALOG_VERSION = "agency-agents-af128a92888f-source-v1"
 DATA_ROOT = Path(__file__).resolve().parent.parent / "data" / "zhinang"
+ROLE_IMAGE_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "static"
+    / "assets"
+    / "zhinang"
+    / "role-images.json"
+)
+
+PRODUCTION_STATE_DIR = (
+    (
+        Path(os.environ["TAIJI_RUNTIME_HOME"]).expanduser() / "web"
+        if os.environ.get("TAIJI_RUNTIME_HOME", "").strip()
+        else _platform_default_hermes_home() / "webui"
+    )
+    .resolve()
+)
 CHINESE_CONTENT_PATH = DATA_ROOT / "chinese-content-v1.json"
 CHINESE_CONTENT_SHA256 = "b2122872c03981332854d1afc2c425ad5d63c59ce8a4ec4b9ae3d852d83c45c6"
 RUNTIME_ADAPTER_VERSION = "taiji-zhinang-runtime-v3"
@@ -43,6 +61,9 @@ _FEATURED_ROLE_IDS = (
     "agency:marketing/marketing-content-creator",
     "taiji:document-reviewer",
 )
+
+_ROLE_IMAGE_CACHE: dict[tuple[str, bool], Mapping[str, str]] = {}
+_ROLE_IMAGE_CACHE_LOCK = threading.RLock()
 
 _RUNTIME_ADAPTATION = (
     "Taiji runtime adaptation: respond in Chinese by default unless the user "
@@ -616,6 +637,76 @@ def load_current_catalog_rows() -> list[dict]:
     return copy.deepcopy(list(rows))
 
 
+def _production_state_candidates(test_state_dir: Path) -> set[Path]:
+    candidates = {PRODUCTION_STATE_DIR}
+    runtime_home = os.environ.get("TAIJI_RUNTIME_HOME", "").strip()
+    if runtime_home:
+        runtime_root = Path(runtime_home).expanduser().resolve()
+        candidates.update({
+            (runtime_root / "web").resolve(),
+            (runtime_root.parent / "webui-state").resolve(),
+        })
+    try:
+        from api.config import STATE_DIR
+
+        configured_state_dir = Path(STATE_DIR).expanduser().resolve()
+        if configured_state_dir != test_state_dir:
+            candidates.add(configured_state_dir)
+    except (ImportError, OSError, ValueError):
+        pass
+    return candidates
+
+
+def review_images_enabled(remote_host: str, state_dir: str | os.PathLike[str] | Path) -> bool:
+    """Allow review-only images only in an explicitly isolated test state."""
+    if os.environ.get("TAIJI_ZHINANG_IMAGE_REVIEW") != "1":
+        return False
+    try:
+        if not ipaddress.ip_address(remote_host).is_loopback:
+            return False
+        test_state_value = os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", "").strip()
+        if not test_state_value:
+            return False
+        resolved_state_dir = Path(state_dir).expanduser().resolve()
+        test_state_dir = Path(test_state_value).expanduser().resolve()
+        return (
+            resolved_state_dir == test_state_dir
+            and resolved_state_dir not in _production_state_candidates(test_state_dir)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _role_image_paths(include_review: bool) -> Mapping[str, str]:
+    key = (CATALOG_VERSION, bool(include_review))
+    with _ROLE_IMAGE_CACHE_LOCK:
+        cached = _ROLE_IMAGE_CACHE.get(key)
+        if cached is not None:
+            return cached
+        try:
+            from api.zhinang_images import load_role_images
+
+            loaded = load_role_images(
+                ROLE_IMAGE_MANIFEST_PATH,
+                CATALOG_VERSION,
+                include_review=bool(include_review),
+            )
+        except Exception:
+            loaded = {}
+        cached = MappingProxyType(dict(loaded))
+        _ROLE_IMAGE_CACHE[key] = cached
+        return cached
+
+
+def _add_role_image(detail: dict, *, include_review: bool) -> dict:
+    role_id = detail.get("role_id")
+    if isinstance(role_id, str):
+        image_path = _role_image_paths(include_review).get(role_id)
+        if isinstance(image_path, str):
+            detail["image_path"] = image_path
+    return detail
+
+
 def _favorite_profile_key(profile: object) -> str:
     value = str(profile or "default").strip() or "default"
     if len(value) > 128 or any(ord(character) < 32 for character in value):
@@ -848,6 +939,7 @@ def query_catalog_roles(
     view: str = "featured",
     query: str = "",
     page: int = 1,
+    include_review: bool = False,
 ) -> dict:
     """Filter one current catalog against authoritative favorites and usage."""
     if scope not in {"all", "favorites"}:
@@ -955,6 +1047,8 @@ def query_catalog_roles(
     pages = max(1, math.ceil(total / CATALOG_PAGE_SIZE))
     offset = (page - 1) * CATALOG_PAGE_SIZE
     page_items = items[offset:offset + CATALOG_PAGE_SIZE]
+    for item in page_items:
+        _add_role_image(item, include_review=include_review)
     category_counts = {value: 0 for value in CATALOG_CATEGORIES}
     for item in current.values():
         if item.get("category") in category_counts:
@@ -1059,7 +1153,12 @@ def select_recent_roles(
     return selected
 
 
-def current_role_detail(role_id: str, *, favorite: bool = False) -> dict:
+def current_role_detail(
+    role_id: str,
+    *,
+    favorite: bool = False,
+    include_review: bool = False,
+) -> dict:
     """Return the complete safe current description for one built-in role."""
     source_catalog, _rows = _current_catalog_bundle()
     role_snapshot = snapshot_role_from_catalog(
@@ -1067,7 +1166,10 @@ def current_role_detail(role_id: str, *, favorite: bool = False) -> dict:
         catalog_version=CATALOG_VERSION,
         catalog=source_catalog,
     )
-    detail = public_session_role_detail_projection(role_snapshot)
+    detail = public_session_role_detail_projection(
+        role_snapshot,
+        include_review=include_review,
+    )
     detail.pop("created_at", None)
     detail["historical"] = False
     detail["available"] = True
@@ -1088,6 +1190,7 @@ def removed_role_detail(
     *,
     favorite: Mapping[str, object] | None = None,
     recent: Mapping[str, object] | None = None,
+    include_review: bool = False,
 ) -> dict:
     """Return only retained safe metadata for a role absent from this catalog."""
     source = favorite or recent
@@ -1103,7 +1206,7 @@ def removed_role_detail(
         "continue_session_id": recent.get("continue_session_id") if recent else None,
         "unavailable_reason": "当前版本未提供此智囊角色。",
     })
-    return detail
+    return _add_role_image(detail, include_review=include_review)
 
 
 _SESSION_ROLE_SCHEMA_VERSION = 2
@@ -1330,7 +1433,11 @@ def public_session_role_projection(snapshot: object, *, usage: object = None) ->
     return projected
 
 
-def public_session_role_detail_projection(snapshot: object) -> dict:
+def public_session_role_detail_projection(
+    snapshot: object,
+    *,
+    include_review: bool = False,
+) -> dict:
     """Project the saved historical role description, never its effective prompt."""
     identity, public, _private = _snapshot_parts(snapshot)
     validated_session_role_prompt(snapshot)
@@ -1340,7 +1447,7 @@ def public_session_role_detail_projection(snapshot: object) -> dict:
             projected[field] = copy.deepcopy(public[field])
     projected["historical"] = True
     projected["source_sha256"] = copy.deepcopy(identity.get("source_sha256"))
-    return projected
+    return _add_role_image(projected, include_review=include_review)
 
 
 def apply_session_role_to_agent(

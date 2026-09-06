@@ -533,9 +533,125 @@ async function zoomPass(browser,base){
   await context.close();
 }
 
+// Pilot fixtures never change the live state directory or expose a public review switch.
+async function imageGateHttpPass(env,root){
+  evidence.imageGateProbes=[];
+  for(const mode of ['no-env','non-loopback','production-state']){
+    const port=await freePort(),probeEnv={...env,HERMES_WEBUI_PORT:String(port)};
+    if(mode==='no-env')delete probeEnv.TAIJI_ZHINANG_IMAGE_REVIEW;
+    const entry=path.join(root,`images-gate-${mode}.py`);
+    const fixture=mode==='no-env'?'':`from api import zhinang\n_gate = zhinang.review_images_enabled\nzhinang.review_images_enabled = lambda host, state: _gate(${mode==='non-loopback'?"'192.0.2.8', state":"host, zhinang.PRODUCTION_STATE_DIR"})\n`;
+    fs.writeFileSync(entry,`import sys, runpy\nsys.path.insert(0, ${JSON.stringify(WEBUI)})\n${fixture}runpy.run_path(${JSON.stringify(path.join(WEBUI,'server.py'))}, run_name='__main__')\n`);
+    const log=path.join(root,`images-gate-${mode}.log`),fd=fs.openSync(log,'w');
+    const proc=spawn(PYTHON,[entry],{cwd:WEBUI,env:probeEnv,stdio:['ignore',fd,fd]}),base=`http://127.0.0.1:${port}`;
+    try{
+      await waitHealth(base,proc);
+      const catalog=await fetch(base+'/api/zhinang/catalog?view=all&query='+encodeURIComponent('售前方案顾问'));
+      const listing=await catalog.json();
+      const detail=await fetch(base+'/api/zhinang/roles/'+encodeURIComponent('agency:sales/sales-engineer'));
+      const payload=await detail.json();
+      const item=listing.items.find(row=>row.role_id==='agency:sales/sales-engineer');
+      check(catalog.ok&&!!item&&detail.ok,`${mode} real HTTP role probes return 200`);
+      const approved=JSON.parse(fs.readFileSync(path.join(WEBUI,'static/assets/zhinang/role-images.json'),'utf8')).images.find(row=>row.role_id===item.role_id&&row.state==='active');
+      check((item.image_path||null)===(approved?.path||null)&&(payload.role.image_path||null)===(approved?.path||null),`${mode} real HTTP exposes only approved image in catalog and detail`);
+      evidence.imageGateProbes.push({mode,catalogStatus:catalog.status,detailStatus:detail.status,catalogImage:item.image_path||null,detailImage:payload.role.image_path||null,actualState:env.HERMES_WEBUI_STATE_DIR,fixture:mode==='production-state'?'Only gate state argument is production; live HTTP storage remains isolated':mode});
+    }finally{
+      const exited=new Promise(resolve=>proc.once('exit',resolve));if(proc.exitCode===null)proc.kill('SIGTERM');await Promise.race([exited,delay(3000)]);if(proc.exitCode===null)proc.kill('SIGKILL');fs.closeSync(fd);
+    }
+  }
+}
+
+const pilotRoleIds=[
+  'agency:sales/sales-engineer','agency:sales/sales-proposal-strategist','agency:product/product-manager',
+  'agency:engineering/engineering-software-architect','agency:marketing/marketing-content-creator','agency:marketing/marketing-aeo-foundations',
+  'taiji:document-reviewer','agency:specialized/grant-writer','agency:specialized/accounts-payable-agent',
+  'agency:specialized/automation-governance-architect','agency:specialized/specialized-cultural-intelligence-strategist','agency:design/design-brand-guardian',
+];
+async function imagesPass(browser,base){
+  const manifest=JSON.parse(fs.readFileSync(path.join(WEBUI,'static/assets/zhinang/role-images.json'),'utf8'));
+  check(pilotRoleIds.every(id=>manifest.images.some(row=>row.role_id===id)),'manifest includes the approved fixed twelve role IDs');
+  check(manifest.images.every(row=>['review','active'].includes(row.state)),'image entries are review candidates or approved active images');
+  const all=[];let pages=1;
+  for(let page=1;page<=pages;page++){const response=await fetch(`${base}/api/zhinang/catalog?view=all&page=${page}`);check(response.ok,'real catalog image projection returns 200');const data=await response.json();pages=data.pages;all.push(...data.items);}
+  const mapped=all.filter(row=>row.image_path);
+  check(mapped.length===manifest.images.length,'real HTTP catalog projects all mapped images');
+  const rows=manifest.images.filter(asset=>pilotRoleIds.includes(asset.role_id)).map(asset=>({...all.find(row=>row.role_id===asset.role_id),asset}));
+  evidence.images={exact12:true,mappedRoleCount:mapped.length,assetBytes:manifest.images.reduce((n,row)=>n+row.bytes,0),roles:[],backgroundNoRunFixtures:[],catalogRequests:[],imageRequests:[],expectedBlockedRequests:[],expectedFaultConsole:[],viewports:[],layoutShifts:[]};
+  for(const [physicalWidth,physicalHeight,zoom]of [[1440,900,1],[1024,768,1],[390,844,1],[1440,900,2]]){
+    const width=physicalWidth/zoom,height=physicalHeight/zoom;
+    const label=`images-${physicalWidth}x${physicalHeight}${zoom===2?'-zoom200':''}`;
+    const context=await browser.newContext({viewport:{width,height},deviceScaleFactor:zoom,locale:'zh-CN'}),page=await context.newPage();
+    let blockPath='',faultActive=false,holdPath='',held=[];
+    page.on('console',msg=>{if(msg.type()!=='error')return;if(faultActive&&/ERR_BLOCKED_BY_CLIENT/.test(msg.text()))evidence.images.expectedFaultConsole.push({label,text:msg.text()});else evidence.consoleErrors.push(`${label}: ${msg.text()}`);});
+    page.on('pageerror',error=>evidence.pageErrors.push(`${label}: ${error.message}`));
+    page.on('request',request=>{const url=new URL(request.url());if(/^https?:$/.test(url.protocol)&&!['127.0.0.1','localhost'].includes(url.hostname))evidence.externalRequests.push({label,url:url.href});if(url.pathname==='/api/zhinang/catalog')evidence.images.catalogRequests.push({label,url:url.pathname+url.search});if(url.pathname.startsWith('/static/assets/zhinang/roles/'))evidence.images.imageRequests.push({label,url:url.pathname,method:request.method()});});
+    await page.addInitScript(()=>{window.__imageShifts=[];new PerformanceObserver(list=>{for(const entry of list.getEntries())window.__imageShifts.push({value:entry.value,hadRecentInput:entry.hadRecentInput,sources:entry.sources.map(source=>({className:source.node?.className||'',previousRect:source.previousRect.toJSON(),currentRect:source.currentRect.toJSON()}))});}).observe({type:'layout-shift',buffered:true});});
+    await page.route('**/*',route=>{const url=new URL(route.request().url());if(!['127.0.0.1','localhost'].includes(url.hostname))return route.abort('blockedbyclient');if(url.pathname==='/api/expert-teams/run'&&route.request().method()==='GET'&&!url.searchParams.has('run_id')){evidence.images.backgroundNoRunFixtures.push({label,url:url.pathname+url.search,reason:'existing empty role-session background hydration returns 404; image-only no-run fixture'});return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({run:null})});}if(url.pathname===blockPath){evidence.images.expectedBlockedRequests.push({label,url:url.pathname});return route.abort('blockedbyclient');}if(url.pathname===holdPath){held.push(route);return;}return route.continue();});
+    const shot=async name=>{const file=path.join(OUT,`${label}-${name}.png`);await page.screenshot({path:file,fullPage:true});evidence.screenshots.push({path:file,sha256:sha(file)});};
+    const nav=async()=>{const brand=page.locator('.taiji-brand-nav [data-taiji-panel="zhinang"]'),rail=page.locator('nav.rail [data-panel="zhinang"]');if(await brand.isVisible())await brand.click();else if(await rail.isVisible())await rail.click();else{await page.locator('#btnHamburger').click();await page.locator('.sidebar [data-panel="zhinang"]').click();}};
+    const search=async name=>{
+      const input=page.locator('#zhinangSearch');
+      if(!await input.isVisible()){if(await page.locator('#btnHamburger').isVisible())await page.locator('#btnHamburger').click();else await nav();}
+      await page.waitForFunction(()=>['ready','empty'].includes(document.querySelector('#zhinangStatus')?.dataset.state));
+      const response=page.waitForResponse(response=>{const url=new URL(response.url());return url.pathname==='/api/zhinang/catalog'&&url.searchParams.get('query')===name&&url.searchParams.get('view')==='all';});
+      await Promise.all([response,input.fill(name)]);await page.waitForFunction(()=>['ready','empty'].includes(document.querySelector('#zhinangStatus')?.dataset.state));
+      if(await page.locator('#mobileOverlay').isVisible())await page.locator('#mobileOverlay').click({position:{x:width-5,y:height/2}});
+    };
+    const imageInfo=locator=>locator.evaluate(node=>{const image=node.querySelector('img'),fallback=node.querySelector('.zhinang-role-mark'),r=node.getBoundingClientRect();return {src:image?.getAttribute('src')||null,alt:image?.getAttribute('alt'),loading:image?.loading,decoding:image?.decoding,naturalWidth:image?.naturalWidth||0,naturalHeight:image?.naturalHeight||0,loaded:image?.classList.contains('is-loaded')||false,fallbackText:fallback?.textContent,fallbackHidden:fallback?.getAttribute('aria-hidden'),rect:{x:r.x,y:r.y,width:r.width,height:r.height}};});
+    await page.goto(base,{waitUntil:'domcontentloaded'});await page.waitForFunction(()=>S._bootReady===true);await nav();await waitCatalog(page);
+    await page.locator('[data-zhinang-view="all"]').click();await waitAttribute(page.locator('[data-zhinang-view="all"]'),'aria-pressed','true');await waitAttribute(page.locator('#zhinangStatus'),'data-state','ready');
+    evidence.images.viewports.push({label,physicalWidth,physicalHeight,width,height,zoom,method:zoom===2?'200% reflow equivalent: half CSS viewport and deviceScaleFactor 2; browser chrome zoom not exercised':'native CSS viewport'});
+    const tested=zoom===1&&width===1440?rows:rows.filter((row,index)=>rows.findIndex(other=>other.category===row.category)===index);
+    for(const row of tested){
+      const id=row.role_id,slug=row.asset.path.split('/').pop().replace('.webp',''),record={label,roleId:id,name:row.name,category:row.category,path:row.asset.path,assetBytes:row.asset.bytes};
+      holdPath='/'+row.asset.path;held=[];await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>S._bootReady===true);await nav();await waitCatalog(page);await page.locator('[data-zhinang-view="all"]').click();await waitAttribute(page.locator('#zhinangStatus'),'data-state','ready');
+      // Force a fresh real catalog search and image request even after returning from chat.
+      await search('IMAGE_RELOAD_EMPTY');await search(row.name);
+      const card=page.locator(`.zhinang-card[data-zhinang-role="${id}"]`),wrap=card.locator('.zhinang-role-image-wrap'),trigger=card.locator('[data-zhinang-open]');
+      await card.waitFor({state:'visible'});await card.scrollIntoViewIfNeeded();await page.mouse.move(0,0);await delay(250);
+      record.before=await imageInfo(wrap);record.heldRequests=held.length;check(held.length>0&&!record.before.loaded&&record.before.naturalWidth===0,`${label} ${id} actual image request is held before decode`);check(record.before.rect.width>0&&record.before.rect.width===record.before.rect.height,`${label} ${id} reserves square card image box`);
+      await page.evaluate(()=>{window.__imageShifts=[];});holdPath='';for(const route of held)await route.continue();held=[];
+      await wrap.locator('img.is-loaded').waitFor();await wrap.locator('img').evaluate(image=>image.decode());await delay(220);record.card=await imageInfo(wrap);
+      const shifts=await page.evaluate(()=>window.__imageShifts);record.loadLayoutShifts=shifts;evidence.images.layoutShifts.push({label,roleId:id,phase:'card-load',entries:shifts});
+      check(record.card.src===row.asset.path&&record.card.naturalWidth===512&&record.card.naturalHeight===512&&record.card.loaded,`${label} ${id} mapped card decodes 512x512`);
+      check(record.card.alt===''&&record.card.loading==='lazy'&&record.card.decoding==='async'&&record.card.fallbackHidden==='true',`${label} ${id} decorative image and fallback semantics`);
+      check(JSON.stringify(record.before.rect)===JSON.stringify(record.card.rect)&&shifts.every(entry=>entry.value===0),`${label} ${id} image load has zero layout shift`);
+      await shot(`${slug}-overview`);
+      const favorite=card.locator('[data-zhinang-favorite]'),old=await favorite.getAttribute('aria-pressed');await favorite.focus();await page.keyboard.press('Enter');await waitAttribute(favorite,'aria-pressed',old==='true'?'false':'true');
+      await page.waitForFunction(id=>document.activeElement?.dataset?.zhinangFavorite===id,id);check(true,`${label} ${id} favorite keyboard focus survives real catalog redraw`);
+      await trigger.click();await page.locator('#zhinangDetailTitle').waitFor();await page.locator('#zhinangDetail .zhinang-role-image.is-loaded').waitFor();await page.waitForFunction(()=>getComputedStyle(document.querySelector('#zhinangDetail .zhinang-role-image')).opacity==='1');
+      record.detail=await imageInfo(page.locator('#zhinangDetail .zhinang-role-image-wrap'));
+      check(record.detail.src===row.asset.path&&record.detail.naturalWidth===512&&record.detail.alt==='',`${label} ${id} detail shows matching decorative decoded image`);
+      check(await card.getAttribute('aria-current')==='true'&&await card.evaluate(node=>node.classList.contains('is-selected')),`${label} ${id} current card selection is visible and semantic`);
+      check(await page.locator('#zhinangDetailTitle').textContent()===row.name,`${label} ${id} detail title matches role`);
+      const geometry=await page.locator('#zhinangDetail').boundingBox();record.detailRect=geometry;check(geometry.x>=-1&&geometry.x+geometry.width<=width+1,`${label} ${id} detail fits viewport`);
+      await shot(`${slug}-detail`);await page.keyboard.press('Escape');
+      check(await page.locator('#zhinangDetail').isHidden()&&await trigger.evaluate(node=>document.activeElement===node),`${label} ${id} Escape closes and restores trigger focus`);
+      check(await card.getAttribute('aria-current')===null,`${label} ${id} closing clears card selection`);
+      // Deliberately abort the local asset; record expected fault separately from unexpected errors.
+      faultActive=true;blockPath='/'+row.asset.path;await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>S._bootReady===true);await nav();await waitCatalog(page);await page.locator('[data-zhinang-view="all"]').click();await waitAttribute(page.locator('#zhinangStatus'),'data-state','ready');await search(row.name);await card.waitFor();await card.scrollIntoViewIfNeeded();
+      await card.locator('img').waitFor({state:'detached'});record.fallback=await imageInfo(wrap);
+      check(record.fallback.src===null&&record.fallback.fallbackText===row.name.slice(0,1)&&record.fallback.rect.width===record.card.rect.width&&record.fallback.rect.height===record.card.rect.height,`${label} ${id} blocked asset preserves square fallback`);
+      await trigger.click();await page.locator('#zhinangDetailTitle').waitFor();await page.locator('#zhinangDetail img').waitFor({state:'detached'});record.detailFallback=await imageInfo(page.locator('#zhinangDetail .zhinang-role-image-wrap'));check(record.detailFallback.src===null&&record.detailFallback.fallbackText===row.name.slice(0,1),`${label} ${id} blocked detail image retains fallback`);
+      await page.locator('[data-zhinang-starter]').first().click();await page.locator('#mainChat').waitFor({state:'visible'});await page.waitForFunction(name=>document.querySelector('#zhinangSessionRole')?.textContent.includes(name),row.name);check(await page.evaluate(id=>S.session?.zhinang_role?.role_id===id,id),`${label} ${id} example role identity matches`);
+      check((await page.locator('#msg').inputValue()).length>0,`${label} ${id} using example creates role task with draft despite blocked image`);
+      await page.locator('#msg').fill('');blockPath='';faultActive=false;
+      await nav();await waitCatalog(page);await search(row.name);await trigger.click();await page.locator('#zhinangDetailTitle').waitFor();await page.locator('[data-zhinang-create]').click();await page.locator('#mainChat').waitFor({state:'visible'});
+      check((await page.locator('#zhinangSessionRole').textContent()).includes(row.name),`${label} ${id} using role creates correctly bound task`);
+      await nav();await waitCatalog(page);
+      check(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1),`${label} ${id} no page horizontal overflow`);
+      evidence.images.roles.push(record);console.error(JSON.stringify({status:'IMAGE_CHECKED',label,roleId:id}));
+    }
+    await context.close();
+  }
+  evidence.images.imageRequestCount=evidence.images.imageRequests.length;evidence.images.blockedImageRequestCount=evidence.images.expectedBlockedRequests.length;
+  evidence.source={head:execFileSync('git',['rev-parse','HEAD'],{cwd:REPO,encoding:'utf8'}).trim(),repo:fs.realpathSync(REPO),files:Object.fromEntries(['api/zhinang.py','api/zhinang_images.py','api/routes.py','static/zhinang.js','static/zhinang.css','static/assets/zhinang/role-images.json','tests/zhinang_browser_e2e.cjs'].map(file=>[file,sha(path.join(WEBUI,file))]))};
+  check(evidence.requests.length===0,'image pilot never invokes a Provider');
+}
+
 async function main(){
   const scope=process.env.ZHINANG_E2E_SCOPE||'viewports';
-  const allowedScopes=new Set(['viewports','flow','faults','selection-focus','draft-idempotency','lifecycle','recovery','performance','removed','regression','serve']);
+  const allowedScopes=new Set(['viewports','flow','faults','selection-focus','draft-idempotency','lifecycle','recovery','performance','removed','regression','images','serve']);
   if(!allowedScopes.has(scope))throw new Error(`unsupported ZHINANG_E2E_SCOPE: ${scope}`);
   fs.mkdirSync(OUT,{recursive:true});
   const root=fs.mkdtempSync('/private/tmp/taiji-zhinang-stage4-e2e-');
@@ -549,6 +665,8 @@ async function main(){
   evidence.configBeforeSha256=sha(path.join(runtime,'config.yaml'));
   const env={...process.env};for(const key of Object.keys(env)){if(key.endsWith('_API_KEY')||['ANTHROPIC_AUTH_TOKEN','GH_TOKEN','GITHUB_TOKEN','GOOGLE_APPLICATION_CREDENTIALS','OPENAI_BASE_URL'].includes(key))delete env[key];}
   Object.assign(env,{HERMES_WEBUI_PORT:String(webuiPort),HERMES_WEBUI_HOST:'127.0.0.1',HERMES_WEBUI_STATE_DIR:state,HERMES_HOME:runtime,HERMES_BASE_HOME:runtime,TAIJI_RUNTIME_HOME:runtime,HERMES_CONFIG_PATH:path.join(runtime,'config.yaml'),HERMES_WEBUI_DEFAULT_WORKSPACE:workspace,HERMES_WEBUI_SKIP_ONBOARDING:'1',HERMES_WEBUI_AGENT_DIR:AGENT,HERMES_WEBUI_PYTHON:PYTHON,HERMES_WRITE_SAFE_ROOT:workspace,TERMINAL_ENV:'local',TERMINAL_CWD:workspace,HERMES_WEBUI_TEST_NETWORK_BLOCK:'1',TAIJI_WEBUI_TEST_NETWORK_BLOCK:'1',AWS_EC2_METADATA_DISABLED:'true'});
+  delete env.TAIJI_ZHINANG_IMAGE_REVIEW;delete env.HERMES_WEBUI_TEST_STATE_DIR;
+  if(scope==='images')Object.assign(env,{TAIJI_ZHINANG_IMAGE_REVIEW:'1',HERMES_WEBUI_TEST_STATE_DIR:state});
   let serverEntry=path.join(WEBUI,'server.py');
   if(scope==='lifecycle'){
     serverEntry=path.join(root,'multi-profile-server.py');
@@ -573,6 +691,7 @@ async function main(){
       await new Promise(resolve=>{process.once('SIGINT',resolve);process.once('SIGTERM',resolve);});
       return;
     }
+    if(scope==='images')await imageGateHttpPass(env,root);
     const browser=await chromium.launch({headless:true,executablePath:CHROMIUM,args:['--no-sandbox','--disable-dev-shm-usage']});
     try{
       evidence.runtime={node:process.version,python:execFileSync(PYTHON,['--version'],{encoding:'utf8'}).trim(),chromium:browser.version(),chromiumExecutable:CHROMIUM,pythonExecutable:PYTHON,playwrightModule:process.env.PLAYWRIGHT_NODE_PATH,fixtureInjection:scope==='performance'?'generated catalog-500-server.py replaces api.zhinang.load_current_catalog_rows before executing production server.py':''};
@@ -581,6 +700,7 @@ async function main(){
         for(const [w,h]of boundaryViewports)await viewportPass(browser,base,w,h,true);
         await zoomPass(browser,base);
       }
+      if(scope==='images')await imagesPass(browser,base);
       if(scope==='flow')await realFlow(browser,base,workspace,attachment);
       if(scope==='faults')await faultAndKeyboardPass(browser,base);
       if(scope==='selection-focus')await selectionAndFavoriteFocusPass(browser,base);
@@ -598,7 +718,7 @@ async function main(){
     }
     evidence.root=root;evidence.base=base;evidence.webLog=webLog;evidence.configSha256=sha(path.join(runtime,'config.yaml'));
     if(scope==='flow')evidence.artifactSha256=sha(path.join(workspace,'成果.md'));
-    check(sha(path.join(runtime,'config.yaml'))===evidence.configBeforeSha256,'isolated runtime config bytes remained unchanged');evidence.scope=scope;const report=path.join(OUT,`e2e-evidence-${scope}.json`);fs.writeFileSync(report,JSON.stringify(evidence,null,2));console.log(JSON.stringify({status:'PASS',scope,root,base,report,checks:evidence.checks.length,requests:evidence.requests.length}));
-  }catch(error){console.error(error.stack||error);console.error(`root=${root}\nwebLog=${webLog}`);process.exitCode=1;}finally{if(proc&&proc.exitCode===null)proc.kill('SIGTERM');provider.close();fs.closeSync(fd);}
+    check(sha(path.join(runtime,'config.yaml'))===evidence.configBeforeSha256,'isolated runtime config bytes remained unchanged');evidence.scope=scope;evidence.status='PASS';const report=path.join(OUT,`e2e-evidence-${scope}.json`);fs.writeFileSync(report,JSON.stringify(evidence,null,2));console.log(JSON.stringify({status:'PASS',scope,root,base,report,checks:evidence.checks.length,requests:evidence.requests.length}));
+  }catch(error){evidence.status='FAIL';evidence.scope=scope;evidence.failure=error.stack||String(error);fs.writeFileSync(path.join(OUT,`e2e-evidence-${scope}-failed.json`),JSON.stringify(evidence,null,2));console.error(error.stack||error);console.error(`root=${root}\nwebLog=${webLog}`);process.exitCode=1;}finally{if(proc&&proc.exitCode===null)proc.kill('SIGTERM');provider.close();fs.closeSync(fd);}
 }
 main();

@@ -117,6 +117,34 @@ def test_zhinang_detail_does_not_render_upstream_source_links():
     assert 'href="${esc(sourceUrl)}"' not in script
 
 
+def test_zhinang_role_images_progressively_replace_character_fallbacks():
+    script = _read("zhinang.js")
+    style = _read("zhinang.css")
+
+    for marker in (
+        "function trustedRoleImagePath(imagePath)",
+        "function roleImageHtml(role,variant='card')",
+        "const imagePath=trustedRoleImagePath(role.image_path)",
+        'class="zhinang-role-image-wrap zhinang-role-image-${variant}"',
+        'class="zhinang-role-mark" aria-hidden="true"',
+        'class="zhinang-role-image" src="${esc(imagePath)}" alt="" loading="lazy" decoding="async"',
+        "${roleImageHtml(role)}",
+        "${roleImageHtml(role,'detail')}",
+        "event.target.closest('.zhinang-role-image')",
+        "image.classList.add('is-loaded')",
+        "image.remove()",
+    ):
+        assert marker in script
+
+    assert r"^static\/assets\/zhinang\/roles\/" in script
+    assert "image.src=" not in script
+    assert "fetch(image" not in script
+    assert ".zhinang-role-image-wrap" in style and "aspect-ratio:1" in style
+    assert ".zhinang-role-image" in style and "object-fit:cover" in style
+    assert ".zhinang-role-image.is-loaded{opacity:1}" in style
+    assert ".zhinang-role-image{transition:none}" in style
+
+
 def test_zhinang_session_role_uses_a_desktop_safe_area_outside_the_welcome_hero():
     style = _read("zhinang.css")
 

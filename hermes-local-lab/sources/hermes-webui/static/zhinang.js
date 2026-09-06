@@ -39,6 +39,17 @@
   };
   const abort=controller=>{try{if(controller)controller.abort();}catch(_){}};
 
+  function trustedRoleImagePath(imagePath){
+    const value=typeof imagePath==='string'?imagePath:'';
+    return /^static\/assets\/zhinang\/roles\/[a-z0-9]+(?:-[a-z0-9]+)*-[a-f0-9]{12}\.webp$/.test(value)?value:'';
+  }
+
+  function roleImageHtml(role,variant='card'){
+    const imagePath=trustedRoleImagePath(role.image_path);
+    const fallback=esc(String(role.name||role.original_name||'智').slice(0,1));
+    return `<div class="zhinang-role-image-wrap zhinang-role-image-${variant}"><span class="zhinang-role-mark" aria-hidden="true">${fallback}</span>${imagePath?`<img class="zhinang-role-image" src="${esc(imagePath)}" alt="" loading="lazy" decoding="async">`:''}</div>`;
+  }
+
   function requestIdForRole(roleId,draftText=''){
     const key=`${state.catalogVersion}:${roleId}:${draftText}`;
     if(state.requestIds.has(key)) return state.requestIds.get(key);
@@ -158,7 +169,7 @@
     const pending=state.favoritePending.has(role.role_id);
     const recent=role.last_accepted_at?new Date(Number(role.last_accepted_at)*1000).toLocaleString('zh-CN'):'';
     return `<article class="zhinang-card ${disabled?'is-unavailable ':''}${current?'is-selected':''}" data-zhinang-role="${esc(role.role_id)}"${current?' aria-current="true"':''}>
-      <div class="zhinang-card-top"><span class="zhinang-role-mark" aria-hidden="true">${esc(String(role.name||'智').slice(0,1))}</span>
+      <div class="zhinang-card-top">${roleImageHtml(role)}
         <button type="button" class="zhinang-favorite" data-zhinang-favorite="${esc(role.role_id)}" aria-label="${role.favorite?'取消收藏':'收藏'}${esc(role.name)}" aria-pressed="${role.favorite?'true':'false'}"${pending?' aria-disabled="true"':''}><span aria-hidden="true">${role.favorite?'★':'☆'}</span></button>
       </div>
       <h2>${esc(role.name||role.original_name||'未命名角色')}</h2>
@@ -248,7 +259,7 @@
       if(role.continue_session_id)actions.push(`<button type="button" class="zhinang-continue-detail" data-zhinang-continue="${esc(role.continue_session_id)}">继续最近任务</button>`);
     }
     return `<div class="zhinang-detail-dialog" role="dialog" aria-modal="false" aria-labelledby="zhinangDetailTitle" tabindex="-1">
-      <div class="zhinang-detail-head"><div><span>${historical?'历史角色快照':`AI 角色 · ${esc(role.category||'智囊')}`}</span><h2 id="zhinangDetailTitle">${esc(role.name||role.original_name||'智囊角色')}</h2><p>${esc(role.original_name||'')}</p></div><button type="button" data-zhinang-close aria-label="关闭智囊详情">×</button></div>
+      <div class="zhinang-detail-head">${roleImageHtml(role,'detail')}<div><span>${historical?'历史角色快照':`AI 角色 · ${esc(role.category||'智囊')}`}</span><h2 id="zhinangDetailTitle">${esc(role.name||role.original_name||'智囊角色')}</h2><p>${esc(role.original_name||'')}</p></div><button type="button" data-zhinang-close aria-label="关闭智囊详情">×</button></div>
       ${disabled?`<div class="zhinang-detail-warning">${esc(role.unavailable_reason||'当前版本未提供此角色。')}</div>`:''}
       <p class="zhinang-detail-summary">${esc(role.summary||'')}</p>
       <section><h3>能力范围</h3>${detailList(role.capabilities)}</section>
@@ -463,6 +474,14 @@
     if(target.dataset.zhinangRole){const trigger=target.querySelector('[data-zhinang-open]')||target;void openRole(target.dataset.zhinangRole,trigger);}
   }
 
+  function handleRoleImageEvent(event){
+    const image=event.target&&typeof event.target.closest==='function'
+      ?event.target.closest('.zhinang-role-image'):null;
+    if(!image)return;
+    if(event.type==='load'){image.classList.add('is-loaded');return;}
+    image.remove();
+  }
+
   function handleKeydown(event){
     if(event.key==='Escape'&&!$('zhinangDetail')?.hidden){event.preventDefault();closeDetail();return;}
     const detail=$('zhinangDetail');
@@ -490,6 +509,8 @@
       state.searchTimer=setTimeout(runSearch, 200);
     });
     $('zhinangSessionRole')?.addEventListener('click',event=>void openHistoricalSessionRole(event.currentTarget));
+    document.addEventListener('load',handleRoleImageEvent,true);
+    document.addEventListener('error',handleRoleImageEvent,true);
     document.addEventListener('keydown',handleKeydown);
     window.addEventListener('resize',updateDetailMode);
     window.addEventListener('focus',()=>{if(active())void refreshIfProfileChanged(true);});

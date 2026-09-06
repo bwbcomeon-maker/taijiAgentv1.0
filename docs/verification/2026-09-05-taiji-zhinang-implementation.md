@@ -183,3 +183,193 @@
 
 | 2026-09-05 | 智囊详情精简：隐藏交付示例、原始角色说明、适配说明、上游来源和完整 MIT 许可证 | 源码静态契约 9/9 PASS，`node --check` 与 WebUI runtime ESLint PASS；隔离源码 WebUI 在 Codex in-app Chromium 实测详情打开、窄屏展示、Escape 关闭及焦点回到“查看详情”均通过，五类目标内容未出现在可访问树或截图中。项目 `--browser-smoke` 因仓库 Python 环境未安装 Playwright 返回前置条件缺失，改用同一源码服务的浏览器自动化完成受影响路径验收 |
 | 2026-09-05 | 智囊详情精简默认 `scripts/verify.sh` | 使用仓库准备的 Node `22.23.1`：local change safety PASS；root `1334 tests in 679.771s, OK (skipped=2)`；WebUI lint PASS；WebUI `953 passed, 1 warning`；bootstrap Agent `12 passed, 5 skipped`；bootstrap WebUI `69 passed`；coexistence `6 passed`；最终 `verification: PASS` |
+
+## 2026-09-06 角色插画代表集 Task 5 浏览器验收
+
+### 本轮结论与来源绑定
+
+状态：**带限制完成**。当前 12 张代表插画已在隔离源码 WebUI 的真实 headless Chromium 中完成卡片、详情、加载、失败回退和交互验收；证据状态为 `PASS`、scope 为 `images`。200% 采用 1440×900 物理画布、720×450 CSS 视口与 `deviceScaleFactor: 2` 的重排等效测试，现有侧栏标签出现逐字竖排，记为 P2；原生浏览器菜单缩放未验证。代表集仍须由用户判断角色语义和视觉方向，**代表集待用户验收，未授权生成其余 262 张**。
+
+| 项目 | 2026-09-06 实时复核结果 |
+| --- | --- |
+| 物理仓库 / Git common dir | `/Users/bwb/Documents/工作/taiji-agentv1.0` / `.git` |
+| 分支 / HEAD | `main` / `0dd8ae4cb9570edf0e1a64321fbdf9e21510dd2d` |
+| 工作树 | 当前批次为未提交工作树：8 个已跟踪文件有修改，另有 `api/zhinang_images.py`、`scripts/prepare_zhinang_role_images.py`、`static/assets/zhinang/`、`tests/test_prepare_zhinang_role_images.py`、`tests/test_zhinang_images.py` 五个未跟踪路径；本节追加后本台账也成为已修改文件 |
+| 单写入边界 | 本轮由 Task 5 收尾实施者独占写入本台账；未修改、回退、暂存或提交其他工作树内容 |
+| 浏览器证据绑定 | JSON 记录的 7 个关键源码/清单文件 SHA-256 与当前工作树逐项一致；`tests/zhinang_browser_e2e.cjs` 当前 SHA-256 为 `a5fbcca7dafc6b1ca63e9999feb7d2d90c4fe560d721ac6c4b6a70b4be9a158e` |
+| 图片资源绑定 | `role-images.json` 当前 SHA-256 为 `c36e0c75e6f84eac4b320ddd62d02e8473875d9e2b4efd1df3002fdc04938422`；12 个 WebP 的字节数与 SHA-256 均与清单一致，共 `205990` bytes |
+| 证据层 | 当前未提交源码、资源与隔离浏览器；不外推为已提交、已推送、安装态、目标机或发布态 |
+
+浏览器验收使用仓库根作为工作目录，执行命令为：
+
+```bash
+PLAYWRIGHT_NODE_PATH=/Users/bwb/.codex/skills/huashu-design/node_modules/playwright-core \
+ZHINANG_E2E_CHROMIUM='/Users/bwb/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' \
+ZHINANG_E2E_PYTHON=/Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/venv/bin/python \
+ZHINANG_E2E_OUT=/private/tmp/taiji-zhinang-images-pilot \
+ZHINANG_E2E_SCOPE=images \
+/Users/bwb/Documents/工作/taiji-agentv1.0/hermes-local-lab/hermes-home/node/bin/node \
+hermes-local-lab/sources/hermes-webui/tests/zhinang_browser_e2e.cjs
+```
+
+结果：Node `v22.23.1`、Python `3.11.15`、Chromium `151.0.7922.34`；输出 `status=PASS`、`scope=images`、`566` checks、Provider requests `0`。12 个唯一角色全部在 1440×900 执行完整路径；每个分类再各取 1 个角色在 1024×768、390×844 和 200% 等效模式复验，共 30 个角色/视口执行记录。浏览器记录 540 次本地图片请求、126 次预期阻断请求、30 组图片加载布局偏移记录且非零组数为 0；控制台错误、页面错误和外部 HTTP 请求均为 0；隔离 runtime config 执行前后 SHA-256 同为 `35a3f5cb7fea480f716e4851e39b774340cefa232cdf9da2c6bbe77efd44f5b8`。
+
+三项负向真实 HTTP 探针均返回 catalog/detail `200`，同时不投影 `image_path`：未设置 `TAIJI_ZHINANG_IMAGE_REVIEW`、按非 loopback 请求来源判定、按 production state 参数判定。production-state 探针只替换门禁判定参数，实际 HTTP 存储仍位于隔离状态根，没有读取或写入正式状态。
+
+### 代表角色与资源
+
+| 分类 | 角色 | role_id | WebP bytes |
+| --- | --- | --- | ---: |
+| 售前与方案 | 售前方案顾问 | `agency:sales/sales-engineer` | 16710 |
+| 售前与方案 | 投标策略顾问 | `agency:sales/sales-proposal-strategist` | 17018 |
+| 产品与研发 | 产品经理 | `agency:product/product-manager` | 16558 |
+| 产品与研发 | 技术架构顾问 | `agency:engineering/engineering-software-architect` | 17970 |
+| 市场与增长 | 内容策划顾问 | `agency:marketing/marketing-content-creator` | 17878 |
+| 市场与增长 | AI 搜索基础设施顾问 | `agency:marketing/marketing-aeo-foundations` | 11520 |
+| 文档与研究 | 文档审阅助手 | `taiji:document-reviewer` | 16910 |
+| 文档与研究 | 资助申请写作顾问 | `agency:specialized/grant-writer` | 17586 |
+| 运营与管理 | 应付账款运营顾问 | `agency:specialized/accounts-payable-agent` | 20480 |
+| 运营与管理 | 自动化治理架构顾问 | `agency:specialized/automation-governance-architect` | 17570 |
+| 设计与体验 | 跨文化包容性体验顾问 | `agency:specialized/specialized-cultural-intelligence-strategist` | 18384 |
+| 设计与体验 | 品牌战略与一致性顾问 | `agency:design/design-brand-guardian` | 17406 |
+
+### 证据文件与完整性
+
+| 证据 | 路径 / 摘要 | 复核结果 |
+| --- | --- | --- |
+| 结构化报告 | `/private/tmp/taiji-zhinang-images-pilot/e2e-evidence-images.json`；SHA-256 `d943bcd0426ca5fe5fa1f050dee35a21504061409c7ba60ba1dc594204bd30b3` | 文件存在；状态、scope、角色数、错误计数、门禁探针、交互、几何、请求和截图字段完整 |
+| 截图目录 | `/private/tmp/taiji-zhinang-images-pilot/` | 60 张 PNG 均存在，合计 `25837867` bytes；逐张实际 SHA-256 与 JSON 记录一致 |
+| 1440×900 | `images-1440x900-*-overview.png` / `*-detail.png` | 12 个角色各 2 张，共 24 张 |
+| 1024×768 | `images-1024x768-*-overview.png` / `*-detail.png` | 六分类代表各 2 张，共 12 张 |
+| 390×844 | `images-390x844-*-overview.png` / `*-detail.png` | 六分类代表各 2 张，共 12 张 |
+| 200% 等效 | `images-1440x900-zoom200-*-overview.png` / `*-detail.png` | 六分类代表各 2 张，共 12 张；对应 720×450 CSS 视口、2 倍 device scale factor |
+| 运行日志 | `/private/tmp/taiji-zhinang-stage4-e2e-lhr55Z/webui.log` | JSON 中已绑定；仅作为本次隔离运行日志，不作为持久服务或安装态证据 |
+
+## 前端 UX QA 报告：智囊角色插画代表集
+
+### 状态
+
+**带限制完成**。无 P0/P1；保留 1 项 P2，另有原生浏览器菜单缩放、axe/Lighthouse 和像素基线视觉回归未验证。代表集的人类视觉验收尚未通过，因此不得把清单条目改为 `active`，也不得开始其余 262 张生成。
+
+### 变更范围
+
+受影响路径是智囊库角色卡片与角色详情中的装饰性角色插画、图片加载/失败回退、隔离 review 投影门禁，以及 `images` 浏览器验收 scope。未新增下载、放大、轮播或图片操作入口；收藏、查看详情、使用开场示例和使用此智囊沿用既有交互。
+
+### 主要用户目标
+
+验收人员需要在真实智囊卡片和详情上下文中判断 12 张代表插画是否准确表达角色、是否保持现有任务入口可用，并确认失败图片不会破坏创建任务路径。普通运行状态必须继续隐藏尚未批准的 `review` 图片。
+
+### 主内容 / 辅助内容 / 高级内容
+
+- 主内容：角色名称、摘要、能力与限制、开场示例，以及“查看详情”“使用此示例”“使用此智囊”等任务入口。
+- 辅助内容：角色插画、分类、标签、收藏状态；插画补充识别但不替代文字。
+- 高级内容：清单状态、生成批次、文件路径、SHA-256、review 门禁与运行证据，只在内部清单和台账中出现，不进入普通用户界面。
+
+### 已测试的主要用户路径
+
+1. 在隔离 WebUI 打开智囊库，切换到“全部”，按中文角色名搜索并看到目标卡片。
+2. 等待真实图片请求，在解码前确认方形占位尺寸；放行请求后确认卡片与详情均解码为 512×512、使用相同资源、`alt=""`，且加载期间无布局偏移。
+3. 键盘触发收藏并确认真实 catalog 重绘后焦点仍回到对应收藏按钮。
+4. 点击“查看详情”，确认当前卡片可见且有 `aria-current` 语义；按 Escape 关闭并把焦点还给触发按钮。
+5. 主动阻断目标图片请求，确认卡片和详情移除失败图片、保留同尺寸文字 fallback，不自动重试。
+6. 在图片失败状态下使用首个开场示例，确认创建绑定正确角色的新任务并填入草稿；再从详情执行“使用此智囊”，确认新任务角色绑定正确。
+7. 在 1440×900、1024×768、390×844 和 200% 等效模式检查详情几何与页面横向溢出。
+8. 运行未开 review 环境变量、非 loopback 判定、production state 参数三类 HTTP 负向探针，确认 catalog 和 detail 均不泄露 review 图片路径。
+
+### 功能契约摘要
+
+| 能力及产品契约依据 | 目标角色 / UI、CLI 或内部入口 | 数据/API/状态存在 | UI 入口存在 | 用户反馈存在 | 错误处理存在 | 空/加载/禁用状态 | 键盘/可访问性支持 | E2E/浏览器测试 | 状态 | 备注 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 仅在隔离验收环境投影 12 个 `review` 图片；依据插画设计规格与试点计划 Task 5 | 验收人员 / loopback 隔离 WebUI；普通运行无开启入口 | 是 | 是，仅隔离验收 | 是，卡片和详情可见 | 是，三类门禁负向探针 | 未授权/非 loopback/production state 均保持无图 | 普通界面无需隐藏手势；review 开关不向用户暴露 | 是 | 通过 | 清单 12 项均保持 `review`，未写正式状态 |
+| 卡片和详情装饰性图片加载、语义与失败回退；依据 Task 4/5 固定 wrapper 合同 | 智囊库用户 / 卡片与详情 | 是 | 是 | 是，加载后淡入，失败保留首字 fallback | 是，阻断后移除图片且不重试 | 无路径、加载中、成功与失败均有稳定 fallback；无新增禁用态 | `alt=""`，fallback `aria-hidden=true`，不抢读屏角色名称 | 是 | 通过 | 30 组加载记录均为 0 layout shift |
+| 收藏、查看详情、使用示例、使用此智囊不受图片影响；依据既有 F04/F06/F08/F09 | 智囊库用户 / 可见按钮 | 是 | 是 | 是，收藏状态、详情、草稿和角色标签可见 | 是，图片失败仍可继续任务 | 图片失败状态已验证；本变更无新增禁用或破坏性操作 | Enter 收藏、Escape 关闭、焦点恢复、`aria-current` 已验证 | 是 | 通过 | 12 角色完整路径及六分类多视口代表路径通过 |
+
+### 真实浏览器测试证据
+
+真实浏览器测试：已验证。使用现有 Playwright Core 驱动独立 Chrome for Testing，headless Chromium `151.0.7922.34`，打开当前源码启动的 loopback WebUI 并执行 566 项断言。测试状态、runtime、配置、workspace 均位于独立 `/private/tmp/taiji-zhinang-stage4-e2e-lhr55Z`；凭据被剥离，双 network block 开启，Provider 调用为 0，浏览器外部 HTTP 请求为 0。JSON 中 7 个来源文件摘要与当前工作树匹配，因此该证据绑定本节记录的当前未提交候选。
+
+### 截图情况
+
+截图：已检查。60 张 overview/detail PNG 全部存在并通过逐文件 SHA-256 复核；人工抽查 1440×900 售前方案顾问、1024×768 产品经理、390×844 文档审阅助手和 200% 等效售前方案顾问的卡片与详情。常规桌面、1024 和移动视口中插画没有遮挡名称、摘要、按钮或详情内容；移动详情保持可滚动且底部 CTA 可见。200% 等效截图确认侧栏标签逐字竖排的 P2。
+
+像素基线视觉回归：未验证。项目没有为本批建立经批准的 screenshot baseline；当前截图是可审计验收证据，不冒充自动差异基线。
+
+### 可访问性检查
+
+人工语义与真实键盘检查已执行：图片使用空 `alt`，角色名仍由可见文本表达；fallback 为装饰性并设 `aria-hidden=true`；收藏可由 Enter 触发并在目录重绘后保留焦点；详情当前卡片同步 `aria-current`；Escape 关闭详情并恢复到“查看详情”；图片失败不移除任何任务按钮。颜色不是角色身份的唯一来源。
+
+自动化可访问性：未验证。Task 5 证据未运行 axe、Lighthouse 或屏幕阅读器专项扫描，不能写为自动化可访问性通过。原生浏览器菜单 200% 缩放也未验证；本轮只有等效 CSS 重排与 device scale factor 证据。
+
+### 视觉层级检查
+
+1440×900、1024×768 与 390×844 的截图中，角色名称、摘要和主 CTA 保持最高层级；插画尺寸克制，作为识别辅助，没有压过文字或主操作。卡片 38×38 与详情 82×82 的固定正方形容器、`object-fit: cover` 和加载前占位避免跳动。唯一确认的问题是 720 CSS 宽度的 200% 等效布局仍保留侧栏，导致“全部角色”“我的收藏”及分类标签逐字竖排。
+
+### 长时间工作体验检查
+
+代表截图中主内容层级、行距、卡片间距和详情滚动上下文稳定；图片加载淡入只发生一次，源码在 `prefers-reduced-motion: reduce` 下关闭图片 transition。30 组真实加载均无 layout shift，图片失败也不改变卡片几何。未进行一小时持续使用、屏幕阅读器或真实系统缩放下的疲劳测试；720 CSS 宽度侧栏竖排会增加扫描负担，按 P2 保留。
+
+### 空 / 加载 / 错误 / 成功 / 禁用 / 破坏性状态
+
+- 空：非 review 环境、非 loopback 判定和 production state 参数下 API 不返回图片路径，界面保留文字 fallback；图片路径为空不会制造空白占位。
+- 加载：真实请求在解码前被有意挂起，方形容器尺寸已保留；放行后 512×512 图片解码，30 组布局偏移均为 0。
+- 错误：126 次预期图片请求被阻断；失败 `<img>` 被移除，卡片与详情保留同尺寸首字 fallback，随后仍能完成示例与新建任务路径。
+- 成功：12 个代表角色在 1440×900 全量通过；六分类代表在另三种模式复验，卡片、详情、收藏、选择、关闭、示例和创建任务均有可见结果。
+- 禁用：本变更没有新增禁用控件或需要禁用的图片操作，记为不适用；图片本身不是交互控件。
+- 破坏性：本变更没有删除、覆盖、清空或批量修改入口，记为不适用；收藏为可逆切换且已验证。
+
+### 自动化检查运行结果
+
+| 检查项 | 命令/工具 | 结果 | 备注 |
+| --- | --- | --- | --- |
+| 隔离真实浏览器 images scope | 上述完整 `ZHINANG_E2E_SCOPE=images` 命令 | PASS | 566 checks，12 角色，4 种视口/缩放模式，0 console/page/external，0 Provider |
+| 浏览器证据合同复核 | `jq -e` 检查 status/scope/error counts/exact12/角色/解码/alt/layout shift/fallback/screenshots | PASS | 结构化字段闭合，60 张截图路径均存在 |
+| 当前来源摘要复核 | 对 JSON `source.files` 逐项执行 `shasum -a 256` | PASS | 7 个关键文件与生成证据时一致 |
+| 截图摘要复核 | 对 JSON `screenshots[]` 逐项执行 `shasum -a 256` | PASS | 60/60 一致 |
+| 清单资源复核 | 对 `role-images.json` 的 12 个 `path` 逐项校验 bytes 与 SHA-256 | PASS | 12/12 一致，共 205990 bytes |
+| 当前 diff 空白检查 | `git diff --check` | PASS | 本台账追加前执行；未发现空白错误 |
+| 全量回归 | `scripts/verify.sh` / `scripts/verify.sh --full` | 本 Task 未运行 | 属于后续 Task 6；本轮不以旧全量结果替代当前批次门禁 |
+| axe/Lighthouse | 未配置/未执行 | 未验证 | 人工语义与键盘检查不能替代自动扫描 |
+| 像素视觉回归 | 未建立批准基线 | 未验证 | 60 张截图只作为当前验收证据 |
+
+### 问题列表
+
+| 严重程度 | 问题 | 证据 | 建议修复方式 | 是否已修复 |
+| --- | --- | --- | --- | --- |
+| P0 | 无 | 12 角色主路径、失败回退与任务创建均通过 | 不适用 | 不适用 |
+| P1 | 无 | review 门禁、可见入口、键盘与失败恢复均通过 | 不适用 | 不适用 |
+| P2 | 200% 等效的 720×450 CSS 视口仍显示桌面侧栏，部分中文标签逐字竖排，扫描效率下降 | `images-1440x900-zoom200-*-overview.png` / `*-detail.png`；人工复核售前方案顾问截图 | 在接近 720 CSS px 时收起分类侧栏或调整断点/最小宽度；修正后复验同一等效模式与原生菜单缩放 | 否 |
+| P3 | 未发现本轮可确认的独立 P3 | 代表性截图人工复核 | 不适用 | 不适用 |
+
+### 已修复问题
+
+- `review` 图片只在环境变量、loopback 与隔离测试状态三重条件成立时投影；三种负向条件均由真实 HTTP 证明不泄露路径。
+- 图片在卡片和详情内使用固定比例容器，真实延迟解码未产生布局偏移。
+- 加载失败会移除图片并保留文字 fallback，不重试，也不阻断收藏、详情、使用示例或使用此智囊。
+- 卡片选择语义、收藏重绘焦点、详情 Escape 关闭与焦点返回在图片路径下继续成立。
+
+### 剩余风险
+
+- 12 张插画的角色语义、风格一致性和品牌接受度仍需用户基于真实卡片/详情截图作最终判断；自动化只能证明映射、尺寸、加载与交互正确。
+- 200% 当前只有重排等效证据，原生浏览器菜单缩放可能在字体度量、浏览器 chrome 和滚动行为上产生差异。
+- 当前证据绑定未提交源码工作树；后续任何关键源码、清单或图片字节变化都会使本次来源摘要绑定失效，需要重跑受影响验收。
+- 当前结论不覆盖安装态、目标机、真实 Provider/模型或发布态。
+
+### 未验证项目
+
+- 原生浏览器菜单设置为 200% 的交互、焦点、截图和滚动行为：未验证。
+- axe、Lighthouse、屏幕阅读器等自动化/辅助技术专项：未验证。
+- 经批准的像素基线视觉回归：未验证。
+- 一小时以上持续使用与真实系统显示缩放疲劳测试：未验证。
+- 12 张代表图的人类视觉接受结论：待用户验收。
+- 其余 262 张图片：未生成、未映射、未测试；当前没有生成授权。
+- 安装态、目标机、真实 Provider/模型与发布态：未验证。
+
+### 后续建议
+
+1. 由用户先查看 12 张代表图的 overview/detail 截图并明确“通过”或指出需返工的角色；在此之前保持 12 项为 `review`。
+2. 在后续有界前端修正中解决 720 CSS px 侧栏标签竖排，并补一次原生浏览器菜单 200% 缩放复验。
+3. 只有用户明确通过代表集后，才进入其余 262 张生成；随后按设计规格完成 274 张逐张视觉审核与唯一 `active` 映射，不用本次代表集 PASS 代替全量验收。
+
+### 2026-09-06 代表图确认与全量对应替换
+
+用户已确认12张实际页面效果并授权其余角色按同一风格生成、对应替换。已确认12张映射进入 active。后续仅追加角色图片和映射，做图片解码、角色对应与显示检查。前一候选默认验证已完成：root 1334、WebUI 953、branding 24、bootstrap Agent 12（5 skipped）、bootstrap WebUI 69、coexistence 6，最终 verification: PASS；聚焦79+10通过。

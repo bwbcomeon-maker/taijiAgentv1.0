@@ -1,0 +1,1207 @@
+{
+  "catalog_version": "agency-agents-af128a92888f-source-v1",
+  "generation_batch": "92e0b70bdc4c2c94cff2943f7decd5f79dea20b75b206853a93186110fca292f",
+  "images": [
+    {
+      "bytes": 16710,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-engineer-52d4228afb02.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587083+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:sales/sales-engineer",
+      "sha256": "7cbf8ede501a6527e35607c3935d203c651a222ffbed4daddeb3d6357519ae2f",
+      "source_sha256": "3fc92b88e9b2af0d557f42a3e22e57bcac8f5c6f1e2fcc3e3801acf3e1c761a7",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17018,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-proposal-strategist-61e00908afe5.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587183+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:sales/sales-proposal-strategist",
+      "sha256": "c0e1ad56c2cf3f94e46cf392a0c5f7057511a20e52131c8a2695eb6223c28bad",
+      "source_sha256": "e58ec1d26d18fb665ae7ab206bd9574b38bffb6b46d565986616fcbd78f2d18d",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16558,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/product-manager-561395cfd773.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587185+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:product/product-manager",
+      "sha256": "3a656774b4e5022f76a3a04d80df650c5dc7a9646cd83d393d9ca96513ffcf59",
+      "source_sha256": "8469b0467e868ed0952f09a9a11cd1115e585e2b28fd44a664d5239e28eb2d85",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17970,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-software-architect-f8cb4f0c3323.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587187+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:engineering/engineering-software-architect",
+      "sha256": "b306b465474233320c543ee4daca2e95b7cc2f7f0d48d6f568a4cbd9605f1ac8",
+      "source_sha256": "de7c2b2ca3514805f27b4f3fccb12020dbed2e65b1de12fefd2887a704a580df",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17878,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/marketing-content-creator-c46599cbcb66.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587189+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:marketing/marketing-content-creator",
+      "sha256": "8e8373ad55c7d3f0bb52559bd1871b727a33e2761d8ae84a4defe550bca5f78a",
+      "source_sha256": "dfa291e1457c17daac59405b2d50dd20df563da3ce8a7f329ca56cc67bdca3ab",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 11520,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/marketing-aeo-foundations-7105f32e5a17.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587190+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:marketing/marketing-aeo-foundations",
+      "sha256": "9c9e1a743e0c737c51646637347230821a182d8e735e298ce2a3478132376cc2",
+      "source_sha256": "0383683deb59d003aa7b09e4f28ff5d01a03848b6675d87b78c40af88278107f",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16910,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/document-reviewer-a3d918824287.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587191+00:00",
+      "reviewer": "user-approved",
+      "role_id": "taiji:document-reviewer",
+      "sha256": "d1d4803654ec69432c34d4035b97464ad5c06c413accb8fde9f2b5be6915d592",
+      "source_sha256": "3eac0c704f7bba654d353053dfa38d35143b43859520587ec3277c24731bebbe",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17586,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/grant-writer-047374a1b7a6.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587192+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:specialized/grant-writer",
+      "sha256": "8ac7675fda0abe733cdc961a2b50c34eadfdc4194464379b5a59d2b30d4ad7c7",
+      "source_sha256": "df9158e22d2476abb646bcfe9a16c31d0bedf5bbe5a70e8ac237bf330fee4fc0",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20480,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/accounts-payable-agent-709838ab24c7.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587193+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:specialized/accounts-payable-agent",
+      "sha256": "c23d5a119c5df398ed7917f8129152177b733c40cedf3912d48e58ae43401e10",
+      "source_sha256": "1ea9fc7f1340995b8f0c6bfdaf29fb5f47616db99f52d62812e6e217e1c97c62",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17570,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/automation-governance-architect-062bbe654392.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587194+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:specialized/automation-governance-architect",
+      "sha256": "8b970355958d375e63d4663dccffe94dea64ab8d2b9bfb166c98963aa77ae5aa",
+      "source_sha256": "dee48aa48f03a620be1c60d112f3a1b8f8f4e09b8aa3e5dd4c285a809b84aabc",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18384,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-cultural-intelligence-strategist-b456450239e9.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587195+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:specialized/specialized-cultural-intelligence-strategist",
+      "sha256": "2011711cfb70e59fd208aa217e6626d42709761053f91051f691406ef67a7cd1",
+      "source_sha256": "3f123f6e73d8be5457a44e3cbb6a36b0711d6aee03cfbdf7271e1634d8c296f6",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17406,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-brand-guardian-00d3e9f2f3c1.webp",
+      "reviewed_at": "2026-09-06T04:03:00.587196+00:00",
+      "reviewer": "user-approved",
+      "role_id": "agency:design/design-brand-guardian",
+      "sha256": "8ba8cc75ab0a87c91bb5046f338ddd5f176b6cdb985cd062a87dd453648dc545",
+      "source_sha256": "053cd25875d2c38d3a149fac1939808352f79b5a12594dd57cd895740fd2a341",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16592,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-account-strategist-f6507ff73a42.webp",
+      "reviewed_at": "2026-09-06T04:05:12.289676+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-account-strategist",
+      "sha256": "0a2edd6cda659a5c912eae45ba0f5eec762c27979e973954e8cea21276f3f8bf",
+      "source_sha256": "eafb46b9fe4ad9c6599c54feda5ec1b28a194074e592fa68f942fc94865557e4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16384,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-ai-engineer-3bef0b32354e.webp",
+      "reviewed_at": "2026-09-06T04:06:59.808096+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-ai-engineer",
+      "sha256": "ca4510b6409cf29a53942be408efef31472b7fe85c33fc14c32b407b05bfc3cd",
+      "source_sha256": "3c8fcc086206e5161cd450cc875de1ff9800568232863cf6d41a483af457093a",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16334,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/product-sprint-prioritizer-7d4574ce7f71.webp",
+      "reviewed_at": "2026-09-06T04:07:00.018213+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:product/product-sprint-prioritizer",
+      "sha256": "e707db9c63886d9b47974e6c6fd85b6fb3baf3081307b9533f43253315865087",
+      "source_sha256": "d84180d068a0ed9b132ac865b5101ee5e519f18b617ab247001a45b544f380cf",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15812,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-discovery-coach-f222c8921c57.webp",
+      "reviewed_at": "2026-09-06T04:07:00.232675+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-discovery-coach",
+      "sha256": "16702122cb41c1b6937d59d6a1baac48efdd387c03028bc1f495da82756f01bd",
+      "source_sha256": "cd862f67c92e69a6a4d0fae12af037a1ad7b9eaf71f7fa062fd5e32bcc795629",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16340,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-pipeline-analyst-b589ded47716.webp",
+      "reviewed_at": "2026-09-06T04:07:00.447189+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-pipeline-analyst",
+      "sha256": "0e3f6150f040e37b4507a9bf902e4f323928661351ecddfac23d86ba1a58b2d5",
+      "source_sha256": "51285e5f9a49c2a45e0a590e5553cb39ce99a22da63ac3cd003bc73424c9dec2",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19200,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-ai-data-remediation-engineer-a9743dd04d15.webp",
+      "reviewed_at": "2026-09-06T04:07:00.659733+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-ai-data-remediation-engineer",
+      "sha256": "b2c2a89ada23745fdb61b9a8aa17bd769837064bf8dbd927fca357fd24d8dbb2",
+      "source_sha256": "d4277459c7413ba0367694a4159a8c37a63bdce8d2b649017e2614663bf86cac",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21048,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-autonomous-optimization-architect-5ff8d41df7f7.webp",
+      "reviewed_at": "2026-09-06T04:07:00.867185+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-autonomous-optimization-architect",
+      "sha256": "aae6318f75ef4e6db3a81781955b27b657d48dfb10131caee42009976941df08",
+      "source_sha256": "89941b999e592cb1e53c3f6f075c6edd37d68cce06ff8ffe6ec08daf29676d0b",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23738,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-code-reviewer-dfdd5f4e5b6e.webp",
+      "reviewed_at": "2026-09-06T04:07:01.089561+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-code-reviewer",
+      "sha256": "7afb89e1f02c4e9fed479ced1cde6e83e71e47beb8fecfbb7efaa8838eb011d8",
+      "source_sha256": "852b6175f043754b4f4f8d0220f5bce979d2ea668f3c252c5ab1ef83fa4ff64f",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19424,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/product-feedback-synthesizer-a936c4f70930.webp",
+      "reviewed_at": "2026-09-06T04:07:01.308643+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:product/product-feedback-synthesizer",
+      "sha256": "d3bda8d904243f29d70ff4f02894389dee2f9cdee1da7c89110dd7992155aa57",
+      "source_sha256": "46c509ca27f1a5174eb8c608eb6e5d638b51c904e6212704866aa61bd37c0610",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23192,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-deal-strategist-c7772d6480bc.webp",
+      "reviewed_at": "2026-09-06T04:07:01.522119+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-deal-strategist",
+      "sha256": "1e17e710d857734728b7754f952955ecf6aefee2feaad527e5229107fe3bf4d6",
+      "source_sha256": "9cffd502089e32252b334b4d9fb3bf8dff569abeb45a5ae854e7f7bb6f1024bc",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18864,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-outbound-strategist-013136f00877.webp",
+      "reviewed_at": "2026-09-06T04:07:01.735973+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-outbound-strategist",
+      "sha256": "1bc59ef21a97155aa9a176c40aa0515d1bb7c97259c43cdfc1b02100c78813ed",
+      "source_sha256": "e1d0344023530d5150a6e421ab0504880453d542d6a7cc648fe223218eb24ffd",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19266,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-backend-architect-dcd40a225251.webp",
+      "reviewed_at": "2026-09-06T04:08:51.573739+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-backend-architect",
+      "sha256": "d8ba6f76a426d43fbe11a8a0cb1ee6397de7cbaacf4957581518dc1a4b3373f6",
+      "source_sha256": "87db174354c344b14b4e166fa9b1f694c736d767f162c332c90e3493b61b94d4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21424,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-codebase-onboarding-engineer-317526fc316a.webp",
+      "reviewed_at": "2026-09-06T04:08:51.789095+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-codebase-onboarding-engineer",
+      "sha256": "ebe8632155d4a75edf6e5a1ec213e2ba39bca5966185a64a18af6a39f08386b9",
+      "source_sha256": "db8bfd84cbe1e73342bf7a54be2e104ebbb640f3740f3609983884af2657d64d",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 12390,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-database-optimizer-3f1a56c1dd57.webp",
+      "reviewed_at": "2026-09-06T04:08:52.004938+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-database-optimizer",
+      "sha256": "108e500b68a7751223a5c494edac3b666b20ed8ca356690cf901852d2078bde6",
+      "source_sha256": "24eb7eea3ada5959dfa4b9fe106744eff38dbb59349c13d482b1a1a6b506966b",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 12320,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-developer-tooling-engineer-d0c388f79933.webp",
+      "reviewed_at": "2026-09-06T04:08:52.204594+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-developer-tooling-engineer",
+      "sha256": "b325fd827c887afbfa3196b7546be843c717ad80fdd9984bba8c90e68da727c6",
+      "source_sha256": "6f3e8412b1c712c6cce7147b1d26665091359b0669e58ebbe287a5ba68bc7901",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18524,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-data-visualization-engineer-b1985d47b8f1.webp",
+      "reviewed_at": "2026-09-06T04:08:52.422402+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-data-visualization-engineer",
+      "sha256": "379c626862d1db0b7a0c775adb096f821b7c6d9d290feb34b66f63dc19a9275a",
+      "source_sha256": "cd19a1d45cebba07d5f0c68a3e35037e7ea86c5e35bc8e2de92304969dc81af4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22038,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-drupal-shopping-cart-112b8867a1ce.webp",
+      "reviewed_at": "2026-09-06T04:11:40.831254+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-drupal-shopping-cart",
+      "sha256": "8919241525fb2a02eb7dda883e5a443a9964ce20debd1efa9dbfa25f7ced2067",
+      "source_sha256": "c6fc1f1af0635b8175141234ff8e2644763114619c75101b491626bcc02de662",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22880,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-feishu-integration-developer-da4cdbc18666.webp",
+      "reviewed_at": "2026-09-06T04:11:41.045186+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-feishu-integration-developer",
+      "sha256": "a2b8603bb1a46661deb538d4ad462ee9955a5e89ef08dae62381e042a8cfb98f",
+      "source_sha256": "2165f4939ca10cccfce5f8a8c4f415c4a5ef55977fa6f5efb5c281808c8a6dcd",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17864,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-frontend-developer-4bd64bd2f628.webp",
+      "reviewed_at": "2026-09-06T04:11:41.250231+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-frontend-developer",
+      "sha256": "49b9e68c5fd7f5c6fe91d62f47eba1e32609aa7040cb6a5ed49ee266856c9010",
+      "source_sha256": "a21402ab89ea8a4ee2e85c7a424d6343788960c98e5385c6e05e2fc68d7885bb",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 24098,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-i18n-engineer-cccf48b2f83a.webp",
+      "reviewed_at": "2026-09-06T04:11:41.463145+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-i18n-engineer",
+      "sha256": "6f4d9145585f14bbc569ed9b840b215759a7f80cea114d50da831388308a5043",
+      "source_sha256": "7f4dff0c761e66f939bc9e71158131ace2c182c1180459af14bf6c70c70f3a86",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19240,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-iot-fleet-engineer-c22d06bec55f.webp",
+      "reviewed_at": "2026-09-06T04:11:41.686577+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-iot-fleet-engineer",
+      "sha256": "4610793261fdf9da1e17abb36e453efed299f025b051c7bd966bfd6d08a594ef",
+      "source_sha256": "3d1266a51879157549a265b4a7d1a599d982e3be628b531920968d473565c3b6",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 25384,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-llm-post-training-engineer-8d37d728e5dd.webp",
+      "reviewed_at": "2026-09-06T04:11:41.914871+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-llm-post-training-engineer",
+      "sha256": "a72f1f6d824b177c30d7b98266529cb7ee145ef2fec9e73e6f30081a39b65a5d",
+      "source_sha256": "718ccba25c91b34cf03835bdd505e2937d075bff2655700b5a650f9a18a1ebe3",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15818,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/sales-coach-5480b586f118.webp",
+      "reviewed_at": "2026-09-06T04:11:42.122969+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:sales/sales-coach",
+      "sha256": "ca813e2540dc8b56aa669a69640f660d61050ee641faf5121d28df140d430b14",
+      "source_sha256": "ec460f721a36a55a0f1e711343748791f9cf715230e3c01d9ffa7ee7b090f808",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 14824,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-desktop-app-engineer-f0408da21bf4.webp",
+      "reviewed_at": "2026-09-06T04:11:42.336172+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-desktop-app-engineer",
+      "sha256": "1c1a9ae73e841a0852ece94a6b06875e3cbe06ee25aa8c5a5968628bcba87cfd",
+      "source_sha256": "4354cda9c5c9153ec55c3486365d59304b44e6bdf756193aec8b41291634c04c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17022,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-drupal-performance-1fd89fc60498.webp",
+      "reviewed_at": "2026-09-06T04:11:42.545251+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-drupal-performance",
+      "sha256": "5f9c5876c38480d4cf89dd80b65acf7074bbe5d159550d37504189e3b9e76634",
+      "source_sha256": "7a4a54ac772e719dff382e8f803f25fff9b66f7d871c875903b4ea9b6992e94a",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20622,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-embedded-firmware-engineer-1beabcb44dff.webp",
+      "reviewed_at": "2026-09-06T04:11:42.756601+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-embedded-firmware-engineer",
+      "sha256": "2095d06dc173113c5e4f5f41ca6ebf588d263e71130289b90096547f39b84798",
+      "source_sha256": "85232f1a834fe256eabca0f09c0438c42b879163ec296117964a6da182a87d7f",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21792,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-finops-engineer-74f06bdb0044.webp",
+      "reviewed_at": "2026-09-06T04:11:42.977058+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-finops-engineer",
+      "sha256": "45ccfd94498b9addf5da8aa41f0e4a266c3ed8fdc9ffadf902687179344279a2",
+      "source_sha256": "69fbbcaa6f19e846d1226e3d3fda5cfb14fe23a4f66b8695d02392f9be5a5b22",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16216,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/engineering-git-workflow-master-8a02a6bcc3df.webp",
+      "reviewed_at": "2026-09-06T04:11:43.196717+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:engineering/engineering-git-workflow-master",
+      "sha256": "28d861d1e6eeccdd71cc6f9872124c6cb1e7b444f38aec1aaff9ba105ceb20e6",
+      "source_sha256": "fdf842be470c1e8a6abaed2eb0aef099b5aae94dcb9650dd869c573b6b66a6d6",
+      "state": "active",
+      "width": 512
+    }
+  ],
+  "schema_version": "taiji-zhinang-role-images/v1"
+}
