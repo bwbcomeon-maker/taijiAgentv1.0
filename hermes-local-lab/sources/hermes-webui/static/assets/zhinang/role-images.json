@@ -5971,6 +5971,2256 @@
       "source_sha256": "c1410a88d75c0cba47ee1b4e0e7594711fa695920f98d8fcb6e853db6bde4f22",
       "state": "active",
       "width": 512
+    },
+    {
+      "bytes": 15882,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-ui-finish-gate-reviewer-64c1c7809632.webp",
+      "reviewed_at": "2026-09-06T04:52:57.654236+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:design/design-ui-finish-gate-reviewer",
+      "sha256": "84d2e42aa293ec901125db104a4938150d257a1a1129a22bffc5357aad79e3f0",
+      "source_sha256": "d2f3317f148f3a3a003044489eaa212b580fbea246303a804719083b158ffbcf",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19374,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-visual-storyteller-5681ff63ffb6.webp",
+      "reviewed_at": "2026-09-06T04:52:57.862785+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:design/design-visual-storyteller",
+      "sha256": "5386b55d638c8de9c6839fb44323785da1161424894b19c401f20ab2498bcaec",
+      "source_sha256": "03c7e64ce46afe311816ece9894f57ff32adf6d2b2dba92905205daafece8a0c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16270,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/project-management-jira-workflow-steward-4771e9b91572.webp",
+      "reviewed_at": "2026-09-06T04:52:58.064154+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:project-management/project-management-jira-workflow-steward",
+      "sha256": "2899bb683dfc8bee6eaf5f77df6df4884a54f7aa648c7d6c07a0ae3bc5cff8ea",
+      "source_sha256": "82daa7620890cca163c391a7f25aba3876f62c8671dee36b759b94bf8e5db30e",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16264,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/terminal-integration-specialist-554f9cdb1461.webp",
+      "reviewed_at": "2026-09-06T04:52:58.263412+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:spatial-computing/terminal-integration-specialist",
+      "sha256": "2010da827564e856cbdd1d1baf2f06f0f1b0c2ff00ae629b024e9d0b38e2b9af",
+      "source_sha256": "e4e06a6b43302ec3182ed13a52f3be4c90e7fb1a0427c04fd3d6011530ec0803",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 13526,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/xr-immersive-developer-01d466a8b2dd.webp",
+      "reviewed_at": "2026-09-06T04:52:58.466316+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:spatial-computing/xr-immersive-developer",
+      "sha256": "8a26b89e3724878e8f13e63e1b6d0301d9b64b9761cb07eabdf6f2e6f4ce110b",
+      "source_sha256": "66dbb97e70c73ea6f4b9c9b7f5ae475100b566df5ed29ed57847092efd5e114e",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18820,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/recruitment-specialist-fe09845ac6b3.webp",
+      "reviewed_at": "2026-09-06T04:52:58.672903+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/recruitment-specialist",
+      "sha256": "f2a1976a12258f4cb6084081ede170751d0aaf72eb6dc87e8cdda897ffb8ebca",
+      "source_sha256": "d829a9bf9a2c86381ef7cb9f9beab3381b2fb2bb93d7c88826e3ae815d96c606",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15534,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/retail-customer-returns-9948a89f889a.webp",
+      "reviewed_at": "2026-09-06T04:52:58.872767+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/retail-customer-returns",
+      "sha256": "42a6b3099b361b5b08c6209d0b40855311facab5ac73c96da819731dd038c224",
+      "source_sha256": "7bb4f6b62ff0bd00afc5d73ecfa46e48b829f664dbbbb5189b7b9d78faec65fe",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18138,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-chief-of-staff-f066a90cd2d9.webp",
+      "reviewed_at": "2026-09-06T04:52:59.081409+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/specialized-chief-of-staff",
+      "sha256": "931fa42f5a372e7033fda6d56b29c269faf0a2b2ac1f1d78bec0821d3bd96534",
+      "source_sha256": "0b555395b90b320bb1e10f5005dd9ed7331c0790a0bd6d1bfae7bb97aedcf103",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15472,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-developer-advocate-04cd28ad8b94.webp",
+      "reviewed_at": "2026-09-06T04:52:59.287772+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/specialized-developer-advocate",
+      "sha256": "172ced4f364a543713230a71f115dfcc3b43d726c0595292bfa3b081a08fcbf5",
+      "source_sha256": "b77e6acb5a9c94f4b847723297b2507f3ce93fdd76a75059ac8e583fd3ce76f6",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 25014,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-bim-specialist-4b5c15e2d3ba.webp",
+      "reviewed_at": "2026-09-06T04:52:59.500471+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-bim-specialist",
+      "sha256": "d2ab5f2ae2d5dd4220d4cb22e453f8fdf0d6007b7dd93e7ba534362cee6be302",
+      "source_sha256": "ce8145fa73456b6657bd8a681367587b57955703421c5da6ba277d1564dba901",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 24252,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-geoai-ml-engineer-704bfe9e5d45.webp",
+      "reviewed_at": "2026-09-06T04:52:59.713876+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-geoai-ml-engineer",
+      "sha256": "f920220a878de076dec73cbb9e9c6facc4cc5b77c1d48be3f6ae4b78123f6422",
+      "source_sha256": "2d1dc33ae137e5dca90c409916f625cec8307ef7bab421383727812a7e30cc9c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 25244,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-solution-engineer-9f2f11e976bd.webp",
+      "reviewed_at": "2026-09-06T04:52:59.922497+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-solution-engineer",
+      "sha256": "615a5a87824747e64571080273bf8b91de990ad18b49fd9b2763bfc6f4280010",
+      "source_sha256": "46a6fdecc09c4cfc5caea7749e7e04c697a2562564eacf48f2645b7a599aa8b4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 25760,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-technical-consultant-026dee489c95.webp",
+      "reviewed_at": "2026-09-06T04:53:00.137009+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-technical-consultant",
+      "sha256": "8f741e884e4212693ea923ff909f075cbead64864234aa7e7f035235bf3358df",
+      "source_sha256": "7b62d4e33fbf96b92b68a283b253e43c9b92688eef0b3126634304f4c24d662c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19240,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-workflow-optimizer-e2160e37856f.webp",
+      "reviewed_at": "2026-09-06T04:53:00.350606+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-workflow-optimizer",
+      "sha256": "9111a14cfba4b9dda22da5becf1e7768db69938e1c7b9a180748ad07b5c7e068",
+      "source_sha256": "fc947d3d4319d983a35f4f62aef8db151221f735dcee752108927fb0598a296d",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17080,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/project-management-studio-operations-cb8c8b675286.webp",
+      "reviewed_at": "2026-09-06T04:54:42.886091+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:project-management/project-management-studio-operations",
+      "sha256": "52c43a9c4131c0e1d1108b3a01aafb6fd5cf7f2205694ce43c94a68d54a81af2",
+      "source_sha256": "188884b14e74d23ec9d2ee1e5aa2fdb8f581e3fb097dc05ed3bbe0d4cda23ded",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18876,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/blender-addon-engineer-ad16f8a2961e.webp",
+      "reviewed_at": "2026-09-06T04:54:43.085954+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/blender/blender-addon-engineer",
+      "sha256": "08b71ae951339bd5ba0ad1df6d8566c516789c8f5d38db95730925b02374fdb2",
+      "source_sha256": "ebaaea1d72dd6a7def43bbb5b831bdfcebe30ab0074eed3446160d04455a4e53",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17862,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-french-consulting-market-cdf54c6e418e.webp",
+      "reviewed_at": "2026-09-06T04:54:43.292397+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/specialized-french-consulting-market",
+      "sha256": "1cbc6b9e1b60be5dba538713d9111e2d68a735c4385af18c94d613003b7be43c",
+      "source_sha256": "f1acdd3d6caa0d8ce6ce8438453b3e6ca06f84e6f5e28d44c26fba42fd639ae4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15296,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-mcp-builder-802a4a73f241.webp",
+      "reviewed_at": "2026-09-06T04:54:43.502618+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/specialized-mcp-builder",
+      "sha256": "dc45ee1893b3cacb771ab01586b560598da2624b03b81853a58cfe61585f9edd",
+      "source_sha256": "808ff06ea5f6952451c7c53b7824a6a1b60dbc0a3e7a46821ff0f211baa92d7e",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18986,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/specialized-salesforce-architect-f855a6b6ddb5.webp",
+      "reviewed_at": "2026-09-06T04:54:43.706844+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/specialized-salesforce-architect",
+      "sha256": "c9d7dc675a3d831e94fc7bdc028f4abb23bb9e1a6e3cf5d14e02bd9d757c645e",
+      "source_sha256": "0f6f88efc72e462c37fc4fcdf8df7e0fd87129162f191e4c18a791ea705e8998",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19314,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/study-abroad-advisor-7915a96aa13d.webp",
+      "reviewed_at": "2026-09-06T04:54:43.907043+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:specialized/study-abroad-advisor",
+      "sha256": "d94ee73f8677812ca799a155faade6ddbfa7f8c1f8d6997ebe230e5115307cd1",
+      "source_sha256": "ccd21791bdcf06fec79b7c1f8ef77bbe0a5a1a9a61b6b5b21aee83202e9ade20",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18704,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/game-designer-0bc0534641de.webp",
+      "reviewed_at": "2026-09-06T04:56:18.452527+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/game-designer",
+      "sha256": "491873b7123b677b0c985a58c2961652f7b445269e0a831da3672a99045aa4e4",
+      "source_sha256": "6e604eb506a4ab60662ff5fe1ec026048a80d8e0aebf2dc548012295fa964349",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19894,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/godot-shader-developer-c5ba33c8f52f.webp",
+      "reviewed_at": "2026-09-06T04:56:18.660458+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/godot/godot-shader-developer",
+      "sha256": "c915fcc64343a256f34955e49bc8be63cb8da02c8f6ffeef961fa257165f64fb",
+      "source_sha256": "989d839fa28575f1306f1f978df76bd556ae5ba0396385280a57fc3d3f8d12ad",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23806,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/roblox-avatar-creator-70c9e80ac0a4.webp",
+      "reviewed_at": "2026-09-06T04:56:18.868326+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/roblox-studio/roblox-avatar-creator",
+      "sha256": "094aa142cb9ee953cada2a46dfecf4fa0ee419e209f19514d9181037f70da11a",
+      "source_sha256": "2fad129e2fa036d562487c4f95140e81eb6f283002286f5236a0383c2610cb63",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17884,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/finance-bookkeeper-controller-acbe8e888841.webp",
+      "reviewed_at": "2026-09-06T04:56:19.071683+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:finance/finance-bookkeeper-controller",
+      "sha256": "adbecf9bec6f14bebdd6961a0ccbc376bdcf4638e9749514482cfc753be4c76d",
+      "source_sha256": "3a1e5faada6674fecf00280f430a81ffdc1031136fe9a496e85a400d5d8b5821",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20378,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/finance-investment-researcher-4be2f06e1cc6.webp",
+      "reviewed_at": "2026-09-06T04:56:19.279126+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:finance/finance-investment-researcher",
+      "sha256": "76c5f47943e15d1457697a975e82e6d7bb484e09c65c509a91420e1b8889f12f",
+      "source_sha256": "dc10e0c8d0860eb9126f2e2e0d862b43152a19a4efd684c94116348a12033550",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18106,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/technical-artist-171d2af8bb0e.webp",
+      "reviewed_at": "2026-09-06T04:57:53.669411+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/technical-artist",
+      "sha256": "01830c117317d9d5c7a80f066324cb14db75f64525b6aafd4202c2329c0c792b",
+      "source_sha256": "c19a48b6be8387a94b419cebef39b835cc883f1365c1912b043cd93ef10c005a",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21052,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/unity-multiplayer-engineer-fd4229262a03.webp",
+      "reviewed_at": "2026-09-06T04:57:53.874596+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/unity/unity-multiplayer-engineer",
+      "sha256": "405da1c69d1496e25700fbbd1d00526b75d1adc519d62548b7308bbf62d9f7a1",
+      "source_sha256": "0822b5be4b3c5602c98cdc2f82d40f1db2434502f5cdd88ebd89ff6f79346f13",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18840,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/unreal-systems-engineer-fc099515fd07.webp",
+      "reviewed_at": "2026-09-06T04:57:54.079881+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/unreal-engine/unreal-systems-engineer",
+      "sha256": "c803798e133e1b102e22c3f5ea29b76ff14b138ccc24478bc97da5f6af883048",
+      "source_sha256": "a3f185d97a68895bd0facaa2572ca0972c278f001a3bc072eafbcb4729ac998e",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21174,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/support-analytics-reporter-a3760778b07e.webp",
+      "reviewed_at": "2026-09-06T04:57:54.279328+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:support/support-analytics-reporter",
+      "sha256": "478ed64cf28777c527a3a7f5530540b9ee1b2518567a7645d410f71cccfc1f8f",
+      "source_sha256": "b585ba08bf06f9ad0ccaabe7caca13b2299b89dcc5798e6c7519a8ae42724ee1",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22448,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/academic-geographer-9e4c0fd05b58.webp",
+      "reviewed_at": "2026-09-06T04:57:54.497418+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:academic/academic-geographer",
+      "sha256": "1e7616c8f5c6f1307578a089051c02fc29f66d3ddda428febb1f8c7d4600af5b",
+      "source_sha256": "948dbab45f03c401d6756413718305a9a8bee254592a345512a0d909ad8fa007",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16902,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/healthcare-innovation-strategist-b01d1fecbc1c.webp",
+      "reviewed_at": "2026-09-06T04:57:54.710053+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:healthcare/healthcare-innovation-strategist",
+      "sha256": "2b350bded97580ac3ba47e0451e4cf2d4f46c98a0399a496d6be34267971cfda",
+      "source_sha256": "f678f1142dc0d05a7886a91c8d0769ccd343f78398665358cd874a1a913e235c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22100,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-ai-generated-code-auditor-b91a5e2d61c4.webp",
+      "reviewed_at": "2026-09-06T04:59:34.254018+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-ai-generated-code-auditor",
+      "sha256": "179499b67c482f5cf1e18e9d5586d51a0503c30b480a2943fc81dba9b85d00dc",
+      "source_sha256": "0d978773600bce84f6b1383324ef004356be794777c3285f26865bb1d9736f16",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21488,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-blockchain-security-auditor-93208a2026d0.webp",
+      "reviewed_at": "2026-09-06T04:59:34.460185+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-blockchain-security-auditor",
+      "sha256": "24309064bac51699b14ee029da9ad63b1e2aa5c4a7b16c02b6c8f14413565272",
+      "source_sha256": "84c0f3eb64f8139d1e32a9ee5dd4d2e72b05cf66610a40d7a454e56b44e078f6",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22060,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/support-infrastructure-maintainer-d3dee2a9a05d.webp",
+      "reviewed_at": "2026-09-06T04:59:34.671355+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:support/support-infrastructure-maintainer",
+      "sha256": "8b9b9795d3dbc8a76d0eb53ddde787e6c9b69ec89f72f9be365707c6b9bc7528",
+      "source_sha256": "f8c8dce4851ca06b203f8fa86d86ba09b364312202502cb299d0039eeb874677",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21110,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/academic-psychologist-33b91b6c9487.webp",
+      "reviewed_at": "2026-09-06T04:59:34.873339+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:academic/academic-psychologist",
+      "sha256": "649fd7315b2f0d0e3faf189c83a5d6c43e94b6ab8485de4b4724081a40829641",
+      "source_sha256": "36453b8d2404f9509a10331d03ed5d2db0e9c18587c69be2efdcd9b246bf79d4",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21866,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/paid-media-auditor-339b29dd1570.webp",
+      "reviewed_at": "2026-09-06T04:59:35.086929+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:paid-media/paid-media-auditor",
+      "sha256": "df90fc9ac791116c5015a6caa5822c8742812d5de6135b20937f366c6edd62de",
+      "source_sha256": "a38689791627a805ed16f323a6b4b534e9f499013f354e54c4f9443298aa135c",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18390,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-incident-responder-8c6ac5904e0e.webp",
+      "reviewed_at": "2026-09-06T05:01:07.418309+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-incident-responder",
+      "sha256": "fc873ce3426bdc6f1158cc902d4879abc711010968593017398844fd0d4c80a0",
+      "source_sha256": "f775a5df790c536e378372851c41b403871c3122276175a7768b29d3698daaea",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 16854,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-senior-secops-9d4bd7746bfb.webp",
+      "reviewed_at": "2026-09-06T05:01:07.625031+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-senior-secops",
+      "sha256": "c2d3982be0f0a8af03563c759f97121a60767283dd417f198fed79b8bbe8b508",
+      "source_sha256": "4adca698be7321d1ac4661e07c574801a629febd5c0fabb47eb48937da5aed97",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19542,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-accessibility-auditor-f1a6f566f1b6.webp",
+      "reviewed_at": "2026-09-06T05:01:07.833659+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-accessibility-auditor",
+      "sha256": "d97f419f3b5cffe215bf20fd29db116957a174b01ad3d4c42a2bbd96403081f9",
+      "source_sha256": "fdfded03788412d9b1b8e0cd3c34a0077ecaba0d51fb9b07b4bb850027420939",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18500,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/paid-media-ppc-strategist-3f2a573e2d5c.webp",
+      "reviewed_at": "2026-09-06T05:01:08.045750+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:paid-media/paid-media-ppc-strategist",
+      "sha256": "8e45bedfbdbe0693de49206355c635b421cd421689bf0c8fd585914afe3eb903",
+      "source_sha256": "78f1fb6228e7b47facf3f7f874ce75c901a9295789ddb1ee74930c036065a5b2",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17012,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/paid-media-tracking-specialist-2c08bf220a0d.webp",
+      "reviewed_at": "2026-09-06T05:01:08.244606+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:paid-media/paid-media-tracking-specialist",
+      "sha256": "133e844d001023a83f9994fa574b70883d65a89ecc0c35bfc34a95e6e20388e1",
+      "source_sha256": "d49913dca4ce7f665f32cb2d27dff386afdf2008bccf493a592a7bc4e5449efc",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23140,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-3d-scene-developer-a413fd1b3840.webp",
+      "reviewed_at": "2026-09-06T05:02:45.070819+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-3d-scene-developer",
+      "sha256": "4ae109fb670dff31a72453956a8609d638268a3a7d9f7fe28e8ca4b1728cfa0d",
+      "source_sha256": "d4103d5cdd5298dfc909948ef2a69c065aa35de3932a588ed1e473dc3aab9101",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20032,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-performance-benchmarker-1a8ab47b7c43.webp",
+      "reviewed_at": "2026-09-06T05:02:45.296591+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-performance-benchmarker",
+      "sha256": "a4493807abc50701a60654981377df86fdd08f5cd3623652497cd98c9c7daf20",
+      "source_sha256": "4efa1a8219578d648a0b168261c42087fb8f11fc6e84d1fd71878d912d4993bc",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21204,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-test-results-analyzer-3463bc50c8e2.webp",
+      "reviewed_at": "2026-09-06T05:02:45.505038+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-test-results-analyzer",
+      "sha256": "1cdd043728be3c99facb3a91e0eb179009149e84b2967b391989d8660d50a1ad",
+      "source_sha256": "b2305ec5896e61ba68e888c29fabb57640a8dbd0f3c15c88fa3aed7aec7891f0",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15990,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-persona-walkthrough-ce7dc5e4255c.webp",
+      "reviewed_at": "2026-09-06T05:02:45.718364+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:design/design-persona-walkthrough",
+      "sha256": "8452cb0dd5a406899c64d3dfb49a1a6bb40dcc8498dd43a37aaa00935f6bd4a0",
+      "source_sha256": "651ab4455b2a2a1e09303bb7c76a29fb636d2f419cb93d48a70916d131e16b8d",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20980,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-ux-architect-3c38cc172a98.webp",
+      "reviewed_at": "2026-09-06T05:02:45.939266+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:design/design-ux-architect",
+      "sha256": "a504b10e35b516fc7df281f13d500e6655f8982891681f11ee568621725eebac",
+      "source_sha256": "8d8cf72767423b76179622dd248599b18501eef4f452479b6ad1ff57303a0f7e",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21076,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-cartography-designer-cc41744c2a47.webp",
+      "reviewed_at": "2026-09-06T05:04:22.870672+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-cartography-designer",
+      "sha256": "aad52d626194f2038b400115039ec064312ee93638952bea68e236d9856abcab",
+      "source_sha256": "65572f78a33ddf3634b2caabec1bfbeff7b991bbd3eb2cfee50a5f7f24b0a845",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21834,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-geoprocessing-specialist-4c882f65bb9d.webp",
+      "reviewed_at": "2026-09-06T05:04:23.098910+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-geoprocessing-specialist",
+      "sha256": "53ca80140b54591fdaa5954b80270232e5862d3573044203468515783cba8650",
+      "source_sha256": "f85f7a1af33e558aa70e9997dd4103fecb99d535249379a5ff7aec69c83956c3",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22356,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-spatial-data-engineer-df310ede4da2.webp",
+      "reviewed_at": "2026-09-06T05:04:23.324180+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-spatial-data-engineer",
+      "sha256": "307c192fc9b40ea9f85479d493a90207e3401edb01a23e0e680b874f91eb128e",
+      "source_sha256": "b643c0681630ff847cffb79648741da12da24cd08e6cab115511ad80c2f8bc37",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19306,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-web-gis-developer-9aa66328cdb3.webp",
+      "reviewed_at": "2026-09-06T05:04:23.542622+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-web-gis-developer",
+      "sha256": "39fbbe8a7f756de2d00228c49ab53e148805803213c7ad063a317075e158021a",
+      "source_sha256": "4113225241be5b77220c8fec2a0a27982e6b89547442297d08ce99dfeead1927",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17446,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/design-whimsy-injector-ad388f0a7392.webp",
+      "reviewed_at": "2026-09-06T05:04:23.763832+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:design/design-whimsy-injector",
+      "sha256": "aa83ab21efb03d362236f4ff7c6dcbebcc05bc5ef63d7c02021dfa6451392bcd",
+      "source_sha256": "97cbe5ca15327963fc54d258c6a53acd8614eca491a8c890cf354ef38c952aec",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 14882,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/visionos-spatial-engineer-e084cb05b99c.webp",
+      "reviewed_at": "2026-09-06T05:04:23.989097+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:spatial-computing/visionos-spatial-engineer",
+      "sha256": "a5a6538f3b10888db0825ecf10e635053afed111734e6e26009917b53fbfdee5",
+      "source_sha256": "2b356a9f1bd28b0e3c9371f7cba57182fa454317db7a7ff1823e9056bb406402",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17096,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/project-management-meeting-notes-specialist-0ce9146b9d0c.webp",
+      "reviewed_at": "2026-09-06T05:06:42.421449+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:project-management/project-management-meeting-notes-specialist",
+      "sha256": "1a9cf12e7a772549c3b706ae43cf2f515042843d5693f9d29548592c039d7c8e",
+      "source_sha256": "32a63dc256a3c0f4841217b147e54572b6465c4b51d30d848a296668fa196673",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 19742,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/project-management-studio-producer-26c1ff99fdaa.webp",
+      "reviewed_at": "2026-09-06T05:06:42.637619+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:project-management/project-management-studio-producer",
+      "sha256": "218b232175da056e5d71c3e5d54d4c96f27b226766eab0a78d12365b81c9f163",
+      "source_sha256": "c4a4a82bbd3d1f10761f725ad37530dbafc515f47ecadda608ee820ed3473f8b",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17296,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-cloud-security-architect-aaadc57187a2.webp",
+      "reviewed_at": "2026-09-06T05:06:42.848418+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-cloud-security-architect",
+      "sha256": "4760fb2edabbc34d4d96f0ca705e4b960bf925593fccd875a06850bdc606801f",
+      "source_sha256": "d82eccfd2c62a1a1f482e9d68562f694213f8aabcee70ba5833139a48f051454",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20748,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-penetration-tester-ae2e152fcbf8.webp",
+      "reviewed_at": "2026-09-06T05:06:43.055705+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-penetration-tester",
+      "sha256": "2801416c3c59256d586a630150ffab620b4948e53d4eb00b8c46883fc8da31d2",
+      "source_sha256": "2d28a4505559d2d686d3abf25066a09b25ab19ff2bc10fcc397ace78278dfbe5",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17580,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/xr-interface-architect-1b8e64735183.webp",
+      "reviewed_at": "2026-09-06T05:06:43.271988+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:spatial-computing/xr-interface-architect",
+      "sha256": "168299be2de72b3ff33f334c76d791c3ad507a430b84d15431ef1cc97590cf46",
+      "source_sha256": "c6a1e8429433c845d5a5854a50c43a7069deadc1052a8b364ffc53210b571ad7",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18140,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/economy-designer-01455f49baa1.webp",
+      "reviewed_at": "2026-09-06T05:08:17.312228+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/economy-designer",
+      "sha256": "e25adb3ebb07765b25ed797521393d8b5d9214f54c2249250d4aa8fbf892e615",
+      "source_sha256": "97a9bfa13309e35655517277e4a31ab38d5af8b7498d6ca8cc47d9bf1bd4e350",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20384,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/godot-gameplay-scripter-929971a8a673.webp",
+      "reviewed_at": "2026-09-06T05:08:17.524389+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/godot/godot-gameplay-scripter",
+      "sha256": "861f99703444b3d2f3c20d8618255d7818c4f6c24d698c10a5aa1f6125c865ed",
+      "source_sha256": "dcb2c9b757acc5d6d90f363c5c398889fad4a6bef7f69cbaab39739e191af5e7",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20962,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-threat-detection-engineer-352b5d5bedce.webp",
+      "reviewed_at": "2026-09-06T05:08:17.735160+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-threat-detection-engineer",
+      "sha256": "f00bceb1cb31a2922a61277f3694233f0b6bf0d3e5bea20f08f75ceb24299b32",
+      "source_sha256": "d43bd440f4cbb66e8f4ec1303c9cfd5af08273f0af16949e072784149580ff1f",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 18950,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-api-tester-3b28606ea5e7.webp",
+      "reviewed_at": "2026-09-06T05:08:17.941112+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-api-tester",
+      "sha256": "961b5c17b1e5517083744e60e9c622ad36352e2b26c0d2f91b7acf503e600008",
+      "source_sha256": "d8b777ffcf8a8a4dde1327f5a74276c0727fffc4fc677592bc0c24801d1ae475",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21268,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-reality-checker-2856e830255d.webp",
+      "reviewed_at": "2026-09-06T05:08:18.159937+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-reality-checker",
+      "sha256": "1a66882db10675614dd2cbba25e33f812d454fc7545cf0c20cb46481af9b1b89",
+      "source_sha256": "42d925dec802bbaa4c8f6099b26182dd82f085c1e0f5ab40f76a99e1a521c563",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21976,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-analyst-30921a4b19ac.webp",
+      "reviewed_at": "2026-09-06T05:10:01.299557+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-analyst",
+      "sha256": "ecfd197b0989e2bce1b670c35f7ba5c6fe5050beeed671c0b965284b6cc9d367",
+      "source_sha256": "0ede3cca71b7285daaddceddd7bba9ba3347bbe282872cdd86ae66114657d8e2",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23682,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-drone-reality-mapping-0b0a809c6fb7.webp",
+      "reviewed_at": "2026-09-06T05:10:01.513262+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-drone-reality-mapping",
+      "sha256": "ed66106c99afeec970775861ebad3057d42c8cbbdcb0c1ee735d603e1b1de730",
+      "source_sha256": "ac761122aec7792cbfbeb875756089df09f754bccc6bf9180d8ac49504960938",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22516,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-qa-engineer-a1af6a6630f2.webp",
+      "reviewed_at": "2026-09-06T05:10:01.725835+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-qa-engineer",
+      "sha256": "9b3c11c852b064b110b17599d3d4abe48ec935bb05db040e67a3749139e73afa",
+      "source_sha256": "5ec5f1fa9497ac3c2b473652d7b8678c01b9ec24bb6c6e95e8f6d519234a1f14",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17576,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/level-designer-527baafd7e50.webp",
+      "reviewed_at": "2026-09-06T05:10:01.932164+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/level-designer",
+      "sha256": "f5e7b8ac46139f542b1fb0c9116561629c7903707f8c3542b54ba58572fcb4e5",
+      "source_sha256": "993efe831189149168344918e08da4e72a365aea95eae9109114b7efacae9488",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 21102,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/roblox-experience-designer-16108ba069e0.webp",
+      "reviewed_at": "2026-09-06T05:10:02.149494+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/roblox-studio/roblox-experience-designer",
+      "sha256": "4fbed7039a3da832a3c51d3a08809ff90040751acd7b5aece579447a2190855c",
+      "source_sha256": "fc5cbac4c27ec02a5b53681030fa20482deb03fccba7a4bb08c40b5b300cbc61",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22178,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/testing-tool-evaluator-e4b42b2a37b3.webp",
+      "reviewed_at": "2026-09-06T05:10:02.362609+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:testing/testing-tool-evaluator",
+      "sha256": "9898ef41fe25bc2e205dfbb33af658b44afb2c8d89e9df77b91bcc2fbaa5ea5d",
+      "source_sha256": "ac6ccc6633a291adcbc5359252e2f5dc2bb3edf82cbd6926f2c1fb256e442591",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17804,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/unity-architect-7b252656587f.webp",
+      "reviewed_at": "2026-09-06T05:10:02.584567+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/unity/unity-architect",
+      "sha256": "23174fefb720ea9843f37c706c81523221aee8dc407af9818cecd49c06bafb0c",
+      "source_sha256": "c96f9dd5e45229c9255997b101f933f1b3d7c660ee8546bea2216994849e6b82",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 20880,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/gis-spatial-data-scientist-4d9505cd3680.webp",
+      "reviewed_at": "2026-09-06T05:11:41.167787+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:gis/gis-spatial-data-scientist",
+      "sha256": "6bfa21ac16ace435f9595bbdc3303bbe46a5e7330200fa36ac5cb985b761346b",
+      "source_sha256": "ea29a4f4f720d5c3ada94e29777f21c8f49287f5a69dc882f014d6e25da90562",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 22004,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/unity-shader-graph-artist-ba2f8cf29454.webp",
+      "reviewed_at": "2026-09-06T05:11:41.387200+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/unity/unity-shader-graph-artist",
+      "sha256": "5a774d605dc4eba81201eda116d06d522614cf6986fa74ce4e1bba1b91092874",
+      "source_sha256": "e559921b7eee1da977500dc78ca122dc72d90de2abc9c74792c238518a7772e1",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 23448,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/unreal-technical-artist-b6e0f2a5a5ed.webp",
+      "reviewed_at": "2026-09-06T05:11:41.610874+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:game-development/unreal-engine/unreal-technical-artist",
+      "sha256": "ca9229b4e946ca30bc344a66aca043b283352533c910bab6d523d0a6b205b1ea",
+      "source_sha256": "d5f2f551f0fc41c8ab944093bc063670de31889cb55695d8c65846919ad3c65a",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 14752,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/support-executive-summary-generator-64b8e9e8b0ea.webp",
+      "reviewed_at": "2026-09-06T05:13:30.797046+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:support/support-executive-summary-generator",
+      "sha256": "bcac5e63e21aef387edf606d88d18aea19a8034fcd6180d071a61724b94aa7c8",
+      "source_sha256": "b2fd9831eb8f11d2b3302fb1a7555c8f9eecdfcfd19400e2b7b69c1db65fba57",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 15666,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/support-legal-compliance-checker-5d887910bb53.webp",
+      "reviewed_at": "2026-09-06T05:13:31.004702+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:support/support-legal-compliance-checker",
+      "sha256": "e5039f7f91486460823bc534d63244e07e8b5c11f83e4a40415a7d24a24a2ff3",
+      "source_sha256": "54e4da9d661086a013de9d26d412c634ce1f504e8aa128a2c85e8756125f6408",
+      "state": "active",
+      "width": 512
+    },
+    {
+      "bytes": 17632,
+      "conversion": {
+        "exact": true,
+        "format": "WEBP",
+        "height": 512,
+        "method": 6,
+        "pillow_version": "12.3.0",
+        "quality": 82,
+        "quality_sequence": [
+          82,
+          78,
+          74,
+          70,
+          66
+        ],
+        "resampling": "LANCZOS",
+        "width": 512
+      },
+      "height": 512,
+      "model": "image-2.0",
+      "path": "static/assets/zhinang/roles/security-appsec-engineer-1169ffd43843.webp",
+      "reviewed_at": "2026-09-06T05:14:14.770323+00:00",
+      "reviewer": "Codex",
+      "role_id": "agency:security/security-appsec-engineer",
+      "sha256": "a912c35da609a62e8c341ae094981ba4b3383de54ca7e5306a8b818a0108d480",
+      "source_sha256": "23bb3783956c61f82c43f444207601a2a0cd06c5fa8b5d138c70315fa6a85827",
+      "state": "active",
+      "width": 512
     }
   ],
   "schema_version": "taiji-zhinang-role-images/v1"
