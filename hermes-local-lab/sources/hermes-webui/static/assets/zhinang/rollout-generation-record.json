@@ -1511,6 +1511,1112 @@
       "source_sha256": "f1e789d23c2ed7b0ea208f9955faddbfa4aceb2e8676b2f12ce7433ecae86e78",
       "path": "static/assets/zhinang/roles/legal-billing-time-tracking-c4d69725d62e.webp",
       "sha256": "046926f724026a35ff9b3c810de4c1013c49eee5327676284456fa2f9207eb87"
+    },
+    {
+      "role_id": "agency:specialized/lsp-index-engineer",
+      "name": "代码语义索引工程顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 代码语义索引工程顾问，为多语言代码库的LSP接入、符号索引、引用关系、增量更新和性能验证设计技术方案。\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure. Use these exact role-specific props: a code-symbol tree and a magnifying-glass index marker. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-22005602-85cf-4375-8659-732b2c6d1a99.png",
+      "generated_source_sha256": "377f7e2d2c181a5cc0e90835549ecc29a20bdcfefae33b2f1ed7d0c30d1433f3",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "dfe2cfcc28e4d6bf9a727609994eee72df36d9ae45ad13d038240799e19408ef",
+      "path": "static/assets/zhinang/roles/lsp-index-engineer-0c150d1c66b7.webp",
+      "sha256": "da6083068a10c0838fe41df1c9e95c62a441a8c63e2155b3539816ac3bc3f646"
+    },
+    {
+      "role_id": "agency:specialized/operations-manager",
+      "name": "运营管理与流程优化顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 运营管理与流程优化顾问，用流程图、基线数据、瓶颈分析、SOP和持续控制机制改进组织运营的可重复性与韧性。\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure. Use these exact role-specific props: a flowchart track and a small bottleneck gauge. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-fe62434d-530b-4fe5-bd7e-888e22b97aa5.png",
+      "generated_source_sha256": "189609cb91025fea5bb5fc594a25eb34064a5963aedd8b4f9d7b659bfee19862",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "243b80364d029b38cfabef870db40220d109e6ff7316eb035b14db3905d7cf5e",
+      "path": "static/assets/zhinang/roles/operations-manager-876e97bab117.webp",
+      "sha256": "a0078cb60dbaba2b421f08bf277cb9fc26ca3a852fe36fd52d145b97d22836b0"
+    },
+    {
+      "role_id": "agency:specialized/real-estate-buyer-seller",
+      "name": "房产买卖流程助手",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 房产买卖流程助手，为房产买方或卖方整理需求、资料、交易节点、沟通问题和尽调清单，帮助与持证专业人士协作。\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure. Use these exact role-specific props: a miniature house model and a transaction checklist. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-016b68bc-1b4d-4cb1-aa40-8237e9dc4908.png",
+      "generated_source_sha256": "0e74f61d03c5c8a09aed62f6c7cbfedb68caaade87628218a00ed6bf5e1e50cf",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "bc65256976f4781118330a4186859cfcbbd17add453fc996001b2b17cc250f2b",
+      "path": "static/assets/zhinang/roles/real-estate-buyer-seller-75b208ae9533.webp",
+      "sha256": "705647ffc63dff9c01df2c369f14ea5438e1c9924da42f6b1c16235f5b823e26"
+    },
+    {
+      "role_id": "agency:specialized/resume-tailor",
+      "name": "简历定制助手",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 简历定制助手，将真实经历与目标岗位要求逐项对照，优化简历结构、关键词和成果表达，同时明确缺口。\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure. Use these exact role-specific props: a clean resume sheet and a matching-target symbol. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-a98c5e2a-d518-4e72-89e7-b61c7f19128e.png",
+      "generated_source_sha256": "f7298c1bc1c6d160c959779a02c2b2994f10f2a88f16f773571727054d8864c6",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "f41c74e0ed995f106ab190a95fa958a1cd1c5924f9c9f0ed153909ef4c179773",
+      "path": "static/assets/zhinang/roles/resume-tailor-b3a0b9b019db.webp",
+      "sha256": "339076540b1cc329d9cbe3a7fdd852314d9f27e6f2fb50d28b7933dbb27f05e4"
+    },
+    {
+      "role_id": "agency:marketing/marketing-ai-citation-strategist",
+      "name": "AI 引用策略顾问",
+      "prompt": "AI 引用策略顾问，手持放大镜和带抽象引用连线的空白内容卡，表达 AI 回答引用与内容修复；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝不透明背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-e48a0e28-ff39-4752-b3e0-bbbcffec2a06.png",
+      "generated_source_sha256": "5196c4507a75be722f3d007d3294639ba0d73cf93f87567a82e613d7be712c04",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "8a10379f7e95fecd1b9925195d796447033a47c76887c6fbf2b8e8225a477b65",
+      "path": "static/assets/zhinang/roles/marketing-ai-citation-strategist-27a2ee97389e.webp",
+      "sha256": "dfd45b3b33e4f8f8fbeb58df3e1d645f85da6624793993ebf0e54297af58847b"
+    },
+    {
+      "role_id": "agency:marketing/marketing-bilibili-content-strategist",
+      "name": "哔哩哔哩内容策略顾问",
+      "prompt": "哔哩哔哩内容策略顾问，手持复古摄像机和漂浮视频胶片框，表达视频系列与社区运营；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-95a54038-3d73-49fb-a02d-33f78360272b.png",
+      "generated_source_sha256": "9b6e9822f325cd8643454ea44b6dac616b38bdff201c51faa95f03bf586109e5",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "fec2c84b57dde13faabbe4a2fb8723f092646ba38dd66ddb22099ba245c69dbb",
+      "path": "static/assets/zhinang/roles/marketing-bilibili-content-strategist-f945807a715b.webp",
+      "sha256": "fe06c260e8c1570dacc00d9d48c1405cb44c73c9f67fa3a4e20eb1c81dc9e858"
+    },
+    {
+      "role_id": "agency:marketing/marketing-china-ecommerce-operator",
+      "name": "中国电商运营顾问",
+      "prompt": "中国电商运营顾问，手持通用购物袋和小店铺展示板，表达商品页、流量和直播经营协同；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-1dd797a5-be95-497d-974c-09de5f208e64.png",
+      "generated_source_sha256": "ecaf629980fac950a981ab34f4975bc18d61b7b8334e19865d3a3e571481229d",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "be9921c5ffc04e3178ff57f718fa3964ecf6308a74402dcea10079d8162466ba",
+      "path": "static/assets/zhinang/roles/marketing-china-ecommerce-operator-828242c29b4e.webp",
+      "sha256": "3e7f691587a3f57b148f09e23a3cc1b865dd1d0cff0f288107508d5464d52df5"
+    },
+    {
+      "role_id": "agency:marketing/marketing-douyin-strategist",
+      "name": "抖音内容与直播策略顾问",
+      "prompt": "抖音内容与直播策略顾问，手持竖向直播摄像机和小聚光灯，表达短视频、直播电商和转化路径；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-ca3265d3-f0d1-4d7a-9afb-5c8f16b81ec1.png",
+      "generated_source_sha256": "5255f0b23107bbe2a2720cdd4553ab9cbc6d7dc9b1ba9b81d90c0dd2b54a628d",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "3dc20540798adc1679c60529a6b6bfc68ed6c9d92a90a7ccce2de5eea9ebcf2f",
+      "path": "static/assets/zhinang/roles/marketing-douyin-strategist-1ec1faf0c12b.webp",
+      "sha256": "7b78c1bd65d330cd511e0f055d6bba1b30b24707aa0f190e335730ee19b2d51f"
+    },
+    {
+      "role_id": "agency:academic/academic-historian",
+      "name": "历史语境与史料分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 历史语境与史料分析顾问, 帮助把历史主张置于具体时间、地点、物质条件和史学争论中，区分可证实事实、共识、争议与推测。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 历史语境与史料分析顾问 reference tool and a concise visual artifact representing 明确历史问题的时空范围、来源类型和证据置信度\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-c4ae9b37-273d-43a9-9d84-27c4c9884586.png",
+      "generated_source_sha256": "863c3814ed65a1e510e6566f5ddd1aa008a0194d60eaf55e531d504146d26853",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "99c90ec971e4c415a0137202d14c97970e69c6ec3aa3389e79b6fab9a6420e15",
+      "path": "static/assets/zhinang/roles/academic-historian-af29496259df.webp",
+      "sha256": "e5853ba10360826472350389ec39c7264a6f22378ad2aa0faad5348276706aa3"
+    },
+    {
+      "role_id": "agency:academic/academic-statistician",
+      "name": "统计推断与研究设计顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 统计推断与研究设计顾问, 通过研究设计、比较基线、效应量、不确定性和混杂因素审阅定量主张，避免将相关性或显著性误当作结论。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 统计推断与研究设计顾问 reference tool and a concise visual artifact representing 区分描述、关联、预测与因果问题并定义目标总体和结果\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-3db7b3de-7b2a-4536-b016-1b5690535246.png",
+      "generated_source_sha256": "5b0f0d79618ad70765efa1487354dbf1cce8669ecd576b10402d854e48f8ed7e",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6f1c605deed722d7645d63df5d64a462d36e6dbd605b169ab90345c7a2c105de",
+      "path": "static/assets/zhinang/roles/academic-statistician-99d2950da6d7.webp",
+      "sha256": "698b5ca4e57c69f2f4b8ec4c5d6ac4323866d0ce1704811576989eb90a39ae0e"
+    },
+    {
+      "role_id": "agency:healthcare/healthcare-sovereign-health-systems-agent",
+      "name": "公共卫生体系合作框架顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 公共卫生体系合作框架顾问, 帮助健康科技团队梳理公共卫生使命对齐、市场差异、数据治理和合作准备材料的结构化问题。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 公共卫生体系合作框架顾问 reference tool and a concise visual artifact representing 将技术方案映射为覆盖、财务保护和质量提升等公共卫生问题的讨论框架\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-7ba8f02c-c7ad-476e-be1a-20ed816efca4.png",
+      "generated_source_sha256": "f74a06e50decf8edf023196964b2fb18a1ab38377aa53d7baffd914d6e79b5b6",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "e560d41942362fd2abfca8d60df5d4149d1c7d926ae9092ba1d52ba97030e65a",
+      "path": "static/assets/zhinang/roles/healthcare-sovereign-health-systems-agent-f7537b35446d.webp",
+      "sha256": "fda9d317fe37586b3d7c42aa9ef40885b42182f39aeee9ae8269c2d7c2df8cf2"
+    },
+    {
+      "role_id": "agency:paid-media/paid-media-creative-strategist",
+      "name": "效果广告创意策略顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 效果广告创意策略顾问, 帮助设计搜索、社交与展示广告的文案、素材结构、落地页一致性和可检验的创意测试计划。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 效果广告创意策略顾问 reference tool and a concise visual artifact representing 规划 RSA 标题/描述、资产与组合逻辑\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b8e0f6ae-fa98-4ea0-99e7-74a892fcc8a3.png",
+      "generated_source_sha256": "e6800ddc608865a416465521c9a51c58e4f940c9d050f66f28da463829314eab",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "341d997001303836567c95073e12551d39cd3f8a480d37d27df0789b42768d1b",
+      "path": "static/assets/zhinang/roles/paid-media-creative-strategist-88e51c80f371.webp",
+      "sha256": "c606c625549b6443e4cc280d9cb0d010e0a3c145228e6d1590590f62def04200"
+    },
+    {
+      "role_id": "agency:specialized/agentic-identity-trust",
+      "name": "智能体身份与信任架构顾问",
+      "prompt": "智能体身份与信任架构顾问，手持钥匙和防篡改封印盾牌，表达身份、授权链与凭据生命周期；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-f49d933e-bf4b-4abb-a82c-2d2662ac8fa0.png",
+      "generated_source_sha256": "934b874d7ac19d9bd8f06d4661b9c848c619feb1d28dce7bff0c2c0c0c0bce76",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "66038cbb1f6f1ba047a945d95704ad1c8b1c2ecae03dab9c1ff0c70f95fdf65c",
+      "path": "static/assets/zhinang/roles/agentic-identity-trust-5d653f75dc1e.webp",
+      "sha256": "9739e4f52e9e2b67a7993abda9796378d1f56a9fbcff3598f5b61052ff0ecb75"
+    },
+    {
+      "role_id": "agency:marketing/marketing-growth-hacker",
+      "name": "增长实验顾问",
+      "prompt": "增长实验顾问，手持漏斗模型和小烧杯，表达增长假设、实验与学习闭环；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-6a8209b2-472d-400b-9ab7-7b4c68a1b5ef.png",
+      "generated_source_sha256": "8e693a80d7d8ac881a0368283f06beee9e461dfc8e58c382c91da500ffd0fb87",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "c259e9a997ccb1bcd40997b42b9f417bef93e469851e98189bcbeac08dc97860",
+      "path": "static/assets/zhinang/roles/marketing-growth-hacker-e874de2da957.webp",
+      "sha256": "cfdb6c9489132798d3eb1cd8ab44f717bd7c1174640f27a3dbcc42e5019dade7"
+    },
+    {
+      "role_id": "agency:marketing/marketing-linkedin-content-creator",
+      "name": "LinkedIn 内容策略顾问",
+      "prompt": "LinkedIn 内容策略顾问，手持羽毛笔和长文稿纸，表达专业受众思想领导力与内容节奏；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-226580b8-098e-4768-909c-fa03f9880145.png",
+      "generated_source_sha256": "ac12246ea3c03b712a378ff3d7a7886138ac421143989ef6b471e06607c77983",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6daead748b57b2836447bf3d98aec3846264cd304aa91120ffdad7fe32f3a386",
+      "path": "static/assets/zhinang/roles/marketing-linkedin-content-creator-462b898e3582.webp",
+      "sha256": "c1626c456ae24ddefa9407b7d7162f988ce38b093704a84e2c05e703abb04fd5"
+    },
+    {
+      "role_id": "agency:marketing/marketing-podcast-strategist",
+      "name": "中文播客策略顾问",
+      "prompt": "中文播客策略顾问，手持播客麦克风和耳机，表达节目制作、分发与社群；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-e951bed9-f10e-4c52-9de8-26bdd4114671.png",
+      "generated_source_sha256": "7cd90b73fe25dbc71879987ed9faa7789054760ecd9c5805c1bc4bb5531265a0",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "79c63edcde7518deb11c3c1dced574e1f4fdacbaf83a78e96998a70ea374fa65",
+      "path": "static/assets/zhinang/roles/marketing-podcast-strategist-46d5baffd132.webp",
+      "sha256": "738790d7a0359724c208c5583e5aaf5b69d42b0e6d6b7dee3f970fd4ba9c3fd5"
+    },
+    {
+      "role_id": "agency:marketing/marketing-reddit-community-builder",
+      "name": "Reddit 社区策略顾问",
+      "prompt": "Reddit 社区策略顾问，手持对话气泡和小营地灯，表达社区参与、内容主题与反馈复盘；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-8a4c9716-97b7-448e-bdf1-45b3cc360627.png",
+      "generated_source_sha256": "97cf31c7ec971c9a0f88b35271d078d4238f80ba024eb4c87b12daf736625ba3",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "88be30eee464c6e403f1730bf1b2aed16c1dec4a89a4744df55ddc299c9b9a8f",
+      "path": "static/assets/zhinang/roles/marketing-reddit-community-builder-b53c8e52a16d.webp",
+      "sha256": "52206e25684ba4522821c62211af9b77f44ed25decf92c35e0dc23489f7466f1"
+    },
+    {
+      "role_id": "agency:marketing/marketing-social-media-strategist",
+      "name": "社交媒体策略顾问",
+      "prompt": "社交媒体策略顾问，手持抽象发布喇叭和三枚相连对话气泡，表达多平台内容支柱、互动与复盘；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-b4df593f-151c-4df2-91e5-cbe72120e5f5.png",
+      "generated_source_sha256": "54f90da74d74369f1bd88c535fec25027844bf9893618dfdabc1519a50e80359",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "ca6813b3cbc566056428c60919c5ef3df4dc780665f2afcca7abd95c5dcb7393",
+      "path": "static/assets/zhinang/roles/marketing-social-media-strategist-cd0cdcceb40d.webp",
+      "sha256": "30c0fd73a589932d860c2587f0a000d0bd235d96983aa07de6db1922b0879d63"
+    },
+    {
+      "role_id": "agency:marketing/marketing-video-optimization-specialist",
+      "name": "视频优化策略顾问",
+      "prompt": "视频优化策略顾问，手持电影场记板和放大镜，表达选题、观看路径与复盘优化；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-21a32c3f-2279-49e7-88ba-5aba248a837c.png",
+      "generated_source_sha256": "6cd65cc0d7acf42e80c3d315ed921a3cbb95ec316527dec58673675555017208",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6dd3bec9b9ee942b9cf1f44e80e756189d1eff16875474743204ab733904b2a6",
+      "path": "static/assets/zhinang/roles/marketing-video-optimization-specialist-ad6126983ed5.webp",
+      "sha256": "9820c4a839dddbe660e88c7913b0178cfc06b99332625e1a9a1e74370b53ad84"
+    },
+    {
+      "role_id": "agency:marketing/marketing-x-twitter-intelligence-analyst",
+      "name": "X 舆情与信息洞察顾问",
+      "prompt": "X 舆情与信息洞察顾问，手持望远镜和抽象信号波纹卡，表达话题、情绪与扩散信号分析；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-d3fef977-0c9b-478c-adae-8693aae01094.png",
+      "generated_source_sha256": "a059869166e06d28e411746018025bd21f6c1ce3e9e80fdaac86e8edfedabcb7",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "79fff1d63415ef7ebbce3277d8aad21a8c84fc020155f7f8090a27fca27d57ad",
+      "path": "static/assets/zhinang/roles/marketing-x-twitter-intelligence-analyst-033d938280e5.webp",
+      "sha256": "f2d44c9eedbd38bbb11445e2eafc9cfc650bbf112c74a4cc486f22503f6ecb7a"
+    },
+    {
+      "role_id": "agency:design/design-image-prompt-engineer",
+      "name": "影像提示词设计顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 影像提示词设计顾问, 把视觉概念转为包含主体、环境、光线、构图和风格的可审阅图像提示词与迭代方案。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 影像提示词设计顾问 reference tool and a concise visual artifact representing 按主体、环境、光线、镜头、构图和后期风格组织分层提示词\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-88579813-1f94-4854-857e-581a7edb8ea5.png",
+      "generated_source_sha256": "22905eaff90f43fadc2ff6ab75b8528eb79a5a0ce17b24178a376e2c98b2bd1e",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "c1b358f3e0447b2de576e084639124ab003135447c86f575e765f67575231822",
+      "path": "static/assets/zhinang/roles/design-image-prompt-engineer-63d347070906.webp",
+      "sha256": "c20dc5f1ea699fcd0588fbee54da5b2f32fb576fb6e2abcf3bcf0b4462102f0b"
+    },
+    {
+      "role_id": "agency:design/design-ui-designer",
+      "name": "界面设计系统顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 界面设计系统顾问, 为产品界面梳理视觉层级、组件、响应式行为、状态与无障碍要求，形成可交接的文字设计规范。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 界面设计系统顾问 reference tool and a concise visual artifact representing 定义色彩、排版、间距、层级和语义状态等设计令牌\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-2c789f1a-57b6-4a89-89ac-78b86acfa4f4.png",
+      "generated_source_sha256": "94be74e5069c3f108994d7bf42064e89d327f333a12409c0c8881fd505063be9",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "ed0c7b01098d9a9b2d4954b472ab07ecf51f4fa32cb4eb5d4e73ba00fdcc144f",
+      "path": "static/assets/zhinang/roles/design-ui-designer-e7a8ee9a6804.webp",
+      "sha256": "ea1e439bfe1950541c69ecb534be3574055a53faabe8685affb57a81e75f11a1"
+    },
+    {
+      "role_id": "agency:design/design-ux-researcher",
+      "name": "用户体验研究顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 用户体验研究顾问, 帮助团队明确研究问题、制定访谈与可用性测试方案、整理研究证据，并将发现转化为可验证的产品改进假设。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 用户体验研究顾问 reference tool and a concise visual artifact representing 定义研究目标、关键问题、目标参与者和招募筛选条件\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-4cba371a-2cbf-4b27-8a84-c37b8d4c1433.png",
+      "generated_source_sha256": "c7e4b8344d4ff95b6ba25551d5b1a667a116f7b2e870df814814ffb05750999b",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "f693e7987d8ba4db5a5bb9ae21251a9843fbfd2e70ca8ab63ab8b18b7afd36cc",
+      "path": "static/assets/zhinang/roles/design-ux-researcher-c43c413e20f5.webp",
+      "sha256": "7d4bbad0180a709e85ae356383bd6b4137d331d2f6cc70bb362c0d18dd049dfd"
+    },
+    {
+      "role_id": "agency:paid-media/paid-media-programmatic-buyer",
+      "name": "程序化与展示媒体规划顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 程序化与展示媒体规划顾问, 帮助规划展示、视频、DSP、合作媒体和 ABM 投放的受众、库存、品牌安全、频次和衡量框架。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 程序化与展示媒体规划顾问 reference tool and a concise visual artifact representing 比较 GDN、DSP、合作媒体和 ABM 的投放场景\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-935e42da-778b-4789-8e16-e221ac3acd49.png",
+      "generated_source_sha256": "ef1d08f64f5d50ba265ac6e2c2018477331e0a283f870212882d9ad42948bb47",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "b9f7b82e0669429e7f98a6fdb19da3d981bd5525e1e4970c5cf11b32918ccef4",
+      "path": "static/assets/zhinang/roles/paid-media-programmatic-buyer-8a70db3a22f4.webp",
+      "sha256": "8281703cb2caddcc3024e1e18ba0bc8d4cf4b684b26b83d7b7ea757f1d789fd4"
+    },
+    {
+      "role_id": "agency:game-development/game-audio-engineer",
+      "name": "交互音频系统顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 交互音频系统顾问, 为 SFX、配乐、语音和空间声提出可交接的事件、参数、预算和中间件集成方案。; one clear professional occupational figure with exactly two concrete props: a recognizable 交互音频系统顾问 work tool (not a logo) and a visible artifact representing 规划 FMOD、Wwise 或引擎音频事件命名、总线与参数边界\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b9e75b6b-846a-4a27-9263-d1eb7d64832a.png",
+      "generated_source_sha256": "9ad5deb943b6d170a5e1f274877eb7838567c0d16a6ddfcb72de16931c6b3680",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "fa2d4fea689383ff0f6d8f04a91f0399c34ba1290760fe8e44524099f3e131a5",
+      "path": "static/assets/zhinang/roles/game-audio-engineer-b6faf8165469.webp",
+      "sha256": "054214dbb0c7cb447eb20deda37d810374b0a2f545febcb8f60b065dabe32a9a"
+    },
+    {
+      "role_id": "agency:project-management/project-management-experiment-tracker",
+      "name": "实验设计与追踪顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 实验设计与追踪顾问, 帮助团队把产品假设转为可审阅的实验方案、观测指标、风险护栏、分析方法和学习记录。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 实验设计与追踪顾问 reference tool and a concise visual artifact representing 定义问题、可证伪假设、主指标、护栏指标和决策条件\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-8329c469-4d43-45e9-8959-b9468d9b6dab.png",
+      "generated_source_sha256": "93face4eb2a90d44c19ea7b1ea0e3393285b8de82321a2a5e36c3b83bee9b809",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "1d548bfde0e210abcc5ab4d7727fbb9495bac4d862050c6e4554981947ab4a01",
+      "path": "static/assets/zhinang/roles/project-management-experiment-tracker-419238346b3a.webp",
+      "sha256": "684698c283b3eeddc94647efc4e1bd873ff4e52d95d669de1de2520548c66718"
+    },
+    {
+      "role_id": "agency:project-management/project-management-project-shepherd",
+      "name": "跨团队项目协调顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 跨团队项目协调顾问, 为跨职能项目梳理目标、里程碑、依赖、风险、利益相关方沟通和可追溯的推进方案。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 跨团队项目协调顾问 reference tool and a concise visual artifact representing 分解项目目标、范围、里程碑、关键依赖和验收条件\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-38cfbbbe-f6f6-4fd9-a6eb-5017354b9250.png",
+      "generated_source_sha256": "37af305349b0fe675c2ae43cd4a59b69fb29ca4609cf306c0572b3ce1fb5b4db",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "99aa7152ffbb083cf950b92b810f70d0e2f266cac7d47fe4069ed76af6eba6ca",
+      "path": "static/assets/zhinang/roles/project-management-project-shepherd-6eb174511b32.webp",
+      "sha256": "370678de2666ba96b2e376b8717536165507dfbb72ff54deeb265eaff30d7511"
+    },
+    {
+      "role_id": "agency:project-management/project-manager-senior",
+      "name": "需求拆解与任务规划顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 需求拆解与任务规划顾问, 根据用户提供的需求，把范围、技术约束和验收目标拆为可执行、可检查且避免无依据扩张的任务清单。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 需求拆解与任务规划顾问 reference tool and a concise visual artifact representing 提炼已明确的需求、技术栈、范围缺口与验收条件\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-e6c4116d-7ad5-44c5-86ed-ffdcf5f735ed.png",
+      "generated_source_sha256": "b6754e070795ed4b6f4f230d81067f9cc1c402cdf44666fc5d1509d8d0f570b4",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "2e1724286887add7efd7197da8f80bc29963025914846de0f2a359175c63a61d",
+      "path": "static/assets/zhinang/roles/project-manager-senior-8cbac9f3bf11.webp",
+      "sha256": "c61f30edd123859a30b99f7e95d93443c3c9be92d5b21c72efdc3b83d9d512ad"
+    },
+    {
+      "role_id": "agency:spatial-computing/macos-spatial-metal-engineer",
+      "name": "macOS Spatial 与 Metal 渲染顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: macOS Spatial 与 Metal 渲染顾问, 为 macOS 与 Vision Pro 场景梳理 Swift、Metal、空间图形渲染和交互的技术方案、性能风险与验证路径。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable macOS Spatial 与 Metal 渲染顾问 reference tool and a concise visual artifact representing 规划节点、连线和空间布局的 GPU 渲染数据流与资源管理\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-9535f074-07b6-4f8b-8da4-855f5f19649f.png",
+      "generated_source_sha256": "34e890cd585fa23fa6a61584e031cf920bfc81bf9fc08bb0870670d0b82bc059",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "30f8bd09a71f62eecc2a7e2ac443ba9f99f8a2c5f1a8b33a7b9979ab6cc472d7",
+      "path": "static/assets/zhinang/roles/macos-spatial-metal-engineer-584ae7168477.webp",
+      "sha256": "a2df76adcdcb6200ad3854882b2b39871bf485bd75255a6ecfb9de4d3195225a"
+    },
+    {
+      "role_id": "agency:spatial-computing/xr-cockpit-interaction-specialist",
+      "name": "XR 座舱交互设计顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: XR 座舱交互设计顾问, 为坐姿 XR 座舱、指令台和训练模拟场景设计控制布局、输入反馈、舒适性和操作约束的文字方案。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable XR 座舱交互设计顾问 reference tool and a concise visual artifact representing 规划方向盘、推杆、拨杆、仪表、开关和状态反馈的控制分区\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-614ede3f-e620-42fc-9815-8762fe6448f8.png",
+      "generated_source_sha256": "f216c0e8f192a1345e526812779c7edddbe36000e846ade099f5733e2c1e5c88",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "4dbf38c5f857812aacefb46496cca6184cf9e7cef7000c92fd99e3af342d06d3",
+      "path": "static/assets/zhinang/roles/xr-cockpit-interaction-specialist-9725f94ab4f5.webp",
+      "sha256": "662847a12c963b9dbd60ea4ef83f5f6fd14a9ece7d7f25703a208808fe07b1f2"
+    },
+    {
+      "role_id": "agency:specialized/loan-officer-assistant",
+      "name": "贷款流程协调助手",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 贷款流程协调助手, 为贷款申请资料、里程碑、合规期限、条件跟踪和借款人沟通设计受控的运营支持流程。; depict one clear professional occupational figure with at most two distinctive props that convey the role: 梳理申请目的、资料清单、文件有效期和处理阶段; 建立披露、利率锁定、估值、承保条件和交割节点的提醒结构; 设计借款人补件、状态更新和待办交接的清晰沟通模板\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and no extra characters; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, floating UI panels, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-1275af57-8a56-42d7-b7c7-f5b635a779bd.png",
+      "generated_source_sha256": "2b127db6467859a82d157368f002c8b976e16000377ecf0e9c51d38f21aaf516",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "5d6df38c2d85ccfed31c14cbeb439af4b2408560bec9d2b79367012691a580c3",
+      "path": "static/assets/zhinang/roles/loan-officer-assistant-6f487c40dbea.webp",
+      "sha256": "bfcb38883d65d60e2f97b2afa6377c0fb41265f5e598a7ceee3f394888908e22"
+    },
+    {
+      "role_id": "agency:specialized/medical-billing-coding-specialist",
+      "name": "医疗账单与编码审阅助手",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 医疗账单与编码审阅助手, 协助整理医疗收费、编码、拒付和审计的流程、文档要求与复核问题，供合格人员处理。; depict one clear professional occupational figure with at most two distinctive props that convey the role: 梳理就诊记录、诊断/操作编码、修饰符、医疗必要性和收费之间的复核关系; 设计申报、拒付分类、补件、申诉和应收账龄跟踪结构; 建立编码准确性、文档支持、签名、日期和异常模式的审计清单\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and no extra characters; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, floating UI panels, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b2716ef1-0932-4acd-b554-e7e0b13aff9e.png",
+      "generated_source_sha256": "7de92adeb1f4c86adb57595cee670f2f86e193def947954557f6d9e67fa3d11f",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "46a6a57c67ab8d162be7699990204be5f2ea8eb78ac6177c9aa0bce3c85e6c4d",
+      "path": "static/assets/zhinang/roles/medical-billing-coding-specialist-f1cc888b78e0.webp",
+      "sha256": "4454b9a65b703b7a77501aabea0951b13763294a0ca01513c591e59fd72af2e7"
+    },
+    {
+      "role_id": "agency:specialized/personal-growth-mentor",
+      "name": "个人成长规划助手",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 个人成长规划助手, 帮助用户澄清目标、复盘习惯与障碍、制定可持续行动计划，并在需要时建议专业支持。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 个人成长规划助手 reference tool and a concise visual artifact representing 把宽泛愿望拆成价值、目标、行为和可观察的进展信号\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-7af6f199-e974-433f-a12c-cbd5e02d6824.png",
+      "generated_source_sha256": "eed4ad7506b240cfdebf99ed4fb415f42108ab9b365f2cfc66fcb19e10c4376a",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "8f3c7ccf3918591d19cae6419fcbf29ec476de0bd7d24d8fadad35f4753fc402",
+      "path": "static/assets/zhinang/roles/personal-growth-mentor-4679b218f87d.webp",
+      "sha256": "c7d601f23d21cbe90ad917cff285aa7efe538f5f80470d0214a9d4d170cc2903"
+    },
+    {
+      "role_id": "agency:specialized/report-distribution-agent",
+      "name": "销售报告分发流程顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 销售报告分发流程顾问, 为按区域和角色分发销售报告设计权限、排程、投递确认、失败处理与审计记录。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 销售报告分发流程顾问 reference tool and a concise visual artifact representing 定义区域、销售人员、管理者和汇总报表之间的最小可见范围\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-a70487d7-5ea4-4b51-9cd4-ad867824dd87.png",
+      "generated_source_sha256": "168dc1b2d2bb86cff9f5e7bfb9517e44faf0d3b80e3496d7955fc9f39ae4f215",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "7a9f5dab5e9fe0ae0ffa6c7a468e2098b0d1048fc4e9a8ef13b1b748ffdc8d06",
+      "path": "static/assets/zhinang/roles/report-distribution-agent-9a7510a7d27a.webp",
+      "sha256": "b83b11e321fd9807fd83d016f47185abde9372cf4e45df20b2c3fb36fe9aba3f"
+    },
+    {
+      "role_id": "agency:specialized/sales-data-extraction-agent",
+      "name": "销售数据提取顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 销售数据提取顾问, 为销售系统和材料中的字段提取、清洗、校验与下游报表输入设计可追溯的数据处理规则。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 销售数据提取顾问 reference tool and a concise visual artifact representing 定义客户、商机、联系人、金额、阶段和日期等提取字段与来源\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b8324976-4d2c-417e-9a33-8c12bfc7e383.png",
+      "generated_source_sha256": "50426a5d290098b14a1c2e064586d9b488b31d0d619ce9911d6d9a07e6a06202",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "35cc03202927e61f966bb41cbb2de02fb114511607eebd8ed46eb66a3f2d637a",
+      "path": "static/assets/zhinang/roles/sales-data-extraction-agent-167ac8313e66.webp",
+      "sha256": "83b4febf35ecd515a0c8cfaead26672eeceb8095381a3b776c3ff3898aeaaef6"
+    },
+    {
+      "role_id": "agency:specialized/specialized-civil-engineer",
+      "name": "土木与结构工程分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 土木与结构工程分析顾问, 协助梳理结构受力、岩土条件、规范适用与施工文件的分析框架，适用于需明确设计依据和复核边界的工程讨论。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 土木与结构工程分析顾问 reference tool and a concise visual artifact representing 梳理重力、风、地震等荷载及 ULS/SLS 校核所需输入\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-973c2fdd-b7b7-411e-a1b2-6b3b3132baab.png",
+      "generated_source_sha256": "b05a54c1315d89bdcffeaef48133c19efcd623aa14136bcc0e368f2b7f1efff4",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "bc5b7884b36b77f082f54598af132494ec5ffdd2383d18d90731a5984472b218",
+      "path": "static/assets/zhinang/roles/specialized-civil-engineer-92382dea9c31.webp",
+      "sha256": "f9f251a16a65e44f7024c3d569bc0d63fcd53b742dd4f1a6a60b6ccf32d009a8"
+    },
+    {
+      "role_id": "agency:specialized/sales-outreach",
+      "name": "销售触达策略顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 销售触达策略顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a message envelope with an outreach sequence of three connected dots. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-e1954312-0ca9-423a-9af8-260a358e66a6.png",
+      "generated_source_sha256": "973bce19c0d014f0242c1fd738f8dad1fd5fec813212475aa733768c0449c85c",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "758e32973aaba9655016cc0f3f89ebdbf3e24f66f9b8998f160c2da38c9a3a4d",
+      "path": "static/assets/zhinang/roles/sales-outreach-e59e920e20f7.webp",
+      "sha256": "f1eb0d503abbf5d85eee1f9b0545e9f31a209b433f87759e7e94badaa544da75"
+    },
+    {
+      "role_id": "agency:specialized/change-management-consultant",
+      "name": "组织变革管理顾问",
+      "prompt": "组织变革管理顾问，手持小旗帜和阶梯路线图，表达人员采纳、沟通培训与持续巩固；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-3911807a-3509-4ec2-ab84-c7526efd2f32.png",
+      "generated_source_sha256": "b466e296c2ea49fc85b5233568b6ca89b9d1949ac62826bbb5239c2ab6c23b49",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6bc0bc16b9e71976815e4f796cf1316187c62ccc5525398c29b54f5ef3da0152",
+      "path": "static/assets/zhinang/roles/change-management-consultant-c5060a48824b.webp",
+      "sha256": "b628f598e2fda7310cb5dcb4c8ee25384aa9bf013961ddb0076620dea34bdcac"
+    },
+    {
+      "role_id": "agency:game-development/godot/godot-multiplayer-engineer",
+      "name": "Godot 多人网络顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: Godot 多人网络顾问, 围绕 Godot 4 的权威模型、RPC、场景复制和传输选择，设计可审阅的实时多人网络方案。; one clear professional occupational figure with exactly two concrete props: a recognizable Godot 多人网络顾问 work tool (not a logo) and a visible artifact representing 定义服务器权威状态、客户端输入请求与服务端校验的职责分界\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-6b3eda1b-f567-4b21-bba2-6efab67c052f.png",
+      "generated_source_sha256": "faec7088e855ead925303777068f390105eae79826278ec83fa1f952dac8e201",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "e9d3e8efe2f41386ab87ba447dd6a4448c671cc7ca60bde4b42d092418d768b1",
+      "path": "static/assets/zhinang/roles/godot-multiplayer-engineer-fafc883ebf9b.webp",
+      "sha256": "a670e39536699adabb187097f971fb6afc6592e2d8e7e78a9de4ba936e39ab82"
+    },
+    {
+      "role_id": "agency:specialized/specialized-document-generator",
+      "name": "程序化文档生成方案顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 程序化文档生成方案顾问, 帮助为 PDF、PPTX、DOCX 和 XLSX 选择生成方案、模板与可访问性要求，并规划可复用的数据驱动文档结构。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 程序化文档生成方案顾问 reference tool and a concise visual artifact representing 根据受众、用途和数据特征选择 PDF、PPTX、DOCX 或 XLSX 输出方案\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-33062cd8-e030-42f0-9583-9b9e8d9df8f0.png",
+      "generated_source_sha256": "57d535307ec4a488ff63dc280639b693256513077803ed413271622a2e7df43a",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "9dd726ab09dd8d13e7a9f54f8f762fea18c8984a28b313e68cca6b20da79ed9f",
+      "path": "static/assets/zhinang/roles/specialized-document-generator-9b3a815e5f47.webp",
+      "sha256": "11acec001b0e053e7a604205711a12c9b4eb33e5f460587db0bc530e2e70670c"
+    },
+    {
+      "role_id": "agency:specialized/specialized-korean-business-navigator",
+      "name": "韩国商务沟通导航顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 韩国商务沟通导航顾问, 为涉韩业务准备关系建立、层级沟通、会议礼仪和决策流程的观察与沟通方案，避免把文化框架当作个体判断。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 韩国商务沟通导航顾问 reference tool and a concise visual artifact representing 梳理 품의、层级、关系与会议后协调等决策沟通要素\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-dc839b58-6f63-495f-90f9-1f6e0753a1cf.png",
+      "generated_source_sha256": "840e4f46774fa1cc407bda2ddfaf141652891fbb7af7db7beb1ac1821db409ae",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "02f2ad83904292143f90e40258e601eb79f0e6668d52d26b216039906e07cfc5",
+      "path": "static/assets/zhinang/roles/specialized-korean-business-navigator-012920d9f9ac.webp",
+      "sha256": "34379019c6ea9c965031bcf6a76fc2050863d05d2d0338dc03424783b898e36e"
+    },
+    {
+      "role_id": "agency:specialized/specialized-model-qa",
+      "name": "机器学习模型质量审计顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 机器学习模型质量审计顾问, 以独立、可复现的证据链审阅机器学习和统计模型的数据、性能、校准、可解释性与监控准备情况。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 机器学习模型质量审计顾问 reference tool and a concise visual artifact representing 梳理模型方法、数据管道、审批和监控文档的审计范围\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b00c75df-a0fd-45ca-8636-0bc47fd844c8.png",
+      "generated_source_sha256": "3c688082e0011a27473a0b6d92e182dc824627233e14fe69e7c3272a30b2e49d",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "aea0df0685e71e94586832937f8030a9fcff3b76185ab6e2993f9327ff6070a7",
+      "path": "static/assets/zhinang/roles/specialized-model-qa-bc07f21391f4.webp",
+      "sha256": "cc4f47e955e76c15f8c45ff50f6acf3053a57d00e0783593c6d982d8bb349fca"
+    },
+    {
+      "role_id": "agency:specialized/specialized-strategy-duel-agent",
+      "name": "策略推演与博弈分析助手",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 策略推演与博弈分析助手, 用回合制情景推演、博弈思考和兵法视角帮助比较竞争行动与反制，但不将推演当作现实预测。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 策略推演与博弈分析助手 reference tool and a concise visual artifact representing 定义参与方、目标、约束、信息不对称和可选行动\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-4c08899d-a42b-4336-a0d0-86384c4eced5.png",
+      "generated_source_sha256": "246fb4097009487b66be6a88be19edfeed1e9e2226b936529fc38645db273818",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "e2acd0b88c7ca8cca9afbc30cc12205d0ca05f52c31049738d9256c2f52b3c73",
+      "path": "static/assets/zhinang/roles/specialized-strategy-duel-agent-acf42e49d30b.webp",
+      "sha256": "455866f6606f802ea62a332412b7d7e89dfcb498c66514c84f665ecdc8206582"
+    },
+    {
+      "role_id": "agency:specialized/supply-chain-strategist",
+      "name": "供应链与采购策略顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 供应链与采购策略顾问, 以供应商、成本、质量、库存、交付和合规的全链路视角，帮助制定可追溯的采购与供应风险管理方案。; one clear professional occupational figure with exactly two concrete role-specific props: a clearly recognizable 供应链与采购策略顾问 reference tool and a concise visual artifact representing 梳理采购支出、供应商结构、库存和交付中的风险热点\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-833846f0-54a0-46fd-9fd3-cc840ce30ebc.png",
+      "generated_source_sha256": "359b47ced4ec87e5e9f8774792298f8772378770c04a16b52c6e2d9f2ee61b48",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "0747b09b4135102c79a4004d823d88cea2f5c73eeb7385afe44226c6e96c3d75",
+      "path": "static/assets/zhinang/roles/supply-chain-strategist-58702477ae8e.webp",
+      "sha256": "47e3bb8f25dbddc5e8eeaa05fbb43eaea0193d53473d6d5e30cc36def9cdc64c"
+    },
+    {
+      "role_id": "agency:specialized/specialized-codebase-archaeologist",
+      "name": "代码库演进与漂移审计顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 代码库演进与漂移审计顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a layered code archive box and a branching timeline. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-52c3af6f-1371-4033-8fad-f637a304eea7.png",
+      "generated_source_sha256": "067c967649e38269b91dcdfef55249707219e8705ebabe239431ab9464e0602e",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "5a8714804706880f02c405732ceaf24b77300b537a16b3045f859ba719ddb1a9",
+      "path": "static/assets/zhinang/roles/specialized-codebase-archaeologist-f65bb7387b1a.webp",
+      "sha256": "af7369f0dab16e88b74c81ecbcca8bc97867a4fc7d4d0876e1151745d6631805"
+    },
+    {
+      "role_id": "agency:specialized/specialized-fedramp-rmf-compliance",
+      "name": "FedRAMP 与 RMF 合规证据顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: FedRAMP 与 RMF 合规证据顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a compliance shield and an evidence binder. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-84a0efc0-4285-4cdd-9cf9-b74ca8190bbc.png",
+      "generated_source_sha256": "3ff18cf21af1d1030ddc9d94b72fd3d7af82dd7e7edd7c2bea470c49b0a36fad",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "3e2279c4afc0a8d2cf10086af975d90cf42479e984711017ae661a0fe3b9633a",
+      "path": "static/assets/zhinang/roles/specialized-fedramp-rmf-compliance-e6af31cdf566.webp",
+      "sha256": "165537e4c756465a7690bfde2dc4b47f2fff1875c632e5a2b156e32d6919f46c"
+    },
+    {
+      "role_id": "agency:specialized/specialized-master-plan-architect",
+      "name": "工程实施蓝图与风险审阅顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 工程实施蓝图与风险审阅顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a rolled engineering blueprint and a warning-risk marker. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-5a8cd22b-3792-4d26-81fa-5a9f62c8d162.png",
+      "generated_source_sha256": "78d9de684d086e35f8563f919a6cc114d973df05b8f80500475ab2a0a12a0e13",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "a19a275df7bf89c2202350bc0db82db55329bbad07112b1ee1c15a8eb686da41",
+      "path": "static/assets/zhinang/roles/specialized-master-plan-architect-25762f753218.webp",
+      "sha256": "6e9fbb47a4d72d3d522fa01f727eded625c80c337e2307c322f29e3b6e238309"
+    },
+    {
+      "role_id": "agency:specialized/customer-service",
+      "name": "客户服务流程顾问",
+      "prompt": "客户服务流程顾问，手持客服耳麦和服务流程卡，表达咨询、投诉、升级场景的同理和可追溯处理；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-ec9e1032-050b-4c67-9f7f-8d90963e9a12.png",
+      "generated_source_sha256": "89265588192e1bcb0dd60325b7565a91e7a22697f1513707e1ff2c11abd68049",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "4d7fa2c5336427bca412da665c4c26ac18316c7b2d94e99ea2dea7e1a39b0f2a",
+      "path": "static/assets/zhinang/roles/customer-service-7cdef3671d87.webp",
+      "sha256": "c35de2719b2fafff3036fef2613ae7967014765c004a2b1ad308d2555a54c8b4"
+    },
+    {
+      "role_id": "agency:specialized/data-privacy-officer",
+      "name": "数据隐私治理顾问",
+      "prompt": "数据隐私治理顾问，手持隐私锁和数据档案卡，表达最小化、权利请求、事件响应与第三方治理；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-c9e122dd-6991-4f60-a739-6270bddb8b99.png",
+      "generated_source_sha256": "7f61edd31f8a52a8388507f0c0b4a20398e1722addf2bc37db1de27a674947ca",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "77f225b021ea9729285c400953e0dc0732d8c455ab075cc0e39ff968fd9901ce",
+      "path": "static/assets/zhinang/roles/data-privacy-officer-b21c4677404e.webp",
+      "sha256": "09259f694593f2b654318867255e0fc8cb977c041dd2ab6f9b4f970a7148b88f"
+    },
+    {
+      "role_id": "agency:game-development/narrative-designer",
+      "name": "游戏叙事系统顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 游戏叙事系统顾问, 将角色声音、分支选择、世界设定和环境叙事连接到玩法后果，形成可实现、可审阅的叙事设计。; one clear professional occupational figure with exactly two concrete props: a recognizable 游戏叙事系统顾问 work tool (not a logo) and a visible artifact representing 定义主题问题、情绪弧线、角色声音支柱和对话的戏剧功能\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-cf819268-75ee-4491-b95a-6b78dfdf15ac.png",
+      "generated_source_sha256": "0f4c31be3654086b1f4feb3e5e5436134961472df0b1ef635557c9a37400f890",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "e1b56191d55d00ed2ef9bc9037a9dcc2d6a05afe7ace5d9b7104e699aa06246d",
+      "path": "static/assets/zhinang/roles/narrative-designer-016ea3282564.webp",
+      "sha256": "5d350009f4653dff4402518f2f71179d3168b48cd06d36aa7c405754551227cd"
+    },
+    {
+      "role_id": "agency:game-development/roblox-studio/roblox-systems-scripter",
+      "name": "Roblox 系统脚本顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: Roblox 系统脚本顾问, 围绕 Luau 模块、服务端权威、Remote 通信和持久化安全，为 Roblox 体验形成可审阅的系统架构。; one clear professional occupational figure with exactly two concrete props: a recognizable Roblox 系统脚本顾问 work tool (not a logo) and a visible artifact representing 划分 LocalScript、服务端 Script、ModuleScript 和共享常量的职责\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-9de46040-bb94-4cb1-af3d-e393436b9ae3.png",
+      "generated_source_sha256": "52f0cf29c494c209f3b2c7d6bcc1a6cd68760cc3e56b33163b2dcdee9309b321",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "7692534fde28e0636242b42c187c55c84ac1ee2d166e422209c84943596edbc6",
+      "path": "static/assets/zhinang/roles/roblox-systems-scripter-c3768c3e0315.webp",
+      "sha256": "4a019f4290c2813079bb586bcce70efa70571540a519b7d1415c7512a1ccc840"
+    },
+    {
+      "role_id": "agency:game-development/unity/unity-editor-tool-developer",
+      "name": "Unity 编辑器工具顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: Unity 编辑器工具顾问, 把重复的 Unity 资产检查、Inspector 编辑和构建前校验转为可撤销、可追踪的编辑器工具规格。; one clear professional occupational figure with exactly two concrete props: a recognizable Unity 编辑器工具顾问 work tool (not a logo) and a visible artifact representing 选择 EditorWindow、PropertyDrawer、CustomEditor、AssetPostprocessor 或构建校验的适用形式\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-e27cc530-addc-4647-a147-8f16c952cdb7.png",
+      "generated_source_sha256": "122817183931be910f7ac16f9bc8d4a62ba6389e3c4a76b2dfc561da6f604ea8",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6a111bb5f274dc98a334fefd7a09029d7ab50e2514da2af9950cd8639d2946c6",
+      "path": "static/assets/zhinang/roles/unity-editor-tool-developer-8b287cf54a52.webp",
+      "sha256": "8ef4989f732aee7d4aa21135737b40a29e156fc80246cb3bdd969a40d33cb24c"
+    },
+    {
+      "role_id": "agency:finance/finance-fpa-analyst",
+      "name": "预算与经营规划顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 预算与经营规划顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a budget ledger and a forecast trend curve. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-734daf20-c8d5-4edb-b2e8-aaeb78b98042.png",
+      "generated_source_sha256": "2a13bc2a113f5451c08b1c9711b91239df960370c915dd55baf6abc914d00825",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "9081034e3bc8f9bb877e789a7f238fdcf56f6a00bd6b57ec74187016f5dad8de",
+      "path": "static/assets/zhinang/roles/finance-fpa-analyst-18c49a189f2d.webp",
+      "sha256": "1681085d8958bf21d7f35084b77798ce9e360924ae9c2aea61f1a529c5a2d938"
+    },
+    {
+      "role_id": "agency:specialized/specialized-pricing-analyst",
+      "name": "定价策略分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 定价策略分析顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a price-tag token and a balance-scale chart. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-4c74542b-870a-43bf-a47f-68c9857aec3a.png",
+      "generated_source_sha256": "256204f4367b845cb1737a96a250dd492f44bbd21b37606ff9f414d7a0532dc3",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "14c522ed66aafb12f4b031c70a17ce6f8a0514d9190c0b1a0106a034382e884e",
+      "path": "static/assets/zhinang/roles/specialized-pricing-analyst-09cb2f11792e.webp",
+      "sha256": "29b96ad565581ddef7f87fe8110c5d39864c37a3c5ba5b63a2e030985748375e"
+    },
+    {
+      "role_id": "agency:specialized/specialized-workflow-architect",
+      "name": "业务流程与状态契约顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 业务流程与状态契约顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a state-flow diagram and a contract seal. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-d17a4816-f299-40f6-ace9-965f06542860.png",
+      "generated_source_sha256": "d2f0e32a18cefbf1a524e5cfc9ee595d2e1a0c0d1726bda0efe805d25d435a1b",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "833a82ff2e2b68add0a283fc1f58ceba3ac0133732fbe30fe444263c9a734d76",
+      "path": "static/assets/zhinang/roles/specialized-workflow-architect-0fba503ea68c.webp",
+      "sha256": "ae94c4af15171df24df0ddb8eb7b0960d2c5381f40fa67a34549247889458be5"
+    },
+    {
+      "role_id": "agency:specialized/zk-steward",
+      "name": "知识库结构与笔记治理助手",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 知识库结构与笔记治理助手.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a knowledge-tree notebook and a tidy folder hierarchy. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-fabb9ff6-16eb-47ed-8a89-e6f38967833c.png",
+      "generated_source_sha256": "d7150acbc3cb85919ed45d86890aaef6729d8fe6b3025e06af207f8bc30f2f55",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "7347a565443886fcf9a81a9fd540b92baf5efc6de233f554d79ba2fa70d9121a",
+      "path": "static/assets/zhinang/roles/zk-steward-ba2e3cf83fd9.webp",
+      "sha256": "c9338e57d99628835f5e9240004b715a5bfa8e09c4546aa88954e4d4f820b00e"
+    },
+    {
+      "role_id": "agency:specialized/healthcare-aging-parent-care-companion",
+      "name": "长者照护协调助手",
+      "prompt": "长者照护协调助手，亲和专业照护协调者，手持药盒和预约日历卡，表达用药、预约与家庭沟通协调；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-03b92fe1-952d-4adc-8f37-0c223f02574f.png",
+      "generated_source_sha256": "563315af39ce97dbc425ed462523a0e0d6b2548e9342061cdf188e4693e88fad",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "0c2920e7a247a1fc44c376f39868a8c860515583784f82dabd52df0b7978aade",
+      "path": "static/assets/zhinang/roles/healthcare-aging-parent-care-companion-dc13a559075a.webp",
+      "sha256": "89a6f8028c1526c8e256a9ec472fa84498f382d7742179998f8e9d6d6116c1b6"
+    },
+    {
+      "role_id": "agency:specialized/hospitality-guest-services",
+      "name": "酒店宾客服务流程顾问",
+      "prompt": "酒店宾客服务流程顾问，专业礼宾人员，手持行李标签和礼宾钥匙，表达预订、到店、在住与离店服务流程；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-e0bb3e1f-84bc-434b-bbd2-94d5fb176180.png",
+      "generated_source_sha256": "8746290aa9d6ecec67b8737a364b9d5f70f8da596f5665d67cbec84866cf59ec",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "18724d9f4f670f32b39129a31253918e0291856f6d2d324834e8b5dbfdef438d",
+      "path": "static/assets/zhinang/roles/hospitality-guest-services-79f948d56a9c.webp",
+      "sha256": "6a926cc9923324085e51fb877304b41006ca86803dffa1496a94a64beb4d6548"
+    },
+    {
+      "role_id": "agency:game-development/unreal-engine/unreal-multiplayer-architect",
+      "name": "Unreal 多人网络架构顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: Unreal 多人网络架构顾问, 围绕 UE5 Actor 复制、GameMode/GameState 层级、RPC、GAS 和专用服务器，制定服务器权威的多人架构。; one clear professional occupational figure with exactly two concrete props: a recognizable Unreal 多人网络架构顾问 work tool (not a logo) and a visible artifact representing 划分 GameMode、GameState、PlayerState、PlayerController 与 Actor 的网络职责\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-c7b56142-5fbc-4d07-ab1f-f6a2d9fce002.png",
+      "generated_source_sha256": "dc8c1749e06f985502dadc3c033df8b6c0f3ebad881b2258686300c2f3f44dd0",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "833bd11b99463dd6f55fc21a1c5cf57bf4b5527ee4f64f1b9d202915ce8d1ec3",
+      "path": "static/assets/zhinang/roles/unreal-multiplayer-architect-50d4f3310ba4.webp",
+      "sha256": "52d2423174eff8d26573413203631224d4c9774f49ebb5ad95e9434d448c5462"
+    },
+    {
+      "role_id": "agency:game-development/unreal-engine/unreal-world-builder",
+      "name": "Unreal 开放世界构建顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: Unreal 开放世界构建顾问, 为 UE5 大世界的 World Partition、Landscape、PCG、HLOD、流送和环境预算形成可验证的世界构建方案。; one clear professional occupational figure with exactly two concrete props: a recognizable Unreal 开放世界构建顾问 work tool (not a logo) and a visible artifact representing 按世界密度与目标平台规划 World Partition 网格、加载范围、数据层和流送源\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-ba663bff-ec00-49e2-be24-6324b8344da6.png",
+      "generated_source_sha256": "0bf5a28793d3ea6c7787722129914074afa5f629960f7b130735aafe380668be",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "5d4d90d3167c5ce4eb7512f390d59000a6d00a0871c98efa73ec23d6014bb1a2",
+      "path": "static/assets/zhinang/roles/unreal-world-builder-2f7b21762f66.webp",
+      "sha256": "0e875517ada48834180da0ab0f187eef643f75e81377766d9f510411df61692b"
+    },
+    {
+      "role_id": "agency:support/support-finance-tracker",
+      "name": "财务跟踪与预算顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 财务跟踪与预算顾问, 帮助团队整理预算、支出、现金流、项目成本、差异和财务风险的跟踪口径与复核清单。; one clear professional occupational figure with exactly two concrete props: a recognizable 财务跟踪与预算顾问 work tool (not a logo) and a visible artifact representing 定义预算、实际、承诺、预测、现金流和项目成本的分类与口径\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-36c1f48c-9470-48fd-a9e4-b2ba0e788142.png",
+      "generated_source_sha256": "81aa980c91654a69109190e54e17dd6e8e3e1db719acf9f7d7033a25149c12ea",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "05d8828cc141cd349c15a3615f768c70ccca2a3e7a0703019d9c3223977c4584",
+      "path": "static/assets/zhinang/roles/support-finance-tracker-673d516e4ec0.webp",
+      "sha256": "1d1c10655de541c9fa2224aed784934a561decf1c76e37e75b48117f8fba3e51"
+    },
+    {
+      "role_id": "agency:academic/academic-anthropologist",
+      "name": "文化系统与民族志分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 文化系统与民族志分析顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a field-notes journal and a cultural pattern artifact. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-64df8ac8-6a7d-4dcc-b9cc-ad9772a98825.png",
+      "generated_source_sha256": "4fad34b43e9c766d15a34e87d81fd6b5d04b6fc25efa7315dfd0fe61fb377e1a",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "92f8ecae22540cfe834d6b5744df49806e003c861ff224a38a47032ff07683d4",
+      "path": "static/assets/zhinang/roles/academic-anthropologist-b406dca1ba76.webp",
+      "sha256": "4e5a9685b0001eaa7a649c669eb30be8eb9f069ec5c4ed12b101b3e6dbbde6fb"
+    },
+    {
+      "role_id": "agency:academic/academic-narratologist",
+      "name": "叙事结构与视角分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 叙事结构与视角分析顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a story arc ribbon and a perspective lens. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-97b72f12-6f3d-4b88-8cb0-a47a3a548c03.png",
+      "generated_source_sha256": "65b51f2bfa29cf62a487740a75c99ffb4b25f37f3279c2263063bb74062b38e2",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "37e297a842cf5c0dafd7a3a14a372549a71cba7496165412dd7ae2ff86187d06",
+      "path": "static/assets/zhinang/roles/academic-narratologist-1b9f90cb2e94.webp",
+      "sha256": "05e441bfd792d9024cdce9e6a8216d8785a52bcfde5ed6ce849c9f0cc24de66f"
+    },
+    {
+      "role_id": "agency:healthcare/healthcare-clinical-evidence-agent",
+      "name": "临床证据与主张审阅顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 临床证据与主张审阅顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a clinical evidence document and a medical check badge. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-db0de9fe-e88c-4cc4-8230-94e71c393864.png",
+      "generated_source_sha256": "0509991680cb5542045a3eb567c5f5bbb0e443a2df703b091cf8cc5c158a483c",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "28cf07ba36cd0c0eda56f6dbab1e6d463db226f5d14a8fa4318048d51bfe3ec3",
+      "path": "static/assets/zhinang/roles/healthcare-clinical-evidence-agent-e7cbec1618c5.webp",
+      "sha256": "de87e48a84e523273dfcc79635602a92c4210406909bbc598ae3aa9d7a6b3c7b"
+    },
+    {
+      "role_id": "agency:specialized/legal-document-review",
+      "name": "法律文件审阅助手",
+      "prompt": "法律文件审阅助手，专业文件审阅者，手持封口合同卷宗和放大镜，表达结构化摘要、差异比对与风险清单；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-418427f1-49a2-481e-9d7e-b2a45f99d2a4.png",
+      "generated_source_sha256": "7f27338c36fc0668300a8a7168135d80357db473833e11279adfabc1dbec7937",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "3d8ed882d4466da23bd71a482137e6aed64996c7b4b263e92d61605655edac5b",
+      "path": "static/assets/zhinang/roles/legal-document-review-95958a2781bd.webp",
+      "sha256": "cae6a1da9a8711a274c616ea8ccc65d9edec6a6cdfaa098812d9f2f35d642035"
+    },
+    {
+      "role_id": "agency:security/security-architect",
+      "name": "安全架构顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 安全架构顾问, 为系统身份、网络、数据、服务与运营控制形成分层安全架构和风险取舍说明。; one clear professional occupational figure with exactly two concrete props: a recognizable 安全架构顾问 work tool (not a logo) and a visible artifact representing 规划身份认证、授权、最小权限与信任边界\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-f9ce4773-04aa-4dfe-a416-e81ef9a932f2.png",
+      "generated_source_sha256": "13389617168438ede0aa4dee0501b5f24c80ad27b1d087db746988442ac734f6",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "28ae576e1ef387c90c814c96972657696370d2496fb7d9f5e7714e63f572ff2e",
+      "path": "static/assets/zhinang/roles/security-architect-3d256a80ce84.webp",
+      "sha256": "d9e6797c96924ca5ed5108f02db353a4d05ff5c395dca5808fad9624a47e7404"
+    },
+    {
+      "role_id": "agency:security/security-compliance-auditor",
+      "name": "安全合规审阅顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 安全合规审阅顾问, 将控制要求、证据、缺口和整改责任整理为可复核的安全合规准备材料。; one clear professional occupational figure with exactly two concrete props: a recognizable 安全合规审阅顾问 work tool (not a logo) and a visible artifact representing 映射政策、控制、资产、证据和责任关系\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-e4eeaffc-a0f4-4790-93cf-4ebfd00e106c.png",
+      "generated_source_sha256": "bf2ece6b8b01e7ecf700486237ed3c5193b89522c44aa9dce980c77ecf5129b6",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "b570a7b96b8976ab0437277df49525a953f6bc8491a733c49049b4765122989c",
+      "path": "static/assets/zhinang/roles/security-compliance-auditor-e4624752b355.webp",
+      "sha256": "cf6c504519a63719bb6cefe048acd662363ffbb4362141b27ace3a2a45f3e894"
+    },
+    {
+      "role_id": "agency:security/security-secrets-credential-engineer",
+      "name": "密钥与凭据工程顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 密钥与凭据工程顾问, 为密钥发现、保管、最小暴露、轮换、访问控制和泄露响应建立防御性管理方案。; one clear professional occupational figure with exactly two concrete props: a recognizable 密钥与凭据工程顾问 work tool (not a logo) and a visible artifact representing 梳理密钥生命周期、所有者、使用位置和暴露面\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-b9c437ca-1950-4570-8f30-1495c5c10955.png",
+      "generated_source_sha256": "78d22fb7b3b1f2e23edb4db7b6d2dfa9c030ef36ae12148c6e4c2a3a1d0118a3",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "6afcb4cba35adc1ecf14dff6c9fb19cbeb818fbdf63d22f89cba87aa94938812",
+      "path": "static/assets/zhinang/roles/security-secrets-credential-engineer-a5668cba64b0.webp",
+      "sha256": "6195ce19471fe94598fa16a7efe48a2602a2199c50b45951895e93d2e11c43d4"
+    },
+    {
+      "role_id": "agency:support/support-support-responder",
+      "name": "客户支持响应顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 客户支持响应顾问, 根据用户提供的客户问题和已知事实，起草同理、清晰的支持回复、排障路径、升级标准和知识库改进建议。; one clear professional occupational figure with exactly two concrete props: a recognizable 客户支持响应顾问 work tool (not a logo) and a visible artifact representing 识别问题类型、影响、紧急度、已知上下文和需要补充的信息\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-f581ac8f-92da-4295-8bee-2270843706e0.png",
+      "generated_source_sha256": "c5010cc4a6af7cbf7a01c0b722527c13e07636bc9c03cdbef70c6090cb5958ce",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "d0803d26fb96faed88cc7ec01f252798ed052eb01a508dc8d200173b1c481dd1",
+      "path": "static/assets/zhinang/roles/support-support-responder-65e518d55f86.webp",
+      "sha256": "6949acb572733c4b9cfc7136ec97cff9a3c3d2162307fb9f68499806ef494a7e"
+    },
+    {
+      "role_id": "agency:design/design-inclusive-visuals-specialist",
+      "name": "包容性视觉审阅顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 包容性视觉审阅顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: an accessibility eye symbol and a diverse-figure circle. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-1c0c9900-5398-49f6-9afa-858008b56cea.png",
+      "generated_source_sha256": "20514f3f446eb2718d4743b88739c2219ad84a89dcac8ae74e5d1754a26fdf53",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "0b305e2f6004806dffb9245165bb8be6f9b58982eaf0600dbb72ef0c358fdbaa",
+      "path": "static/assets/zhinang/roles/design-inclusive-visuals-specialist-8aaec1ada609.webp",
+      "sha256": "e89ecf26b76a6961378ba57c0557bf5f8587b3dd0ba58ca1ab390107bd248303"
+    },
+    {
+      "role_id": "agency:paid-media/paid-media-paid-social-strategist",
+      "name": "付费社交媒体策略顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 付费社交媒体策略顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a campaign megaphone and a target audience cluster. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-301e149b-9fbf-4d21-aee5-93c91302ec79.png",
+      "generated_source_sha256": "14e196da5c3b0675a0b0d6be7966342c8536aa19606f0eb1de7bfdc0adf76d2e",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "d1b6862ad41dc348d71b6b041c8a287c8265a41d29d5239b854cf78cf42aa37b",
+      "path": "static/assets/zhinang/roles/paid-media-paid-social-strategist-220da02024aa.webp",
+      "sha256": "000a77fb61e296c26303c35e7162d8ebef046b6ad305da1c5b62c39260a4369e"
+    },
+    {
+      "role_id": "agency:paid-media/paid-media-search-query-analyst",
+      "name": "搜索词与否定词分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 搜索词与否定词分析顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a search magnifier and a keyword filter funnel. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-0df3ccd5-747c-441c-923b-5e879aafafb5.png",
+      "generated_source_sha256": "73381d25612f7725f61930afaa9f546f85db69aa9e36529f5c5088a372499d98",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "7cbd03a6bae44ef83c3e8dc104edb4bad0f7add31f78ebeeae45e6f528f57ff5",
+      "path": "static/assets/zhinang/roles/paid-media-search-query-analyst-6dcb9ffbf8fd.webp",
+      "sha256": "274113eaa057e432b0dd86be3ed7e15caa19339116d1b37737fe31782d2ab01c"
+    },
+    {
+      "role_id": "agency:research/research-synthesist",
+      "name": "文献检索与证据综合顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: professional role icon\nPrimary request: 文献检索与证据综合顾问.\nScene/backdrop: opaque pale ice-blue studio background.\nSubject: exactly one professional human-like figure with these exact role-specific props: a stack of research papers and a citation-link network. No tablet, no pen.\nStyle/medium: polished lightweight 3D character render, premium enterprise icon.\nComposition/framing: centered square composition, large dominant subject, clean silhouette.\nLighting/mood: soft studio light.\nColor palette: muted blue, cyan, navy, matte finishes.\nConstraints: no readable text, no logos, no brands, no watermark, no robot, no extra characters.",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074f1-470a-74f2-a330-83bba74d1b7b/exec-a13dd6ea-8b5d-4200-96be-4ce6176a39a3.png",
+      "generated_source_sha256": "dd13fe39189fa109fcbb7c0aafbbbc07577be7b30b99ad549335528d8309c27b",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "922dbbdad633b6b20d31246778b115df8ccab1c8d4763d5b88c7a50d21108702",
+      "path": "static/assets/zhinang/roles/research-synthesist-c4829ff81a95.webp",
+      "sha256": "4838aee9e16f3acfed5a2f4df59dc90959264eea3ad8f136ae4e59b0e4f63317"
+    },
+    {
+      "role_id": "agency:specialized/language-translator",
+      "name": "英西语翻译助手",
+      "prompt": "英西语翻译助手，严格两只手：左手翻译词典，右手托两个相连抽象对话气泡；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印、无第三只手。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-c539d6ca-9486-4ebe-bff1-d09ccdbd66bd.png",
+      "generated_source_sha256": "e4b2d05bac93e6b2d231d7286dd4e2b94382098d893afe1a0e78fa6dee26ac6c",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "b6554d61b2edfcc6639c276628a50ba93eee00a2fa1de06b18026d153ab85246",
+      "path": "static/assets/zhinang/roles/language-translator-5da79bba2ee5.webp",
+      "sha256": "49c909b8a7d67b5f6bb11d20c785a747b37b7d6e6ce87d2696142d3a142f5682"
+    },
+    {
+      "role_id": "agency:specialized/ma-integration-manager",
+      "name": "并购整合项目顾问",
+      "prompt": "并购整合项目顾问，手持两块正在拼合的企业模块和百日路线图，表达首日连续性、协同与整合治理；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-98c0df50-95e4-41e8-958b-aaf30117c32a.png",
+      "generated_source_sha256": "13be527155fdacdff9d9c95f651b56c075e9849784fa0c30f6f28db47247afaa",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "e2b013bb36b1262ee81b214536363f85ce7eb89f3a715aafbeb6760f78454c8f",
+      "path": "static/assets/zhinang/roles/ma-integration-manager-06a698447082.webp",
+      "sha256": "c341e0bb0990f220d66afe48386ac995fb6a9cc59f73767fcd20e3d4a7ce9f92"
+    },
+    {
+      "role_id": "agency:specialized/organizational-psychologist",
+      "name": "组织心理与团队效能顾问",
+      "prompt": "组织心理与团队效能顾问，手持心形对话气泡和团队拼图环，表达心理安全、协作、倦怠与文化诊断；精致轻量3D、蓝青海军蓝、哑光材质、淡冰蓝背景、无文字品牌水印。",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074ef-8fed-7cd2-952a-d861a7f623bd/exec-927af723-92c2-4f28-a34f-899adb23dc43.png",
+      "generated_source_sha256": "9ec09786a2094c39c03d0d430a61a406c6a8066733d2097f2505da8418903244",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "d8fae3e735df2cc26936c3de0ce3e36ddf9154c9831ed536e3e9bca59cc27ee4",
+      "path": "static/assets/zhinang/roles/organizational-psychologist-59b8af898806.webp",
+      "sha256": "762a8dd7110e9d70ff472108671a5c1e8896382c27226269777810b7d83bd3a8"
+    },
+    {
+      "role_id": "agency:security/security-threat-intelligence-analyst",
+      "name": "威胁情报分析顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 威胁情报分析顾问, 对用户提供的威胁信息进行来源、置信度、TTP、IOC 和防御行动的结构化分析。; one clear professional occupational figure with exactly two concrete props: a recognizable 威胁情报分析顾问 work tool (not a logo) and a visible artifact representing 定义情报需求、受众、来源可靠性和处理标记\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-448c6e89-76fd-4752-b5fc-293c2dfd0c0a.png",
+      "generated_source_sha256": "bef30c6417727c6fcb5bd0a67d5065685ca92aca6791b1a1e0725bb22def848a",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "8a9e2a569c94eb255fdd11d0cd612299ef3942bdc6ce50c2a795d681d31cef90",
+      "path": "static/assets/zhinang/roles/security-threat-intelligence-analyst-3a53abd5bfb4.webp",
+      "sha256": "688dfc123262d0c3a04412a2944600c2bf4884120c00306085802363158dde18"
+    },
+    {
+      "role_id": "agency:testing/testing-evidence-collector",
+      "name": "视觉证据与现实核查顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 视觉证据与现实核查顾问, 将需求、运行态截图、交互前后状态和测试记录对应起来，帮助识别未被证据支持的实现或完成声明。; one clear professional occupational figure with exactly two concrete props: a recognizable 视觉证据与现实核查顾问 work tool (not a logo) and a visible artifact representing 把需求条款映射为应观察的页面、交互和测试证据\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-17c7a478-a076-4534-82d2-2f0299e63849.png",
+      "generated_source_sha256": "aef2c49b8f5b18b5f235183b77e5a5a339ff50722d3fc6cb4f9b6469cbe75944",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "bfa3cb282eefc6020899b754d372bc6c0c651494cc74cfe6a5e59955804520f1",
+      "path": "static/assets/zhinang/roles/testing-evidence-collector-ac039e199705.webp",
+      "sha256": "f2a274864d4c3f813b5804799c79f3c3b75f0fb8508c5cd4397b2688e018da75"
+    },
+    {
+      "role_id": "agency:testing/testing-test-automation-engineer",
+      "name": "端到端自动化测试顾问",
+      "prompt": "Use case: stylized-concept\nAsset type: square role avatar icon\nScene/backdrop: opaque pale ice-blue studio background\nSubject: 端到端自动化测试顾问, 围绕 Playwright/Cypress 的稳定选择器、隔离数据、条件等待、失败工件和 CI 并行化设计可信的端到端测试。; one clear professional occupational figure with exactly two concrete props: a recognizable 端到端自动化测试顾问 work tool (not a logo) and a visible artifact representing 选择应由浏览器覆盖的关键用户旅程并避免测试金字塔倒置\nStyle/medium: refined lightweight 3D icon, soft matte polymer, polished enterprise product illustration\nComposition/framing: centered single figure, large subject filling most of the square canvas, both props clearly visible and readable at small icon size, clean silhouette\nLighting/mood: soft diffused studio lighting, calm capable professional mood\nColor palette: blue, cyan, navy, subtle cool highlights\nMaterials/textures: smooth soft matte polymer with gentle edge highlights\nText (verbatim): none\nConstraints: no text, numbers, brand logos, watermark, border, frame, or generic robot; exactly one person and exactly two props; opaque pale ice-blue background; square composition\nAvoid: photorealism, clutter, tiny unreadable details, extra screens, generic humanoid robot",
+      "source_png": "/Users/bwb/.codex/generated_images/01a074e1-954c-7b72-a5f8-106f87ba9129/exec-d2c975fb-93dd-490d-b2c6-9618ba680c9d.png",
+      "generated_source_sha256": "2da6b16e5b1cd34dcd49b24f8735de071a11e0b6576c7a541025a686bd2d8bbb",
+      "generated_source_dimensions": [
+        1254,
+        1254
+      ],
+      "source_sha256": "c1410a88d75c0cba47ee1b4e0e7594711fa695920f98d8fcb6e853db6bde4f22",
+      "path": "static/assets/zhinang/roles/testing-test-automation-engineer-f1a24f187328.webp",
+      "sha256": "7c857a1cd997f16dc5ff007a8af903a592b2c50a34d64e09279c2dcb0134ff1b"
     }
   ]
 }
