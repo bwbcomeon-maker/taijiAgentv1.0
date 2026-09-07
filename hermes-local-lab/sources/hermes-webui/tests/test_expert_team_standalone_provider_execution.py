@@ -332,6 +332,8 @@ def test_legacy_dispatch_binds_actual_runtime_without_rewriting_session_selectio
 def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
     monkeypatch, tmp_path
 ):
+    from dataclasses import replace
+
     from api import config, oauth, profiles, routes, streaming
     import hermes_constants
 
@@ -385,7 +387,9 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         lambda provider, api_key, base_url: (provider, api_key, base_url),
     )
 
-    context = routes._resolve_standalone_legacy_provider_context(_strict_request())
+    context = routes._resolve_standalone_legacy_provider_context(
+        replace(_strict_request(), provider="openai-codex")
+    )
 
     assert context == {
         "provider": "openai-codex",
@@ -400,11 +404,54 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
     assert calls == [
         ("profile", None),
         ("set", tmp_path),
-        ("model_context", "gpt-receipt", "openai"),
+        ("model_context", "gpt-receipt", "openai-codex"),
         ("model_resolve", "@openai:gpt-receipt"),
         ("resolve", {"requested": "openai-codex"}),
         ("reset", "profile-token"),
     ]
+
+
+def test_standalone_provider_binding_identity_normalizes_explicit_hint_and_rejects_mismatch(
+):
+    from api import routes
+    from api.runtime_adapter import build_strict_provider_context
+
+    (
+        expected_provider,
+        expected_model,
+        _expected_base_url,
+    ) = routes._resolve_standalone_provider_binding_identity(
+        model="@zai:glm-5.3-flash",
+        provider="zai",
+    )
+    assert (expected_provider, expected_model) == ("zai", "glm-5.3-flash")
+    routes._validate_standalone_runtime_provider_context(
+        build_strict_provider_context(
+            provider="zai",
+            model="glm-5.3-flash",
+            api_mode="chat_completions",
+            transport="openai_chat_completions",
+        ),
+        expected_provider=expected_provider,
+        expected_model=expected_model,
+    )
+    with pytest.raises(ValueError, match="model binding drifted"):
+        routes._validate_standalone_runtime_provider_context(
+            build_strict_provider_context(
+                provider="zai",
+                model="glm-5.3",
+                api_mode="chat_completions",
+                transport="openai_chat_completions",
+            ),
+            expected_provider=expected_provider,
+            expected_model=expected_model,
+        )
+
+    with pytest.raises(ValueError, match="Provider selection"):
+        routes._resolve_standalone_provider_binding_identity(
+            model="@openai:gpt-5.4-mini",
+            provider="zai",
+        )
 
 
 @pytest.mark.parametrize(
@@ -426,6 +473,8 @@ def test_provider_network_scope_is_server_classified_without_exposing_endpoint(b
 def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
     monkeypatch, tmp_path
 ):
+    from dataclasses import replace
+
     from api import config, oauth, profiles, routes, streaming
     import hermes_constants
 
@@ -455,7 +504,9 @@ def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
     )
 
     with pytest.raises(routes._ExpertTeamModelConfigurationRequired):
-        routes._resolve_standalone_legacy_provider_context(_strict_request())
+        routes._resolve_standalone_legacy_provider_context(
+            replace(_strict_request(), provider="deepseek")
+        )
 
 
 def _ready_direct_run(workspace: Path) -> dict:
@@ -648,6 +699,189 @@ def test_execution_route_ignores_client_provider_override_and_dispatches_exact_c
     assert "client-forged" not in repr(request)
 
 
+def test_execution_route_accepts_canonical_runtime_model_for_explicit_provider_hint(
+    monkeypatch, tmp_path
+):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    session.model = "@zai:glm-5.3-flash"
+    session.model_provider = "zai"
+    dispatches = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda _request: {
+            "provider": "zai",
+            "model": "glm-5.3-flash",
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda _self, request: dispatches.append(request)
+        or runtime_adapter.RunStartResult(
+            run_id="hint-runtime-run",
+            session_id=request.session_id,
+            stream_id="hint-runtime-stream",
+            payload={"stream_id": "hint-runtime-stream", "turn_id": "hint-turn"},
+        ),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 200, payload
+    assert len(dispatches) == 1
+
+
+def test_execution_route_keeps_qualified_receipt_model_but_passes_canonical_model_to_worker(
+    monkeypatch, tmp_path
+):
+    """The provider API must receive its bare model ID without rewriting the receipt."""
+    from api import expert_teams, routes
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    session.model = "@zai:glm-5.3-flash"
+    session.model_provider = "zai"
+    worker_call = {}
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda _request: {
+            "provider": "zai",
+            "model": "glm-5.3-flash",
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda _session, **kwargs: worker_call.update(kwargs)
+        or {"stream_id": "canonical-stream", "session_id": session.session_id},
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 200, payload
+    assert worker_call["model"] == "@zai:glm-5.3-flash"
+    assert worker_call["runtime_model"] == "glm-5.3-flash"
+    assert session.model == "@zai:glm-5.3-flash"
+    assert session.model_provider == "zai"
+
+
+def test_v1_resume_defers_start_reservation_until_stage_gateway_inputs_are_built(
+    monkeypatch, tmp_path
+):
+    """A source-bound stage must not reserve an empty input-ref contract."""
+    from api import expert_teams, routes
+    from tests.test_expert_team_v2_runtime import _post
+
+    run = _ready_direct_run(tmp_path)
+    reserve_calls = []
+    starts = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _session_id: tmp_path)
+    monkeypatch.setattr(expert_teams, "read_expert_team_run", lambda *_args: deepcopy(run))
+    monkeypatch.setattr(routes, "_expert_team_run_with_execution_truth", lambda _workspace, value: value)
+    monkeypatch.setattr(expert_teams, "resume_expert_team", lambda *_args: deepcopy(run))
+    monkeypatch.setattr(
+        expert_teams,
+        "reserve_expert_team_execution_start",
+        lambda *_args, **kwargs: reserve_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_expert_team_execution",
+        lambda _workspace, value, _body, *, already_reserved=False: starts.append(
+            (value, already_reserved)
+        )
+        or ({"ok": True, "run": value}, 202),
+    )
+
+    handler = _post(
+        routes,
+        "/api/expert-teams/resume",
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "stage_id": "materials",
+            "idempotency_key": "resume-source-bound-materials",
+        },
+    )
+
+    assert handler.status == 202
+    assert reserve_calls == []
+    assert starts == [(run, False)]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("other-provider", "glm-5.3-flash"), ("zai", "glm-5.3-flash-drift")],
+)
+def test_execution_route_rejects_changed_runtime_binding_before_worker(
+    monkeypatch, tmp_path, provider, model
+):
+    from api import expert_teams, routes
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    session.model = "@zai:glm-5.3-flash"
+    session.model_provider = "zai"
+    worker_calls = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda selected_model, selected_provider: (selected_model, selected_provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda _request: {
+            "provider": provider,
+            "model": model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda *_args, **_kwargs: worker_calls.append(True),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 503
+    assert payload["code"] == "runtime_incompatible"
+    assert worker_calls == []
+
+
 def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(monkeypatch, tmp_path):
     from api import expert_teams, routes, runtime_adapter
     from api.expert_teams import runtime as expert_team_runtime
@@ -656,6 +890,7 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
     session = _direct_session(tmp_path)
     order = []
     requests = []
+    reserve_kwargs = []
     monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
     _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
     monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
@@ -701,11 +936,41 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
                 {"role": "user", "content": '{"source_context":"frozen"}'},
             ],
             "tools_disabled": True,
-            "input_refs": [],
+            "input_refs": [
+                {
+                    "ref_type": "source_context",
+                    "snapshot_id": "source-context-test",
+                    "sha256": "a" * 64,
+                },
+                {
+                    "ref_type": "stage_artifact",
+                    "artifact_id": "plan:3",
+                    "sha256": "b" * 64,
+                },
+            ],
         }
 
     monkeypatch.setattr(expert_teams, "prepare_research_sources_for_gateway", prepare)
     monkeypatch.setattr(routes, "_expert_team_enterprise_gateway_request", gateway)
+
+    def reserve(_workspace, _run_id, **kwargs):
+        order.append("reserve")
+        reserve_kwargs.append(kwargs)
+        reserved = deepcopy(run)
+        reserved.update(
+            {
+                "workflow_state": "starting",
+                "execution_start_id": "start-prepared-inputs",
+                "execution_runtime_adapter": "LegacyJournalRuntimeAdapter",
+                "current_stage_attempt_reservation": {
+                    "reservation_id": "stage-prepared-inputs",
+                    "stage_attempt": 1,
+                },
+            }
+        )
+        return reserved
+
+    monkeypatch.setattr(expert_teams, "reserve_expert_team_execution_start", reserve)
 
     def capture_start(self, request):
         requests.append(request)
@@ -721,7 +986,25 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
     payload, status = routes._start_expert_team_execution(tmp_path, run, {})
 
     assert status == 200, payload
-    assert order == ["prepare", "gateway"]
+    assert order == ["prepare", "gateway", "reserve"]
+    assert reserve_kwargs == [
+        {
+            "expected_version": run["version"],
+            "runtime_adapter": "LegacyJournalRuntimeAdapter",
+            "input_refs": [
+                {
+                    "ref_type": "source_context",
+                    "snapshot_id": "source-context-test",
+                    "sha256": "a" * 64,
+                },
+                {
+                    "ref_type": "stage_artifact",
+                    "artifact_id": "plan:3",
+                    "sha256": "b" * 64,
+                },
+            ],
+        }
+    ]
     assert len(requests) == 1
 
 

@@ -286,14 +286,56 @@ def _catalog_stage(run: dict, stage: dict) -> dict:
     return declared
 
 
-def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
-    """Return human-authorized dependency artifacts in declared order.
+def _research_v2_automatic_approval_matches(
+    run: dict,
+    output: dict,
+    dependency: str,
+    artifact: dict,
+    approved_refs: dict,
+) -> bool:
+    """Accept only the server-owned automatic approval for research-report/v2."""
+    profile = run.get("launch_profile_snapshot")
+    if not isinstance(profile, dict) or not (
+        str(run.get("product_mode") or "") == "standalone"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(profile.get("id") or "") == "research-report"
+        and str(profile.get("research_contract_version") or "") == "research-report/v2"
+        and str(output.get("status") or "") == "approved"
+        and str(output.get("approval_kind") or "") == "automatic_contract_validation"
+    ):
+        return False
+    artifact_id = str(artifact.get("artifact_id") or "")
+    artifact_sha256 = str(artifact.get("sha256") or "")
+    try:
+        stage_attempt = int(artifact.get("stage_attempt"))
+    except (TypeError, ValueError):
+        return False
+    if stage_attempt <= 0 or approved_refs.get(dependency) != {
+        "artifact_id": artifact_id,
+        "sha256": artifact_sha256,
+    }:
+        return False
+    for approval in run.get("automatic_stage_approvals") or []:
+        if not isinstance(approval, dict):
+            continue
+        try:
+            approval_attempt = int(approval.get("stage_attempt"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            str(approval.get("schema_version") or "") == "automatic-stage-approval/v1"
+            and str(approval.get("stage_id") or "") == dependency
+            and str(approval.get("artifact_id") or "") == artifact_id
+            and str(approval.get("artifact_sha256") or "") == artifact_sha256
+            and approval_attempt == stage_attempt
+        ):
+            return True
+    return False
 
-    Enterprise approvals and standalone local confirmations use different
-    persisted status names.  Both are authorization decisions, but a local
-    confirmation is accepted only when its immutable artifact reference is
-    present in both the canonical approval map and the confirmation journal.
-    """
+
+def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
+    """Return dependency artifacts with the authorization required by this run."""
     template = get_template(str(run.get("team_id") or ""))
     stage = next((item for item in template.get("tasks") or [] if item.get("id") == stage_id), None)
     if not isinstance(stage, dict):
@@ -303,7 +345,6 @@ def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
         str(run.get("product_mode") or "") == "standalone"
         and str((run.get("review_policy") or {}).get("kind") or "") == "local_confirmation"
     )
-    required_status = "confirmed" if standalone_confirmation else "approved"
     approved_refs = (
         run.get("approved_stage_artifact_refs")
         if isinstance(run.get("approved_stage_artifact_refs"), dict)
@@ -316,23 +357,33 @@ def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
     )
     selected = []
     for dependency in stage.get("depends_on") or []:
-        output = next(
-            (
-                item
-                for item in reversed(outputs)
-                if isinstance(item, dict)
-                and item.get("task_id") == dependency
-                and item.get("status") == required_status
-                and isinstance(item.get("artifact"), dict)
-            ),
-            None,
-        )
+        output = None
+        automatic_approval = False
+        for candidate in reversed(outputs):
+            if (
+                not isinstance(candidate, dict)
+                or candidate.get("task_id") != dependency
+                or not isinstance(candidate.get("artifact"), dict)
+            ):
+                continue
+            if not standalone_confirmation and candidate.get("status") == "approved":
+                output = candidate
+                break
+            if standalone_confirmation and candidate.get("status") == "confirmed":
+                output = candidate
+                break
+            if standalone_confirmation and _research_v2_automatic_approval_matches(
+                run, candidate, dependency, candidate["artifact"], approved_refs
+            ):
+                output = candidate
+                automatic_approval = True
+                break
         if output is None:
             raise PromptContractError("approved_dependency_missing", f"缺少已批准阶段产物：{dependency}")
         artifact = deepcopy(output["artifact"])
         if not str(artifact.get("artifact_id") or "") or not str(artifact.get("sha256") or ""):
             raise PromptContractError("approved_artifact_ref_invalid", "已批准产物缺少不可变引用")
-        if standalone_confirmation:
+        if standalone_confirmation and not automatic_approval:
             expected_ref = approved_refs.get(dependency)
             immutable_ref = {
                 "artifact_id": str(artifact.get("artifact_id") or ""),
@@ -352,7 +403,6 @@ def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
                 )
         selected.append(artifact)
     return selected
-
 
 def _latest_stage_protocol_error(run: dict, stage_id: str) -> dict | None:
     outputs = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
@@ -473,6 +523,12 @@ def _system_message(
         "发现后必须在 reviewed DOCUMENT 中修正，并在 review_report.change_summary 中如实概括；"
         "不得只复制上一阶段正文后直接宣告检查通过。"
         "修正仅限表达和已批准结构，不得借校对新增事实、数字、来源或结论。"
+        "必须逐项对照冻结 document_brief、批准资料台账与正文：核实关键数字、条件和结论，"
+        "检查 content_constraints.must_include 与 must_avoid；负责人和期限只在 Brief 要求或该文种必需时检查。"
+        "发现无依据事实、关键需求遗漏或未处置矛盾时，必须写入 review_report.issues，"
+        "severity 必须为 blocking 或 error；如仍未解决，必须同步写入 payload.open_issues 和 unresolved_issue_ids。"
+        "如实更新对应 checks 与 change_summary；不能以自报 passed 代替核对。"
+        "无法确定的语义问题应明确列为审稿问题，不得把日期、编号、条目序号、明确待补资料或未来建议误报为既成事实。"
         "payload.open_issues 中 status=open 的每一项必须原样复制到 payload.review_report.issues；"
         "review_report.issues 可以额外包含本次审稿发现且 status=resolved 的问题；"
         "unresolved_issue_ids 必须与 review_report.issues 中 status=open 的 issue_id 集合完全一致。"
@@ -541,6 +597,17 @@ def _system_message(
             "claim_usage 中每个 claim_id 必须且只能出现一次，不得虚构来源、URL、"
             "引用标记、脚注或空参考文献条目。"
         )
+        if artifact_type in {"research_document_draft", "reviewed_research_document"}:
+            task_specific_rule += (
+                "对每个 origin_tier=model_knowledge 的 claim，必须在其 "
+                "claim_usage.section_id 对应的 DOCUMENT 章节完整逐字保留该 claim.statement"
+                "（允许 Unicode 与空白规范化，不得改写、删节或拆分），"
+                "并在同一段落以“模型知识·未核验”明示；每个 claim 至少一处独立标签，"
+                "同一章节可以额外添加保守的未核验说明。"
+                "若该 claim 复述的是 Brief 已提供但缺少外部来源的背景，"
+                "应说明“用户提供的背景，原文待核验”；“模型知识·未核验”只说明核验状态，"
+                "不表示该背景由模型生成。"
+            )
     elif document_type == "research_report" or artifact_type in {
         "research_document_draft",
         "reviewed_research_document",

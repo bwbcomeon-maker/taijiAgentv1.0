@@ -98,6 +98,354 @@ def _ready_run(expert_teams, workspace, session_id="sid-v2"):
     )
 
 
+def test_content_polish_source_patch_replaces_only_its_fixed_provided_text_ref():
+    from api.expert_teams.runtime import merge_content_polish_original_source_patch
+
+    run = {
+        "launch_profile_snapshot": {"id": "content-polish"},
+        "document_brief": {
+            "source_policy": {
+                "source_refs": [
+                    {"source_id": "SRC-KEEP", "kind": "attachment", "label": "已有资料", "locator": "kept.txt"},
+                    {"source_id": "SRC-POLISH-ORIGINAL", "kind": "provided_text", "label": "待润色原文", "text": "旧原文"},
+                ]
+            }
+        },
+    }
+    patch = {
+        "source_policy": {
+            "source_refs": [
+                {
+                    "source_id": "SRC-POLISH-ORIGINAL",
+                    "kind": "provided_text",
+                    "label": "待润色原文",
+                    "text": "新原文",
+                }
+            ]
+        }
+    }
+
+    merged = merge_content_polish_original_source_patch(run, patch)
+
+    assert merge_content_polish_original_source_patch(run, None) is None
+
+    assert merged["source_policy"]["source_refs"] == [
+        {"source_id": "SRC-KEEP", "kind": "attachment", "label": "已有资料", "locator": "kept.txt"},
+        {
+            "source_id": "SRC-POLISH-ORIGINAL-" + hashlib.sha256("新原文".encode("utf-8")).hexdigest(),
+            "kind": "provided_text",
+            "label": "待润色原文",
+            "text": "新原文",
+        },
+    ]
+    conflicting = {
+        **run,
+        "document_brief": {
+            "source_policy": {
+                "source_refs": [
+                    {"source_id": "SRC-POLISH-ORIGINAL-" + ("a" * 64), "kind": "local_file"}
+                ]
+            }
+        },
+    }
+    from api.expert_teams.contracts import ContractError
+
+    with pytest.raises(ContractError) as conflict:
+        merge_content_polish_original_source_patch(conflicting, patch)
+    assert conflict.value.code == "source_conflict"
+
+
+def test_content_polish_view_replays_original_only_while_brief_is_editable():
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    run = expert_teams.build_standalone_expert_team_run(
+        {
+            "launch_profile_id": "content-polish",
+            "session_id": "sid-polish-source-view",
+            "prompt": "润色试点说明",
+            "idempotency_key": "start-polish-source-view",
+        },
+        run_id="et-polish-source-view",
+    )
+    empty = expert_team_run_view(run)["brief"]["source_policy_summary"]
+    assert empty["polish_original_enabled"] is True
+    assert empty["polish_original_text"] == ""
+
+    run["document_brief"]["source_policy"]["source_refs"] = [
+        {"source_id": "SRC-POLISH-ORIGINAL", "kind": "provided_text", "label": "待润色原文", "text": "原始材料正文"}
+    ]
+
+    editable = expert_team_run_view(run)["brief"]["source_policy_summary"]
+    assert editable["polish_original_enabled"] is True
+    assert editable["polish_original_text"] == "原始材料正文"
+
+    run["document_brief"]["source_policy"]["source_refs"].append(
+        {
+            "source_id": "SRC-POLISH-ORIGINAL-" + ("a" * 64),
+            "kind": "provided_text",
+            "label": "待润色原文",
+            "text": "不应猜测的第二份原文",
+        }
+    )
+    ambiguous = expert_team_run_view(run)["brief"]["source_policy_summary"]
+    assert ambiguous["polish_original_enabled"] is True
+    assert ambiguous["polish_original_text"] == ""
+
+    run["workflow_state"] = "generating"
+    frozen = expert_team_run_view(run)["brief"]["source_policy_summary"]
+    assert "polish_original_enabled" not in frozen
+    assert "polish_original_text" not in frozen
+
+
+
+def test_content_polish_empty_sources_can_be_saved_and_confirmed_from_view_entry(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import storage
+    from api.expert_teams.runtime import build_standalone_expert_team_run
+
+    monkeypatch.setattr(storage, "_validate_public_standalone_run", lambda *_args, **_kwargs: None)
+    run = build_standalone_expert_team_run(
+        {
+            "launch_profile_id": "content-polish",
+            "session_id": "sid-polish-empty-source-entry",
+            "prompt": "润色试点说明",
+            "idempotency_key": "start-polish-empty-source-entry",
+        },
+        run_id="et-polish-empty-source-entry",
+    )
+    run = storage.write_run(tmp_path, run)
+    initial_summary = run["view"]["brief"]["source_policy_summary"]
+    assert initial_summary["source_count"] == 0
+    assert initial_summary["polish_original_enabled"] is True
+    assert initial_summary["polish_original_text"] == ""
+
+    updated = expert_teams.update_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "expected_brief_revision": 1,
+            "idempotency_key": "update-polish-empty-source-entry",
+            "patch": {
+                "exact_title": "试点说明润色稿",
+                "purpose": "形成正式说明",
+                "audience": "项目组",
+                "usage_scenario": "内部评审",
+                "details": {"polish_goal": "提升正式性", "expression_boundary": "保留原始事实"},
+                "source_policy": {"source_refs": [{
+                    "source_id": "SRC-POLISH-ORIGINAL",
+                    "kind": "provided_text",
+                    "label": "待润色原文",
+                    "text": "首份待润色原文",
+                }]},
+            },
+        },
+    )
+    assert updated["view"]["brief"]["source_policy_summary"]["polish_original_text"] == "首份待润色原文"
+    confirmed = expert_teams.confirm_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": updated["session_id"],
+            "run_id": updated["run_id"],
+            "expected_version": updated["version"],
+            "expected_brief_revision": 2,
+            "idempotency_key": "confirm-polish-empty-source-entry",
+        },
+    )
+    assert confirmed["document_brief"]["status"] == "confirmed"
+    assert confirmed["source_context_snapshot_ref"]["sha256"]
+
+def test_content_polish_original_round_trip_confirms_snapshot_and_freezes_view(monkeypatch, tmp_path):
+    from api import expert_teams
+    from api.expert_teams import storage
+    from api.expert_teams.contracts import ContractError
+    from api.expert_teams.runtime import build_standalone_expert_team_run
+
+    # This test exercises Brief mutation rather than launch receipt assembly.
+    monkeypatch.setattr(storage, "_validate_public_standalone_run", lambda *_args, **_kwargs: None)
+    run = build_standalone_expert_team_run(
+        {
+            "launch_profile_id": "content-polish",
+            "session_id": "sid-polish-original-roundtrip",
+            "prompt": "润色试点说明",
+            "idempotency_key": "start-polish-original-roundtrip",
+        },
+        run_id="et-polish-original-roundtrip",
+    )
+    run["document_brief"]["source_policy"]["source_refs"] = [
+        {"source_id": "SRC-KEEP", "kind": "provided_text", "label": "保留资料", "text": "保留资料正文"}
+    ]
+    run = storage.write_run(tmp_path, run)
+    original_a = "原始材料正文 A"
+    original_b = "原始材料正文 B"
+    source_a = "SRC-POLISH-ORIGINAL-" + hashlib.sha256(original_a.encode("utf-8")).hexdigest()
+    source_b = "SRC-POLISH-ORIGINAL-" + hashlib.sha256(original_b.encode("utf-8")).hexdigest()
+    patch = {
+        "exact_title": "试点说明润色稿",
+        "purpose": "形成正式说明",
+        "audience": "项目组",
+        "usage_scenario": "内部评审",
+        "details": {"polish_goal": "提升正式性"},
+        "source_policy": {
+            "source_refs": [
+                {
+                    "source_id": "SRC-POLISH-ORIGINAL",
+                    "kind": "provided_text",
+                    "label": "待润色原文",
+                    "text": original_a,
+                    "locator": "must-not-be-read.txt",
+                    "sha256": "not-a-source-hash",
+                }
+            ]
+        },
+    }
+    updated = expert_teams.update_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "expected_brief_revision": 1,
+            "idempotency_key": "update-polish-original-roundtrip",
+            "patch": patch,
+        },
+    )
+    original = updated["document_brief"]["source_policy"]["source_refs"][1]
+    assert original == {
+        "source_id": source_a,
+        "kind": "provided_text",
+        "label": "待润色原文",
+        "text": original_a,
+    }
+    with pytest.raises(ContractError) as incomplete:
+        expert_teams.confirm_expert_team_document_brief(
+            tmp_path,
+            {
+                "session_id": updated["session_id"],
+                "run_id": updated["run_id"],
+                "expected_version": updated["version"],
+                "expected_brief_revision": 2,
+                "idempotency_key": "confirm-polish-original-incomplete",
+            },
+        )
+    assert incomplete.value.code == "required"
+    old_source_path = tmp_path / ".taiji" / "expert-teams" / "sources" / updated["run_id"] / f"{source_a}.txt"
+    assert old_source_path.read_text(encoding="utf-8") == original_a
+    assert updated["view"]["brief"]["source_policy_summary"]["polish_original_text"] == original_a
+
+    completed = expert_teams.update_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": updated["session_id"],
+            "run_id": updated["run_id"],
+            "expected_version": updated["version"],
+            "expected_brief_revision": 2,
+            "idempotency_key": "update-polish-original-b",
+            "patch": {
+                "details": {"expression_boundary": "保留原始事实"},
+                "source_policy": {
+                    "source_refs": [
+                        {
+                            "source_id": "SRC-POLISH-ORIGINAL",
+                            "kind": "provided_text",
+                            "label": "待润色原文",
+                            "text": original_b,
+                        }
+                    ]
+                },
+            },
+        },
+    )
+    confirmed = expert_teams.confirm_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": completed["session_id"],
+            "run_id": completed["run_id"],
+            "expected_version": completed["version"],
+            "expected_brief_revision": 3,
+            "idempotency_key": "confirm-polish-original-b",
+        },
+    )
+    ref_by_id = {item["source_id"]: item for item in confirmed["document_brief"]["source_policy"]["source_refs"]}
+    assert ref_by_id["SRC-KEEP"]["locator"].startswith(".taiji/expert-teams/sources/")
+    assert ref_by_id[source_b]["text"] == original_b
+    assert ref_by_id[source_b]["locator"].startswith(".taiji/expert-teams/sources/")
+    assert "must-not-be-read.txt" not in ref_by_id[source_b].values()
+    snapshot = confirmed["source_context_snapshot_ref"]
+    assert snapshot["sha256"]
+    assert (tmp_path / snapshot["relative_path"]).is_file()
+    snapshot_before = (tmp_path / snapshot["relative_path"]).read_bytes()
+    assert confirmed["view"]["brief"]["source_policy_summary"]["polish_original_text"] == original_b
+
+    for source_ref in (
+        {"source_id": "SRC-POLISH-ORIGINAL", "kind": "provided_text", "label": "待润色原文"},
+        {"source_id": "SRC-POLISH-ORIGINAL", "kind": "provided_text", "label": "待润色原文", "text": "   "},
+    ):
+        with pytest.raises(ContractError) as missing:
+            expert_teams.update_expert_team_document_brief(
+                tmp_path,
+                {
+                    "session_id": confirmed["session_id"],
+                    "run_id": confirmed["run_id"],
+                    "expected_version": confirmed["version"],
+                    "expected_brief_revision": 3,
+                    "idempotency_key": f"reject-polish-original-{len(source_ref)}",
+                    "patch": {"source_policy": {"source_refs": [source_ref]}},
+                },
+            )
+        assert missing.value.code == "invalid_polish_original"
+    unchanged = expert_teams.read_expert_team_run(tmp_path, confirmed["run_id"])
+    assert unchanged["version"] == confirmed["version"]
+    assert unchanged["document_brief"]["source_policy"]["source_refs"] == confirmed["document_brief"]["source_policy"]["source_refs"]
+
+    revised = expert_teams.update_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": confirmed["session_id"],
+            "run_id": confirmed["run_id"],
+            "expected_version": confirmed["version"],
+            "expected_brief_revision": 3,
+            "idempotency_key": "update-polish-original-again",
+            "patch": {
+                "source_policy": {
+                    "source_refs": [
+                        {
+                            "source_id": "SRC-POLISH-ORIGINAL",
+                            "kind": "provided_text",
+                            "label": "待润色原文",
+                            "text": original_a,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+    reconfirmed = expert_teams.confirm_expert_team_document_brief(
+        tmp_path,
+        {
+            "session_id": revised["session_id"],
+            "run_id": revised["run_id"],
+            "expected_version": revised["version"],
+            "expected_brief_revision": 4,
+            "idempotency_key": "confirm-polish-original-again",
+        },
+    )
+    reconfirmed_ref_by_id = {
+        item["source_id"]: item for item in reconfirmed["document_brief"]["source_policy"]["source_refs"]
+    }
+    assert reconfirmed_ref_by_id["SRC-KEEP"]["locator"] == ref_by_id["SRC-KEEP"]["locator"]
+    assert reconfirmed_ref_by_id[source_a]["sha256"] == hashlib.sha256(original_a.encode("utf-8")).hexdigest()
+    assert old_source_path.read_text(encoding="utf-8") == original_a
+    assert (tmp_path / snapshot["relative_path"]).read_bytes() == snapshot_before
+    assert reconfirmed["view"]["brief"]["source_policy_summary"]["polish_original_text"] == original_a
+
+    reconfirmed["workflow_state"] = "generating"
+    frozen = expert_teams.expert_team_run_view(reconfirmed)["brief"]["source_policy_summary"]
+    assert "polish_original_text" not in frozen
+
+
 def _valid_plan_content() -> str:
     return (
         "阶段摘要：已形成专家团执行计划。\n"
@@ -2246,14 +2594,9 @@ def test_http_resume_restarts_recoverable_execution_failure(monkeypatch, tmp_pat
     _configure_route(monkeypatch, routes, tmp_path, session)
     starts = []
 
-    def restart_execution(workspace, run, _body):
+    def restart_execution(workspace, run, _body, *, already_reserved=False):
+        assert already_reserved is True
         starts.append(run["run_id"])
-        reserved = expert_teams.reserve_expert_team_execution_start(
-            workspace,
-            run["run_id"],
-            expected_version=run["version"],
-            runtime_adapter="LegacyJournalRuntimeAdapter",
-        )
         started = expert_teams.mark_expert_team_execution_started(
             workspace,
             run["run_id"],
@@ -2261,7 +2604,7 @@ def test_http_resume_restarts_recoverable_execution_failure(monkeypatch, tmp_pat
                 "stream_id": "stream-http-retry",
                 "runtime_run_id": "stream-http-retry",
                 "runtime_adapter": "LegacyJournalRuntimeAdapter",
-                "execution_start_id": reserved["execution_start_id"],
+                "execution_start_id": run["execution_start_id"],
             },
         )
         return {"ok": True, "run": started, "stream_id": "stream-http-retry"}, 202

@@ -2822,6 +2822,7 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool 
     if isinstance(current, dict):
         pending = str(current.get("pending") or "")
         last_replacement = str(current.get("last_replacement") or "")
+        previous_char = str(current.get("previous_char") or "")[-1:]
         credential_active = bool(current.get("credential_active"))
         credential_quote = str(current.get("credential_quote") or "")
         credential_value_started = bool(current.get("credential_value_started"))
@@ -2829,10 +2830,37 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool 
     else:
         pending = str(current or "")
         last_replacement = ""
+        previous_char = ""
         credential_active = False
         credential_quote = ""
         credential_value_started = False
         credential_escape = False
+
+    def _clean_pending(value: str) -> str:
+        """Apply public scrubbing with the emitted raw boundary retained."""
+        contextual = f"{previous_char}{value}" if previous_char else value
+        cleaned = str(
+            _mask_public_sensitive_text(
+                scrub_brand_leaks(contextual),
+                hide_local_paths=True,
+            )
+        )
+        if previous_char:
+            if cleaned == contextual:
+                return cleaned[len(previous_char):]
+            value_cleaned = str(
+                _mask_public_sensitive_text(
+                    scrub_brand_leaks(value),
+                    hide_local_paths=True,
+                )
+            )
+            # The general redactor has a broader ``sk-`` heuristic than this
+            # stream's credential-start contract. If it only matched across
+            # the emitted boundary (``risk-`` -> ``sk-``), keep the value
+            # result. Any credential wholly within ``value`` still remains
+            # redacted by ``value_cleaned``.
+            return value_cleaned
+        return cleaned
 
     emitted: list[str] = []
     for char in str(delta or ""):
@@ -2866,22 +2894,27 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool 
 
         pending += char
         credential_match = None
+        prefix_length = len(previous_char)
+        window = f"{previous_char}{pending}" if previous_char else pending
         for pattern in _STREAM_CREDENTIAL_START_PATTERNS:
-            match = pattern.search(pending)
-            if match is not None and (
-                credential_match is None or match.start() < credential_match.start()
-            ):
-                credential_match = match
+            for match in pattern.finditer(window):
+                # Re-run each existing pattern against the raw character just
+                # before the rolling window. This retains each pattern's own
+                # lookbehind contract (notably ``_sk-`` is still redactable,
+                # while ``risk-`` is not) after old text has been emitted.
+                start = match.start() - prefix_length
+                if start < 0:
+                    continue
+                if credential_match is None or start < credential_match.start():
+                    credential_match = match
+                break
         if credential_match is not None:
-            safe_prefix = str(
-                _mask_public_sensitive_text(
-                    scrub_brand_leaks(pending[:credential_match.start()]),
-                    hide_local_paths=True,
-                )
-            )
+            credential_start = credential_match.start() - prefix_length
+            safe_prefix = _clean_pending(pending[:credential_start])
             if safe_prefix and safe_prefix != last_replacement:
                 emitted.append(safe_prefix)
             emitted.append(_STREAM_CREDENTIAL_MASK)
+            previous_char = pending[credential_start - 1:credential_start]
             pending = ""
             last_replacement = ""
             credential_active = True
@@ -2891,30 +2924,22 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool 
             continue
         if len(pending) <= _BRAND_STREAM_HOLD_CHARS:
             continue
-        cleaned = str(
-            _mask_public_sensitive_text(
-                scrub_brand_leaks(pending),
-                hide_local_paths=True,
-            )
-        )
+        cleaned = _clean_pending(pending)
         if cleaned != pending:
             if cleaned != last_replacement:
                 emitted.append(cleaned)
             last_replacement = cleaned
+            previous_char = pending[-1:]
             pending = ""
             continue
         emitted.append(pending[0])
         last_replacement = ""
+        previous_char = pending[0]
         pending = pending[1:]
 
     if final:
         if pending:
-            cleaned = str(
-                _mask_public_sensitive_text(
-                    scrub_brand_leaks(pending),
-                    hide_local_paths=True,
-                )
-            )
+            cleaned = _clean_pending(pending)
             if cleaned != last_replacement:
                 emitted.append(cleaned)
         if tail_ref:
@@ -2925,6 +2950,7 @@ def scrub_streaming_token_delta(delta: str, tail_ref: list[Any], *, final: bool 
         tail_ref[0] = {
             "pending": pending,
             "last_replacement": last_replacement,
+            "previous_char": previous_char,
             "credential_active": credential_active,
             "credential_quote": credential_quote,
             "credential_value_started": credential_value_started,

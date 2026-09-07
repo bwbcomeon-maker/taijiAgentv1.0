@@ -431,6 +431,115 @@ def test_delivery_revision_requires_nonempty_feedback(monkeypatch, tmp_path):
         )
 
 
+def test_semantic_delivery_block_can_return_only_the_frozen_review_stage_to_generation(tmp_path):
+    from api.expert_teams import runtime
+    from api.expert_teams.storage import write_run
+    from api.expert_teams.view import expert_team_run_view
+
+    run, _context = _delivery_fixture(tmp_path)
+    review_ref = deepcopy(run["canonical_document_ref"])
+    failed_stage = deepcopy(run["current_stage_attempt_reservation"])
+    failed_delivery = deepcopy(run["current_delivery_attempt_reservation"])
+    failed_stage["status"] = "generated_invalid"
+    failed_delivery["status"] = "generated_invalid"
+    run.update(
+        {
+            "workflow_state": "generated_invalid",
+            "last_execution_error_code": "delivery_semantic_blocked",
+            "last_validation_error": "已确认正文未通过交付语义检查，请退回内容阶段修改",
+            "current_stage_attempt_reservation": failed_stage,
+            "stage_attempt_reservations": [
+                run["stage_attempt_reservations"][0],
+                failed_stage,
+            ],
+            "current_delivery_attempt_reservation": failed_delivery,
+            "delivery_attempt_reservations": [failed_delivery],
+            "current_stage_artifact_ref": {
+                **review_ref,
+                "stage_attempt": 1,
+            },
+            "current_delivery_manifest_ref": None,
+            "pending_system_stage_result": "generated_invalid",
+        }
+    )
+    run = write_run(tmp_path, run)
+    view = expert_team_run_view(run)
+
+    assert view["allowed_actions"] == ["delivery_revise"]
+    assert view["stage_action_binding"] == {
+        "session_id": run["session_id"],
+        "run_id": run["run_id"],
+        "expected_version": run["version"],
+        "stage_id": "delivery",
+        "stage_attempt": 1,
+        "artifact_id": review_ref["artifact_id"],
+        "artifact_sha256": review_ref["sha256"],
+    }
+
+    revised = runtime.request_standalone_expert_team_delivery_revision(
+        tmp_path,
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "stage_id": "delivery",
+            "stage_attempt": 1,
+            "artifact_id": review_ref["artifact_id"],
+            "artifact_sha256": review_ref["sha256"],
+            "idempotency_key": "return-semantic-delivery-block-1",
+            "feedback": "请将每条模型知识分别置于所属章节并逐条标注未核验。",
+        },
+    )
+
+    assert revised["workflow_state"] == "ready_to_generate"
+    assert revised["current_stage"]["task_id"] == "polish"
+    assert revised["canonical_document_ref"] is None
+    assert revised["current_stage_artifact_ref"] is None
+    assert revised["current_delivery_manifest_ref"] is None
+    assert revised["current_stage_attempt_reservation"] is None
+    assert revised["current_delivery_attempt_reservation"] is None
+    assert revised["stage_attempt_reservations"][-1]["status"] == "invalidated"
+    assert revised["delivery_attempt_reservations"][-1]["status"] == "invalidated"
+    assert revised["delivery_revision_feedback"][-1]["stage_id"] == "polish"
+
+
+def test_delivery_revision_does_not_use_the_semantic_return_path_for_other_generated_invalid_states(tmp_path):
+    from api.expert_teams import runtime
+    from api.expert_teams.storage import write_run
+
+    run, _context = _delivery_fixture(tmp_path)
+    run.update(
+        {
+            "workflow_state": "generated_invalid",
+            "last_execution_error_code": "delivery_generation_failed",
+            "current_stage_attempt_reservation": {
+                **run["current_stage_attempt_reservation"],
+                "status": "generated_invalid",
+            },
+        }
+    )
+    run = write_run(tmp_path, run)
+    review_ref = run["canonical_document_ref"]
+
+    with pytest.raises(runtime.ExpertTeamStateConflict) as error:
+        runtime.request_standalone_expert_team_delivery_revision(
+            tmp_path,
+            {
+                "session_id": run["session_id"],
+                "run_id": run["run_id"],
+                "expected_version": run["version"],
+                "stage_id": "delivery",
+                "stage_attempt": 1,
+                "artifact_id": review_ref["artifact_id"],
+                "artifact_sha256": review_ref["sha256"],
+                "idempotency_key": "reject-other-delivery-failure-1",
+                "feedback": "请回退内容阶段。",
+            },
+        )
+
+    assert error.value.code == "stale_state"
+
+
 def test_delivery_rerender_preserves_confirmed_content_and_invalidates_only_docx_lineage(monkeypatch, tmp_path):
     from api.expert_teams import runtime
 

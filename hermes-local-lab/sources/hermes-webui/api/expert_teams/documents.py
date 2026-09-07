@@ -198,6 +198,209 @@ def _markdown_section_body(markdown: str, heading: str) -> str:
     return ""
 
 
+def _section_has_substantive_content(markdown: str, heading: str) -> bool:
+    """Accept prose, populated lists, or populated table cells, never headings alone."""
+
+    body = _markdown_section_body(markdown, heading)
+    body = re.sub(r"(?m)^#{3,6}[ \t]+.*$", "", body)
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        candidate = line.strip()
+        if not candidate or re.fullmatch(r"\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)*\|?", candidate):
+            continue
+        following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if "|" in candidate and re.fullmatch(r"\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)*\|?", following):
+            continue
+        candidate = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", candidate)
+        candidate = re.sub(r"[|*_`\[\]()<>]", "", candidate).strip()
+        if candidate:
+            return True
+    return False
+
+
+_NUMERIC_ASSERTION = re.compile(
+    r"(?P<value>\d[\d,]*(?:\.\d+)?\s*(?:%|％|元|万元|亿元|万|亿|单|项|人|台|套|次))"
+)
+_NUMERIC_FACT_CONTEXT = re.compile(r"营收|同比|环比|完成率|增长率|已完成|完成\d|总计|累计", re.I)
+_COMPLETION_RATE_FORMULA = re.compile(
+    r"完成率\s*[=：:]?\s*(?P<completed>\d[\d,]*)\s*/\s*(?P<planned>\d[\d,]*)\s*=\s*(?P<rate>\d+(?:\.\d+)?)\s*[%％]"
+)
+
+
+def _normalized_fact_text(value: object) -> str:
+    return re.sub(r"[\s,，。；：:（）()]+", "", unicodedata.normalize("NFKC", str(value or "")))
+
+
+def _numeric_metric(text: str) -> str | None:
+    if "同比" in text:
+        return "year_over_year"
+    if "环比" in text:
+        return "period_over_period"
+    if "营收" in text:
+        return "revenue"
+    if "完成率" in text:
+        return "completion_rate"
+    if "增长率" in text:
+        return "growth_rate"
+    if "未完成" in text:
+        return "unfinished_count"
+    if "已完成" in text or re.search(r"完成\s*\d", text):
+        return "completed_count"
+    if "总计" in text or "累计" in text or "计划" in text:
+        return "planned_count"
+    return None
+
+
+def _numeric_value_and_unit(value: str) -> tuple[str, str]:
+    normalized = _normalized_fact_text(value).replace("％", "%")
+    unit = re.search(r"(?:万元|亿元|元|万|亿|%|单|项|人|台|套|次)$", normalized)
+    return (
+        normalized[: -len(unit.group(0))] if unit else normalized,
+        unit.group(0) if unit else "",
+    )
+
+
+def _numeric_clause_context(text: str, start: int, end: int) -> str:
+    """Use the numeric claim's own comma-delimited clause for its metric."""
+
+    left = max(
+        text.rfind("\n", 0, start),
+        text.rfind("。", 0, start),
+        text.rfind("；", 0, start),
+        text.rfind("，", 0, start),
+        text.rfind("、", 0, start),
+    )
+    right_candidates = [
+        position
+        for position in (
+            text.find("\n", end),
+            text.find("。", end),
+            text.find("；", end),
+            text.find("，", end),
+            text.find("、", end),
+        )
+        if position >= 0
+    ]
+    right = min(right_candidates) if right_candidates else len(text)
+    return text[left + 1 : right]
+
+
+def _numeric_claims(text: str) -> list[tuple[str, str, str | None]]:
+    return [
+        (*_numeric_value_and_unit(match.group("value")), _numeric_metric(_numeric_clause_context(text, match.start(), match.end())))
+        for match in _NUMERIC_ASSERTION.finditer(text)
+    ]
+
+
+def _numeric_sentence(text: str, start: int, end: int) -> str:
+    left = max(text.rfind("\n", 0, start), text.rfind("。", 0, start), text.rfind("；", 0, start))
+    right_candidates = [position for position in (text.find("\n", end), text.find("。", end), text.find("；", end)) if position >= 0]
+    right = min(right_candidates) if right_candidates else len(text)
+    return text[left + 1 : right]
+
+
+def _is_future_proposal(sentence: str) -> bool:
+    return bool(
+        re.search(r"(?:建议|拟|计划|目标|预计)", sentence)
+        and re.search(r"(?:达到|定为|设为|预算|安排|增长|完成)", sentence)
+        and not re.search(r"已实现|已完成|累计|同比|环比", sentence)
+    )
+
+
+def _numeric_content_sections(markdown: str, mapped_sections: dict[str, str]) -> list[tuple[str, str]]:
+    """Return every body segment with its mapped section or mapped parent, if any."""
+
+    headings = list(re.finditer(r"(?m)^(?P<marks>#{2,6})[ \t]+(?P<title>.+?)[ \t]*$", markdown))
+    segments: list[tuple[str, str]] = []
+    if not headings:
+        return [("", markdown)]
+    segments.append(("", markdown[: headings[0].start()]))
+    stack: list[tuple[int, str]] = []
+    for index, heading in enumerate(headings):
+        level = len(heading.group("marks"))
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        title = heading.group("title").strip()
+        section_id = mapped_sections.get(title)
+        if section_id is None and stack:
+            section_id = stack[-1][1]
+        if section_id is not None:
+            stack.append((level, section_id))
+        else:
+            stack.append((level, ""))
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(markdown)
+        segments.append((section_id or "", markdown[heading.end() : end]))
+    return segments
+
+
+def _content_fact_issues(markdown: str, payload: dict, material_ledger: dict | None, *, enforce_numeric: bool) -> list[dict]:
+    usage_rows = payload.get("fact_usage") if isinstance(payload.get("fact_usage"), list) else []
+    has_ledger = isinstance(material_ledger, dict) and material_ledger.get("artifact_type") == "material_ledger"
+    if usage_rows and not has_ledger:
+        return [_semantic_issue("material_ledger_missing", "fact-usage:ledger", "正文声明了事实引用，但缺少已批准资料台账")]
+    facts = {
+        str(row.get("fact_id") or "").strip(): row
+        for row in (((material_ledger or {}).get("payload") or {}).get("facts") or [])
+        if isinstance(row, dict) and str(row.get("fact_id") or "").strip()
+    }
+    sections = {
+        str(row.get("section_id") or "").strip(): str(row.get("heading") or "").strip()
+        for row in payload.get("section_map") or []
+        if isinstance(row, dict)
+    }
+    if not sections:
+        sections = {
+            heading: heading
+            for heading in re.findall(r"(?m)^#{2,6}\s+(.+?)\s*$", markdown)
+        }
+    issues = []
+    usable_by_section: dict[str, list[dict]] = {}
+    for item in usage_rows:
+        if not isinstance(item, dict):
+            continue
+        fact_id = str(item.get("fact_id") or "").strip()
+        section_id = str(item.get("section_id") or "").strip()
+        fact = facts.get(fact_id)
+        if not fact or fact.get("status") not in {"verified", "provided_unverified"} or fact.get("usable") is not True:
+            issues.append(_semantic_issue("fact_usage_unusable", f"fact:{fact_id or 'unknown'}", "正文引用的事实不存在、不可用或尚未确认"))
+            continue
+        usable_by_section.setdefault(section_id, []).append(fact)
+    mapped_sections = {heading: section_id for section_id, heading in sections.items()}
+    for section_id, body in _numeric_content_sections(markdown, mapped_sections):
+        section_facts = usable_by_section.get(section_id, [])
+        if not enforce_numeric:
+            continue
+        fact_claims = [claim for row in section_facts for claim in _numeric_claims(str(row.get("statement") or ""))]
+        for match in _NUMERIC_ASSERTION.finditer(body):
+            window = body[max(0, match.start() - 18): match.end() + 18]
+            if not _NUMERIC_FACT_CONTEXT.search(window):
+                continue
+            if _is_future_proposal(_numeric_sentence(body, match.start(), match.end())):
+                continue
+            value, unit = _numeric_value_and_unit(match.group("value"))
+            metric = _numeric_metric(_numeric_clause_context(body, match.start(), match.end()))
+            if any(
+                fact_value == value and fact_unit == unit and fact_metric == metric
+                for fact_value, fact_unit, fact_metric in fact_claims
+            ):
+                continue
+            rate = _COMPLETION_RATE_FORMULA.search(body)
+            completed = [int(fact_value.replace(",", "")) for fact_value, fact_unit, fact_metric in fact_claims if fact_unit == "单" and fact_metric == "completed_count"]
+            planned = [int(fact_value.replace(",", "")) for fact_value, fact_unit, fact_metric in fact_claims if fact_unit == "单" and fact_metric == "planned_count"]
+            rate_match = rate and match.start() >= rate.start("rate") and match.end() <= rate.end()
+            if metric == "completion_rate" and len(completed) == len(planned) == 1:
+                expected = completed[0] / planned[0] * 100 if planned[0] else None
+                formula_inputs_match = not rate or (
+                    int(rate.group("completed").replace(",", "")) == completed[0]
+                    and int(rate.group("planned").replace(",", "")) == planned[0]
+                )
+                if expected is not None and abs(float(value) - expected) < 1e-8 and formula_inputs_match and (not rate or rate_match):
+                    continue
+            issues.append(_semantic_issue("numeric_assertion_uncovered", f"section:{section_id}:{match.start()}", "正文关键量化断言未由同章节可用事实支持"))
+    return issues
+
+
 def _contains_exact_statement(text: object, statement: object) -> bool:
     """Match the declared claim text exactly after Unicode/whitespace normalization."""
 
@@ -570,12 +773,12 @@ def _research_citation_result(
         for section_id, model_claim_ids in model_usage_by_section.items():
             heading = outline_headings.get(section_id, "")
             body = _markdown_section_body(markdown, heading) if heading else ""
-            if body.count("模型知识·未核验") != len(model_claim_ids):
+            if body.count("模型知识·未核验") < len(model_claim_ids):
                 issues.append(
                     _semantic_issue(
                         "model_knowledge_label_count_mismatch",
                         f"section:{section_id}",
-                        "每个模型知识 claim 都必须在所属章节独立标注为未核验",
+                        "每个模型知识 claim 都必须在所属章节至少独立标注一次为未核验",
                     )
                 )
             if section_id in non_model_usage_sections:
@@ -811,12 +1014,34 @@ def resolve_approved_input_artifacts(run: dict, artifact: dict) -> list[dict]:
     return resolved
 
 
+def approved_material_ledger_for_run(run: dict) -> dict | None:
+    """Resolve exactly one approved current-run ledger by immutable artifact identity."""
+
+    approved = run.get("approved_stage_artifact_refs")
+    if not isinstance(approved, dict):
+        return None
+    identities = {
+        (str(ref.get("artifact_id") or ""), str(ref.get("sha256") or ""))
+        for ref in approved.values()
+        if isinstance(ref, dict)
+    }
+    matches = [
+        deepcopy(item)
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_type") == "material_ledger"
+        and (str(item.get("artifact_id") or ""), str(item.get("sha256") or "")) in identities
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def evaluate_semantic_gates(
     *,
     brief: dict,
     artifact: dict,
     approved_inputs: list[dict],
     approved_artifacts: list[dict] | None = None,
+    material_ledger: dict | None = None,
     source_context: dict | None = None,
     source_requirement: dict | None = None,
     product_mode: str = "enterprise",
@@ -863,6 +1088,14 @@ def evaluate_semantic_gates(
                     f"正文缺少必备章节：{section}",
                 )
             )
+        elif not _section_has_substantive_content(markdown, section):
+            issues.append(
+                _semantic_issue(
+                    "required_section_empty",
+                    f"section:{section}",
+                    f"正文必备章节缺少实质内容：{section}",
+                )
+            )
     review_report = payload.get("review_report") if isinstance(payload.get("review_report"), dict) else {}
     unsupported_claim_ids = [
         str(item).strip()
@@ -889,6 +1122,17 @@ def evaluate_semantic_gates(
             payload,
             source_requirement=source_requirement,
             product_mode=product_mode,
+        )
+    )
+    evidence_issues.extend(
+        _content_fact_issues(
+            markdown,
+            payload,
+            material_ledger,
+            enforce_numeric=(
+                str(brief.get("task_mode") or "") == "create"
+                and str(brief.get("document_type") or "") != "research_report"
+            ),
         )
     )
     source_preservation, source_issues = _polish_preservation_result(
@@ -926,6 +1170,10 @@ def evaluate_semantic_gates(
         "document_sections": document_sections,
         "source_preservation": source_preservation,
         "citation_validation": citation_validation,
+        "material_ledger": {
+            "artifact_id": str((material_ledger or {}).get("artifact_id") or ""),
+            "sha256": str((material_ledger or {}).get("sha256") or ""),
+        },
         "issues": issues,
     }
     return report
@@ -938,6 +1186,7 @@ def write_semantic_gates_snapshot(
     artifact: dict,
     approved_inputs: list[dict],
     approved_artifacts: list[dict] | None = None,
+    material_ledger: dict | None = None,
     source_context: dict | None = None,
     source_requirement: dict | None = None,
     product_mode: str = "enterprise",
@@ -949,6 +1198,7 @@ def write_semantic_gates_snapshot(
         artifact=artifact,
         approved_inputs=approved_inputs,
         approved_artifacts=approved_artifacts,
+        material_ledger=material_ledger,
         source_context=source_context,
         source_requirement=source_requirement,
         product_mode=product_mode,
@@ -1154,6 +1404,7 @@ def prepare_canonical_delivery_inputs(
         if needs_strict_source_semantics
         else []
     )
+    material_ledger = approved_material_ledger_for_run(run)
     paths = write_canonical_snapshot(root, brief=brief, artifact=artifact)
     semantic = write_semantic_gates_snapshot(
         root,
@@ -1161,6 +1412,7 @@ def prepare_canonical_delivery_inputs(
         artifact=artifact,
         approved_inputs=artifact.get("input_refs") or [],
         approved_artifacts=approved_artifacts,
+        material_ledger=material_ledger,
         source_context=source_context,
         source_requirement=source_requirement,
         product_mode=str(run.get("product_mode") or "enterprise"),

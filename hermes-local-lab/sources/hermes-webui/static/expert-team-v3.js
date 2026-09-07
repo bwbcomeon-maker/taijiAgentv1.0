@@ -661,6 +661,18 @@
     return card?.productMode === 'standalone' && list(card.allowedActions).includes(action);
   }
 
+  function hasBoundSemanticDeliveryRevision(card) {
+    const productError = card?.productError || {};
+    return Boolean(
+      card?.workflowState === 'generated_invalid'
+      && actionAllowed(card, 'delivery_revise')
+      && productError.schema === 'taiji.product.error.v1'
+      && productError.code === 'expert_team_content_blocked'
+      && card?.stageActionBinding?.stage_id === 'delivery'
+      && stageBindingFingerprint(card)
+    );
+  }
+
   function stateCopyFor(card, current) {
     if (actionAllowed(card, 'delivery_recover')) {
       return ['交付文档已变化', '已交付的 DOCX 与确认时不一致，原本机确认已失效。'];
@@ -1021,9 +1033,10 @@
     if (current === 'legacy_read_only') return legacyPanel(card);
     if (card.researchV2) return researchStatePanel(card, current);
     if (current === 'intake') return briefPanel(card);
+    if (current === 'ready' && hasBoundSemanticDeliveryRevision(card)) return `${failurePanel(card, current, { includePreserved: false })}${resumePanel(card)}${preservedStageResultPanel(card)}`;
     if (card.productError?.schema === 'taiji.product.error.v1') return failurePanel(card, current);
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) return stageInputPanel(card);
-    if (current === 'ready' && actionAllowed(card, 'resume')) return resumePanel(card);
+    if (current === 'ready' && (actionAllowed(card, 'resume') || actionAllowed(card, 'delivery_revise'))) return resumePanel(card);
     if (current === 'ready') return readyPanel(card);
     if (current === 'executing' || current === 'revising') return generatingPanel(card, current);
     if (current === 'cancelling') return cancellationPanel(card);
@@ -1067,6 +1080,7 @@
   }
 
   function researchStatePanel(card, current) {
+    if (current === 'ready' && hasBoundSemanticDeliveryRevision(card)) return `${failurePanel(card, current, { includePreserved: false })}${researchEvidencePanel(card)}${resumePanel(card)}${preservedStageResultPanel(card)}`;
     if (card.productError?.schema === 'taiji.product.error.v1') return failurePanel(card, current);
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) return researchQuestionPanel(card);
     if (actionAllowed(card, 'delivery_recover')) return deliveryRecoveryPanel(card);
@@ -1078,13 +1092,19 @@
 
   function briefFieldSchema(brief) {
     const configured = list(brief?.fieldSchema).filter(field => field && field.path);
-    if (configured.length) return configured;
-    return [
+    const polishSourceField = brief?.sourcePolicySummary?.polish_original_enabled === true
+      ? { path: 'source_policy.source_refs', label: '原始材料', control: 'textarea', required: true, placeholder: '粘贴需要润色的原始材料', help: '请粘贴需要润色的完整原文，专家团将据此润色。', value: brief.sourcePolicySummary.polish_original_text || '' }
+      : null;
+    if (configured.length) {
+      return polishSourceField ? [...configured, polishSourceField] : configured;
+    }
+    const fallback = [
       { path: 'exact_title', label: '文档标题', control: 'text', required: true, placeholder: '', help: '', value: brief?.exactTitle || '' },
       { path: 'purpose', label: '文档用途', control: 'textarea', required: true, placeholder: '', help: '', value: brief?.purpose || '' },
       { path: 'audience', label: '阅读对象', control: 'text', required: true, placeholder: '', help: '', value: brief?.audience || '' },
       { path: 'usage_scenario', label: '使用场景', control: 'text', required: true, placeholder: '', help: '', value: brief?.usageScenario || '' },
     ];
+    return polishSourceField ? [...fallback, polishSourceField] : fallback;
   }
 
   function briefFieldDomId(path) {
@@ -1168,6 +1188,9 @@
 
   function resumePanel(card) {
     if (card.workflowState === 'generated_invalid') {
+      if (hasBoundSemanticDeliveryRevision(card)) {
+        return `<section class="et3-panel et3-panel--blocked" role="alert"><h3>正文需要修改后再交付</h3><p>${esc(card.presentation?.detail || '已确认正文未通过交付语义检查。')}</p><p class="et3-help">当前尚未生成可确认的 DOCX。请提交具体修改意见，系统将只退回复核内容阶段；交付检查仍会在新正文生成后重新执行。</p><label class="et3-form-field" for="expertTeamV3SemanticDeliveryRevision"><span>修改意见</span><textarea id="expertTeamV3SemanticDeliveryRevision" data-et3-semantic-delivery-revision aria-describedby="expertTeamV3Live" placeholder="说明需要修改的位置、内容和目标"></textarea></label></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="submit-semantic-delivery-revision">退回复核阶段修改</button></div>`;
+      }
       if (card.currentStageId === 'delivery') {
         return `<section class="et3-panel"><h3>重新生成最终 DOCX</h3><p>${esc(card.presentation?.detail || '最终文档生成未完成，已确认的正文仍然保留。')}</p><p class="et3-help">本次只重新生成并检查 DOCX，不会重新调用模型，也不会重做已确认的内容阶段。</p></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="retry-run">重新生成最终 DOCX</button></div>`;
       }
@@ -1326,7 +1349,7 @@
     return rows.map(([key, value]) => `${key}: ${String(value)}`).join('\n');
   }
 
-  function failurePanel(card, current) {
+  function failurePanel(card, current, { includePreserved = true } = {}) {
     const canRetry = actionAllowed(card, 'resume');
     const canCancel = actionAllowed(card, 'cancel');
     const productError = card.productError;
@@ -1348,7 +1371,7 @@
         '<button type="button" class="et3-button" data-et3-action="copy-diagnostics">复制诊断信息</button>',
         actionIds.has('export_diagnostics') ? '<button type="button" class="et3-button" data-et3-action="export-diagnostics">导出完整诊断</button>' : '',
       ].filter(Boolean).join('');
-      const preserved = preservedStageResultPanel(card);
+      const preserved = includePreserved ? preservedStageResultPanel(card) : '';
       return `<section class="et3-panel" role="alert"><h3>${esc(productError.title || '操作未能完成')}</h3><p class="et3-error">${esc(productError.message || '请按提示处理后重试。')}</p>${incident ? `<p class="et3-help">诊断编号：<code>${esc(incident)}</code></p>` : ''}<div class="et3-inline-actions">${actionButtons}</div></section>${preserved}`;
     }
     return `<section class="et3-panel"><h3>${esc(stateCopy[current]?.[0] || '任务需要处理')}</h3><p class="et3-error">${esc(card.presentation?.detail || card.presentation?.summary || '当前任务需要恢复或重新发起。')}</p><div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="refresh-run">刷新状态</button>${canRetry ? '<button type="button" class="et3-button et3-button--primary" data-et3-action="retry-run">恢复任务</button>' : ''}${canCancel ? '<button type="button" class="et3-button et3-button--danger" data-et3-action="cancel-run">重试停止</button>' : ''}</div></section>`;
@@ -1629,6 +1652,7 @@
     if (action === 'delivery-open-folder') return openDelivery('folder', button);
     if (action === 'delivery-rerender') return rerenderDelivery(button);
     if (action === 'submit-delivery-revision') return submitDeliveryRevision(button);
+    if (action === 'submit-semantic-delivery-revision') return submitSemanticDeliveryRevision(button);
     if (action === 'delivery-confirm') return confirmDelivery(button);
     if (action === 'delivery-recover') return recoverDelivery(button);
     if (action === 'save-brief') return saveBrief(button, false);
@@ -1876,6 +1900,11 @@
     list(schema).forEach(field => {
       const path = String(field?.path || '');
       if (!path || !Object.prototype.hasOwnProperty.call(values || {}, path)) return;
+      if (path === 'source_policy.source_refs') {
+        const text = String(values[path] ?? '').trim();
+        setNestedBriefValue(patch, path, text ? [{ source_id: 'SRC-POLISH-ORIGINAL', kind: 'provided_text', label: '待润色原文', text }] : []);
+        return;
+      }
       setNestedBriefValue(patch, path, String(values[path] ?? '').trim());
     });
     return patch;
@@ -2116,6 +2145,39 @@
       'delivery-revise',
       '修改意见已提交，专家团正在重新生成文档。',
     );
+  }
+
+  async function submitSemanticDeliveryRevision(button) {
+    const field = workbenchRoot().querySelector('[data-et3-semantic-delivery-revision]');
+    const feedback = String(field?.value || '').trim();
+    if (!feedback) {
+      field?.setAttribute('aria-invalid', 'true');
+      field?.setAttribute('aria-errormessage', 'expertTeamV3Live');
+      field?.focus();
+      return setLive('请先填写需要修改的内容。', true);
+    }
+    const control = stageActionControl('semantic-delivery-revise', 'delivery_revise');
+    if (!control) return setLive('当前退回操作信息不完整，请刷新任务状态后重试。', true);
+    field?.removeAttribute('aria-invalid');
+    field?.removeAttribute('aria-errormessage');
+    setBusy(button, true, '正在退回…');
+    try {
+      const payload = await window.api('/api/expert-teams/delivery/revise', {
+        method: 'POST',
+        body: JSON.stringify({ ...control, feedback }),
+      });
+      field.value = '';
+      state.conflictDeliveryDraft = null;
+      applyResponse(payload);
+      setLive('修改意见已提交，专家团正在重新生成复核阶段。');
+      return true;
+    } catch (error) {
+      if (error && error.payload && error.payload.run) applyResponse(error.payload);
+      setLive(error.message || '退回修改失败，请刷新状态后重试。', true);
+      return false;
+    } finally {
+      setBusy(button, false);
+    }
   }
 
   function rerenderDelivery(button) {

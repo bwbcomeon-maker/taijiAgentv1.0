@@ -455,6 +455,10 @@ def test_v2_prompts_define_model_knowledge_boundary_and_citation_isolation():
         assert "最新政策" in prompt
         assert "无法核验" in prompt
     assert "origin_tier" in _system_message("evidence_matrix", _v2_brief())
+    document_prompt = _system_message("reviewed_research_document", _v2_brief())
+    assert "完整逐字保留该 claim.statement" in document_prompt
+    assert "每个 claim 至少一处独立标签" in document_prompt
+    assert "用户提供的背景，原文待核验" in document_prompt
     v1_prompt = _system_message("evidence_matrix", _v1_brief())
     assert "origin_tier" not in v1_prompt
     assert "模型知识·未核验" not in v1_prompt
@@ -818,6 +822,49 @@ def test_each_model_claim_requires_one_label_occurrence_in_the_same_section():
     report = _semantic_report(artifact, claims, sources=[])
 
     assert "model_knowledge_label_count_mismatch" in {
+        issue["code"] for issue in report["issues"]
+    }
+
+
+def test_model_claims_allow_extra_conservative_labels_in_their_isolated_section():
+    claims = [
+        _claim(
+            claim_id="CLAIM-MODEL-1",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案一仅作方法分析。",
+        ),
+        _claim(
+            claim_id="CLAIM-MODEL-2",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案二仅作方法分析。",
+        ),
+    ]
+    artifact = _research_artifact(
+        [
+            {
+                "claim_id": claim["claim_id"],
+                "section_id": "SEC-EVIDENCE",
+                "citation_marker": "",
+            }
+            for claim in claims
+        ],
+        evidence_text=(
+            "模型知识·未核验：方案一仅作方法分析。"
+            "模型知识·未核验：方案二仅作方法分析。"
+            "模型知识·未核验：补充说明不构成外部核验。"
+            "模型知识时效未知。"
+        ),
+        references="无可核验外部来源。",
+    )
+
+    report = _semantic_report(artifact, claims, sources=[])
+
+    assert report["status"] == "passed"
+    assert "model_knowledge_label_count_mismatch" not in {
         issue["code"] for issue in report["issues"]
     }
 

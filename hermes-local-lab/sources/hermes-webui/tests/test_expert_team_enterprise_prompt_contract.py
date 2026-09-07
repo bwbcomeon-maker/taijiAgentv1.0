@@ -313,6 +313,8 @@ def test_review_prompt_keeps_open_issue_lists_in_one_consistent_projection(artif
     assert "payload.open_issues 中 status=open 的每一项" in system
     assert "必须原样复制到 payload.review_report.issues" in system
     assert "unresolved_issue_ids 必须与 review_report.issues 中 status=open" in system
+    assert "severity 必须为 blocking 或 error" in system
+    assert "必须同步写入 payload.open_issues 和 unresolved_issue_ids" in system
     assert "issue_id 集合完全一致" in system
 
 

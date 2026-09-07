@@ -54,6 +54,18 @@ DOCUMENT_TYPE_LABELS = {
     "research_report": "研究报告",
 }
 
+_CONTENT_POLISH_ORIGINAL_SOURCE_ID = "SRC-POLISH-ORIGINAL"
+_CONTENT_POLISH_ORIGINAL_VERSIONED_ID = re.compile(
+    rf"^{re.escape(_CONTENT_POLISH_ORIGINAL_SOURCE_ID)}-[0-9a-f]{{64}}$"
+)
+
+
+def _is_content_polish_original_source_id(source_id: object) -> bool:
+    value = str(source_id or "")
+    return value == _CONTENT_POLISH_ORIGINAL_SOURCE_ID or bool(
+        _CONTENT_POLISH_ORIGINAL_VERSIONED_ID.fullmatch(value)
+    )
+
 _PUBLIC_BUILD_REF = re.compile(r"[A-Za-z0-9._-]{1,96}")
 
 
@@ -728,7 +740,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
     state = _effective_state(run)
     standalone = str(run.get("product_mode") or "") == "standalone"
     output = _stage_output(run)
-    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    current = _display_current_stage(run)
     detail = ""
     if state in {"collecting_required", "collecting_optional"}:
         detail = "请先补充需求信息，专家团再继续推进。"
@@ -906,8 +918,71 @@ def _current_worker(run: dict) -> dict:
     return {"id": worker_id, "name": worker_name or "专家团", "role": "阶段负责", "status": ""}
 
 
+def _display_current_stage(run: dict) -> dict:
+    """Project the authoritative pending system stage without mutating a run."""
+    current = run.get("current_stage")
+    fallback = deepcopy(current) if isinstance(current, dict) else {}
+    if str(run.get("workflow_state") or "") != "delivery_validation_required":
+        return fallback
+    pending = run.get("pending_system_stage")
+    if not isinstance(pending, dict) or str(pending.get("executor") or "") != "system":
+        return fallback
+    pending_id = str(pending.get("id") or "").strip()
+    profile = run.get("launch_profile_snapshot")
+    try:
+        index = int(run.get("current_stage_index"))
+    except (TypeError, ValueError):
+        return fallback
+    if (
+        not pending_id
+        or index < 0
+        or not isinstance(profile, dict)
+    ):
+        return fallback
+    system_steps = profile.get("post_approval_system_steps") or []
+    declared = [
+        (position, item)
+        for position, item in enumerate(system_steps)
+        if isinstance(item, dict)
+        and str(item.get("id") or "") == pending_id
+        and str(item.get("executor") or "") == "system"
+        and item == pending
+    ]
+    stages = profile.get("stages") or []
+    template = run.get("_tasks_template")
+    if (
+        len(declared) != 1
+        or not isinstance(stages, list)
+        or not isinstance(template, list)
+        or not template
+        or len(template) != len(stages)
+        or any(
+            not isinstance(template_task, dict)
+            or not isinstance(frozen_task, dict)
+            or str(template_task.get("id") or "") != str(frozen_task.get("id") or "")
+            or str(template_task.get("executor") or "") != str(frozen_task.get("executor") or "")
+            or str(template_task.get("artifact_type") or "")
+            != str(frozen_task.get("artifact_type") or "")
+            for template_task, frozen_task in zip(template, stages)
+        )
+        or index != len(template) + declared[0][0]
+    ):
+        return fallback
+    task = declared[0][1]
+    return {
+        "index": index,
+        "id": pending_id,
+        "task_id": pending_id,
+        "title": str(task.get("title") or pending.get("title") or ""),
+        "phase": str(task.get("phase") or ""),
+        "worker_id": str(task.get("worker_id") or ""),
+        "worker_name": str(task.get("worker_name") or ""),
+        "status": str(task.get("status") or "pending"),
+    }
+
+
 def _workspace(run: dict) -> dict:
-    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    current = _display_current_stage(run)
     tasks = [deepcopy(task) for task in run.get("tasks") or [] if isinstance(task, dict)]
     members = [deepcopy(member) for member in run.get("members") or [] if isinstance(member, dict)]
     state = _effective_state(run)
@@ -948,7 +1023,7 @@ def _workflow(run: dict) -> dict:
     progress["text"] = _progress_text(run, _effective_state(run))
     return {
         "stages": tasks,
-        "current_stage": deepcopy(run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}),
+        "current_stage": _display_current_stage(run),
         "current_index": int(progress.get("current_index") or 0),
         "total": len(tasks),
         "progress": progress,
@@ -1467,6 +1542,53 @@ def _stage_action_binding(run: dict, public_state: str) -> dict | None:
     }
 
 
+def _semantic_delivery_revision_binding(run: dict, effective_state: str) -> dict | None:
+    """Expose a content-return control only for an unbound semantic delivery failure."""
+
+    if (
+        str(run.get("product_mode") or "") != "standalone"
+        or effective_state != "generated_invalid"
+        or str(run.get("last_execution_error_code") or "") != "delivery_semantic_blocked"
+        or run.get("current_delivery_manifest_ref") is not None
+    ):
+        return None
+    descriptor = run.get("pending_system_stage")
+    reservation = run.get("current_stage_attempt_reservation")
+    canonical = run.get("canonical_document_ref")
+    artifact = _current_stage_artifact(run)
+    if (
+        not isinstance(descriptor, dict)
+        or str(descriptor.get("id") or "") != "delivery"
+        or descriptor.get("executor") != "system"
+        or not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != "delivery"
+        or reservation.get("executor") != "system"
+        or str(reservation.get("status") or "") != "generated_invalid"
+        or not isinstance(canonical, dict)
+        or not artifact
+    ):
+        return None
+    dependencies = [str(item or "") for item in descriptor.get("depends_on") or [] if str(item or "")]
+    if len(dependencies) != 1 or str(artifact.get("stage_id") or "") != dependencies[0]:
+        return None
+    expected = {"artifact_id": artifact.get("artifact_id"), "sha256": artifact.get("sha256")}
+    if (
+        {"artifact_id": canonical.get("artifact_id"), "sha256": canonical.get("sha256")} != expected
+        or (run.get("approved_stage_artifact_refs") or {}).get(dependencies[0]) != expected
+        or reservation.get("input_refs") != [{"ref_type": "stage_artifact", **expected}]
+    ):
+        return None
+    return {
+        "session_id": str(run.get("session_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "expected_version": int(run.get("version") or 0),
+        "stage_id": "delivery",
+        "stage_attempt": _positive_int_or_zero(reservation.get("stage_attempt")),
+        "artifact_id": str(artifact.get("artifact_id") or ""),
+        "artifact_sha256": str(artifact.get("sha256") or ""),
+    }
+
+
 def _delivery_action_binding(run: dict, public_state: str) -> dict | None:
     """Expose a standalone delivery action only when every durable identity agrees."""
 
@@ -1747,6 +1869,8 @@ def _allowed_actions(
         return ["start_generation"]
     if effective_state == "awaiting_stage_input":
         return ["submit_stage_input"]
+    if _semantic_delivery_revision_binding(run, effective_state) is not None:
+        return ["delivery_revise"]
     if effective_state in {
         "start_failed",
         "generation_failed",
@@ -2046,7 +2170,8 @@ def expert_team_run_view(run: dict) -> dict:
     standalone = str(run.get("product_mode") or "") == "standalone"
     document_contract = contract_version == EXPERT_TEAM_CONTRACT_V1
     public_state = _public_state(run, state)
-    stage_action_binding = _stage_action_binding(run, public_state)
+    semantic_delivery_revision_binding = _semantic_delivery_revision_binding(run, state)
+    stage_action_binding = semantic_delivery_revision_binding or _stage_action_binding(run, public_state)
     cancel_action_binding = _cancel_action_binding(run, state)
     delivery_action_binding = _delivery_action_binding(run, public_state)
     delivery_recovery_binding = _delivery_recovery_binding(run, state)
@@ -2073,6 +2198,7 @@ def expert_team_run_view(run: dict) -> dict:
             delivery_recovery_binding,
         ),
         "stage_action_binding": stage_action_binding,
+        "semantic_delivery_revision_binding": semantic_delivery_revision_binding,
         "cancel_action_binding": cancel_action_binding,
         "delivery_action_binding": delivery_action_binding,
         "delivery_recovery_binding": delivery_recovery_binding,
@@ -2114,6 +2240,7 @@ def expert_team_run_view(run: dict) -> dict:
             "can_refresh": state == "cancelling",
             "can_open_delivery": delivery_action_binding is not None,
             "can_revise_delivery": public_state == "awaiting_delivery_confirmation" and delivery_action_binding is not None,
+            "can_return_semantic_delivery": semantic_delivery_revision_binding is not None,
             "can_confirm_delivery": public_state == "awaiting_delivery_confirmation" and delivery_action_binding is not None,
             "can_recover_delivery": delivery_recovery_binding is not None,
         },
@@ -2229,6 +2356,23 @@ def expert_team_run_view(run: dict) -> dict:
                 for field in schema
                 if isinstance(field, dict) and str(field.get("path") or "")
             ]
+            if (
+                str(profile.get("id") or run.get("launch_profile_id") or "") == "content-polish"
+                and brief["editable"]
+            ):
+                originals = [
+                    item
+                    for item in source_policy.get("source_refs") or []
+                    if isinstance(item, dict)
+                    and _is_content_polish_original_source_id(item.get("source_id"))
+                    and str(item.get("kind") or "") == "provided_text"
+                    and isinstance(item.get("text"), str)
+                    and item["text"].strip()
+                ]
+                brief["source_policy_summary"]["polish_original_enabled"] = True
+                brief["source_policy_summary"]["polish_original_text"] = (
+                    originals[0]["text"] if len(originals) == 1 else ""
+                )
             requirement = profile.get("source_requirement")
             if research_v2:
                 requirement = {

@@ -436,3 +436,256 @@ def test_zero_source_standalone_brief_placeholders_do_not_become_delivery_blocke
     assert "各实施小组负责人尚未明确" in {
         item["message"] for item in blocked["issues"]
     }
+
+
+def test_content_semantic_gate_blocks_empty_required_section_and_uncovered_numeric_claim():
+    from api.expert_teams.documents import evaluate_semantic_gates
+
+    brief = _brief(task_mode="create")
+    brief["exact_title"] = "月度经营报告"
+    brief["document_type"] = "report"
+    brief["content_constraints"] = {
+        "required_sections": ["经营情况", "责任分工"],
+        "must_include": [],
+        "must_avoid": [],
+    }
+    artifact = _content_artifact(
+        "# 月度经营报告\n\n"
+        "## 经营情况\n\n建议在报告写已实现营收9999亿元，同比增长500%。\n\n"
+        "## 责任分工\n\n### 负责人\n"
+    )
+    artifact["payload"].update({
+        "title": "月度经营报告",
+        "document_type": "report",
+        "section_map": [],
+        "fact_usage": [],
+        "asset_requests": [],
+        "open_issues": [],
+    })
+
+    report = evaluate_semantic_gates(
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=[],
+        product_mode="standalone",
+    )
+
+    assert report["status"] == "failed"
+    assert {item["code"] for item in report["issues"]} >= {
+        "required_section_empty",
+        "numeric_assertion_uncovered",
+    }
+
+
+def test_content_semantic_gate_accepts_bound_facts_explicit_derivation_and_short_table():
+    from api.expert_teams.documents import evaluate_semantic_gates
+
+    brief = _brief(task_mode="create")
+    brief["exact_title"] = "月度工作汇报"
+    brief["document_type"] = "report"
+    brief["content_constraints"] = {
+        "required_sections": ["工作进展", "责任分工"],
+        "must_include": [],
+        "must_avoid": [],
+    }
+    artifact = _content_artifact(
+        "# 月度工作汇报\n\n"
+        "## 工作进展\n\n已完成96单、总计120单，完成率=96/120=80%。\n\n"
+        "## 责任分工\n\n|负责人|期限|\n|-|-|\n|李工|9月10日|\n\n"
+        "编号 SG-2026-07。建议将下月目标定为9999元。\n"
+    )
+    artifact["payload"].update({
+        "title": "月度工作汇报",
+        "document_type": "report",
+        "section_map": [],
+        "fact_usage": [
+            {"fact_id": "F-DONE", "section_id": "SEC-PROGRESS"},
+            {"fact_id": "F-TOTAL", "section_id": "SEC-PROGRESS"},
+        ],
+        "asset_requests": [],
+        "open_issues": [],
+    })
+    artifact["payload"]["section_map"] = [
+        {"section_id": "SEC-PROGRESS", "heading": "工作进展"},
+        {"section_id": "SEC-OWNER", "heading": "责任分工"},
+    ]
+    ledger = {
+        "artifact_id": "ledger:1",
+        "sha256": "e" * 64,
+        "artifact_type": "material_ledger",
+        "payload": {"facts": [
+            {"fact_id": "F-DONE", "statement": "已完成96单", "status": "provided_unverified", "usable": True},
+            {"fact_id": "F-TOTAL", "statement": "总计120单", "status": "provided_unverified", "usable": True},
+        ]},
+    }
+
+    report = evaluate_semantic_gates(
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=artifact["input_refs"],
+        material_ledger=ledger,
+        product_mode="standalone",
+    )
+
+    assert report["status"] == "passed"
+
+
+def test_content_semantic_gate_blocks_unknown_or_unusable_fact_usage():
+    from api.expert_teams.documents import evaluate_semantic_gates
+
+    brief = _brief(task_mode="create")
+    brief["exact_title"] = "工作汇报"
+    brief["document_type"] = "report"
+    brief["content_constraints"] = {"required_sections": ["进展"], "must_include": [], "must_avoid": []}
+    artifact = _content_artifact("# 工作汇报\n\n## 进展\n\n完成96单。\n")
+    artifact["payload"].update({
+        "title": "工作汇报", "document_type": "report", "section_map": [{"section_id": "SEC-1", "heading": "进展"}],
+        "fact_usage": [{"fact_id": "F-UNKNOWN", "section_id": "SEC-1"}], "asset_requests": [], "open_issues": [],
+    })
+
+    report = evaluate_semantic_gates(
+        brief=brief, artifact=artifact, approved_inputs=artifact["input_refs"],
+        material_ledger={"artifact_id": "ledger:1", "sha256": "e" * 64, "artifact_type": "material_ledger", "payload": {"facts": [
+            {"fact_id": "F-UNKNOWN", "statement": "完成96单", "status": "missing", "usable": False},
+        ]}}, product_mode="standalone",
+    )
+
+    assert "fact_usage_unusable" in {item["code"] for item in report["issues"]}
+
+
+def test_material_ledger_resolver_requires_one_approved_id_and_sha():
+    from api.expert_teams.documents import approved_material_ledger_for_run
+
+    ledger = {"artifact_id": "ledger:1", "sha256": "e" * 64, "artifact_type": "material_ledger", "payload": {"facts": []}}
+    run = {
+        "approved_stage_artifact_refs": {"ledger": {"artifact_id": "ledger:1", "sha256": "e" * 64}},
+        "stage_artifacts": [ledger, {"artifact_id": "ledger:old", "sha256": "f" * 64, "artifact_type": "material_ledger", "payload": {"facts": []}}],
+    }
+
+    assert approved_material_ledger_for_run(run) == ledger
+    run["approved_stage_artifact_refs"]["ledger"]["sha256"] = "0" * 64
+    assert approved_material_ledger_for_run(run) is None
+
+
+def test_numeric_fact_support_requires_exact_value_and_polarity():
+    from api.expert_teams.documents import _content_fact_issues
+
+    payload = {"section_map": [{"section_id": "S", "heading": "X"}], "fact_usage": [{"fact_id": "F", "section_id": "S"}]}
+    for body, statement in (("已完成96单。", "已完成196单"), ("未完成96单。", "已完成96单")):
+        issues = _content_fact_issues(
+            f"## X\n\n{body}", payload,
+            {"artifact_type": "material_ledger", "payload": {"facts": [{"fact_id": "F", "statement": statement, "status": "provided_unverified", "usable": True}]}},
+            enforce_numeric=True,
+        )
+        assert "numeric_assertion_uncovered" in {item["code"] for item in issues}
+
+
+def test_numeric_derivation_does_not_treat_work_order_ratio_as_yoy_growth():
+    from api.expert_teams.documents import _content_fact_issues
+
+    issues = _content_fact_issues(
+        "## X\n\n同比=120/24=500%。",
+        {"section_map": [{"section_id": "S", "heading": "X"}], "fact_usage": [{"fact_id": "A", "section_id": "S"}, {"fact_id": "B", "section_id": "S"}]},
+        {"artifact_type": "material_ledger", "payload": {"facts": [
+            {"fact_id": "A", "statement": "总计120单", "status": "provided_unverified", "usable": True},
+            {"fact_id": "B", "statement": "未完成24单", "status": "provided_unverified", "usable": True},
+        ]}}, enforce_numeric=True,
+    )
+    assert "numeric_assertion_uncovered" in {item["code"] for item in issues}
+
+
+def test_completion_rate_formula_requires_the_approved_operands():
+    from api.expert_teams.documents import _content_fact_issues
+
+    issues = _content_fact_issues(
+        "## X\n\n已完成96单、计划120单，完成率=100/120=80%。",
+        {"section_map": [{"section_id": "S", "heading": "X"}], "fact_usage": [
+            {"fact_id": "DONE", "section_id": "S"},
+            {"fact_id": "PLAN", "section_id": "S"},
+        ]},
+        {"artifact_type": "material_ledger", "payload": {"facts": [
+            {"fact_id": "DONE", "statement": "已完成96单", "status": "provided_unverified", "usable": True},
+            {"fact_id": "PLAN", "statement": "计划120单", "status": "provided_unverified", "usable": True},
+        ]}},
+        enforce_numeric=True,
+    )
+
+    assert "numeric_assertion_uncovered" in {item["code"] for item in issues}
+
+
+def test_numeric_fact_support_does_not_cross_match_metric_and_allows_future_proposal():
+    from api.expert_teams.documents import _content_fact_issues
+
+    def issues(body, statement):
+        return _content_fact_issues(
+            f"## X\n\n{body}",
+            {
+                "section_map": [{"section_id": "S", "heading": "X"}],
+                "fact_usage": [{"fact_id": "F", "section_id": "S"}],
+            },
+            {
+                "artifact_type": "material_ledger",
+                "payload": {"facts": [{
+                    "fact_id": "F", "statement": statement,
+                    "status": "provided_unverified", "usable": True,
+                }]},
+            },
+            enforce_numeric=True,
+        )
+
+    assert "numeric_assertion_uncovered" in {
+        item["code"] for item in issues("已完成96单。", "营收96万元。")
+    }
+    assert "numeric_assertion_uncovered" in {
+        item["code"] for item in issues("完成率80%。", "同比80%。")
+    }
+    assert not issues("建议下月营收达到100万元。", "")
+
+
+def test_required_section_with_only_markdown_table_header_is_not_substantive():
+    from api.expert_teams.documents import _section_has_substantive_content
+
+    assert not _section_has_substantive_content(
+        "## 责任分工\n\n|负责人|期限|\n|-|-|\n",
+        "责任分工",
+    )
+
+
+def test_numeric_gate_covers_unmapped_sections_and_preamble():
+    from api.expert_teams.documents import _content_fact_issues
+
+    issues = _content_fact_issues(
+        "# 工作汇报\n\n营收8888万元。\n\n"
+        "## 已映射进展\n\n已完成96单。\n\n"
+        "## 未映射经营情况\n\n营收9999万元，同比增长500%。\n",
+        {
+            "section_map": [{"section_id": "PROGRESS", "heading": "已映射进展"}],
+            "fact_usage": [{"fact_id": "DONE", "section_id": "PROGRESS"}],
+        },
+        {"artifact_type": "material_ledger", "payload": {"facts": [{
+            "fact_id": "DONE", "statement": "已完成96单",
+            "status": "provided_unverified", "usable": True,
+        }]}},
+        enforce_numeric=True,
+    )
+
+    assert sum(item["code"] == "numeric_assertion_uncovered" for item in issues) == 3
+
+
+def test_numeric_gate_inherits_parent_mapped_facts_for_child_section():
+    from api.expert_teams.documents import _content_fact_issues
+
+    issues = _content_fact_issues(
+        "## 工作进展\n\n### 本周完成情况\n\n已完成96单。\n",
+        {
+            "section_map": [{"section_id": "PROGRESS", "heading": "工作进展"}],
+            "fact_usage": [{"fact_id": "DONE", "section_id": "PROGRESS"}],
+        },
+        {"artifact_type": "material_ledger", "payload": {"facts": [{
+            "fact_id": "DONE", "statement": "已完成96单",
+            "status": "provided_unverified", "usable": True,
+        }]}},
+        enforce_numeric=True,
+    )
+
+    assert not issues

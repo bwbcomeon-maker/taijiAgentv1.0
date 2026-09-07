@@ -5804,6 +5804,52 @@ def _validate_standalone_runtime_provider_context(
         ) from exc
 
 
+def _resolve_standalone_provider_binding_identity(
+    *,
+    model: str | None,
+    provider: str | None,
+) -> tuple[str, str, str | None]:
+    """Resolve the immutable Provider/model identity from a launched selection."""
+    from api.config import model_with_provider_context, resolve_model_provider
+
+    selected_provider = str(provider or "").strip()
+    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+        model_with_provider_context(model, provider)
+    )
+    provider_identity = str(resolved_provider or "").strip()
+    model_identity = str(resolved_model or "").strip()
+    if not provider_identity or not model_identity:
+        raise ValueError("standalone runtime Provider selection cannot be resolved")
+    if selected_provider and provider_identity != selected_provider:
+        raise ValueError(
+            "standalone runtime Provider selection conflicts with the launched model hint"
+        )
+    return provider_identity, model_identity, resolved_base_url
+
+
+def _resolve_standalone_provider_binding_identity_in_profile(
+    *,
+    model: str | None,
+    provider: str | None,
+    profile: str | None,
+) -> tuple[str, str, str | None]:
+    """Resolve a launch binding against the same Profile configuration as runtime."""
+    from api.profiles import get_hermes_home_for_profile
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    override_token = set_hermes_home_override(get_hermes_home_for_profile(profile))
+    try:
+        return _resolve_standalone_provider_binding_identity(
+            model=model,
+            provider=provider,
+        )
+    finally:
+        reset_hermes_home_override(override_token)
+
+
 class _ExpertTeamModelConfigurationRequired(RuntimeError):
     """The selected runtime cannot authenticate a standalone generation."""
 
@@ -5838,7 +5884,6 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
     returns no credential or endpoint material.  External-process and
     unreleased protocol transports remain fail-closed in the binding builder.
     """
-    from api.config import model_with_provider_context, resolve_model_provider
     from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
     from api.profiles import get_hermes_home_for_profile
     from api.runtime_adapter import STRICT_PROVIDER_TRANSPORTS
@@ -5852,8 +5897,13 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
     profile_home = get_hermes_home_for_profile(request.profile)
     override_token = set_hermes_home_override(profile_home)
     try:
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-            model_with_provider_context(request.model, request.provider)
+        (
+            resolved_provider,
+            resolved_model,
+            resolved_base_url,
+        ) = _resolve_standalone_provider_binding_identity(
+            model=request.model,
+            provider=request.provider,
         )
         runtime = resolve_runtime_provider_with_anthropic_env_lock(
             resolve_runtime_provider,
@@ -6100,6 +6150,18 @@ def _start_expert_team_execution(
             raise ValueError(
                 "standalone runtime Provider binding is no longer available exactly as launched"
             )
+        expected_provider_identity = None
+        expected_model_identity = None
+        if standalone:
+            (
+                expected_provider_identity,
+                expected_model_identity,
+                _expected_base_url,
+            ) = _resolve_standalone_provider_binding_identity_in_profile(
+                model=model,
+                provider=model_provider,
+                profile=(standalone_binding or {}).get("profile"),
+            )
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
@@ -6153,8 +6215,8 @@ def _start_expert_team_execution(
                 )
                 _validate_standalone_runtime_provider_context(
                     trusted_provider_context,
-                    expected_provider=model_provider,
-                    expected_model=model,
+                    expected_provider=expected_provider_identity,
+                    expected_model=expected_model_identity,
                 )
             run = expert_teams.prepare_research_sources_for_gateway(
                 workspace,
@@ -6216,7 +6278,8 @@ def _start_expert_team_execution(
             tools_disabled=request.tools_disabled,
             attachments=request.attachments,
             workspace=request.workspace or str(workspace),
-            model=request.model or model,
+            model=model,
+            runtime_model=request.model or model,
             model_provider=request.provider or model_provider,
             normalized_model=normalized_model,
             stream_id=str(request.idempotency_key or "").strip() or None,
@@ -6421,8 +6484,8 @@ def _start_expert_team_execution(
                 provider_context = adapter.resolve_provider_context(start_request)
             _validate_standalone_runtime_provider_context(
                 provider_context,
-                expected_provider=model_provider,
-                expected_model=model,
+                expected_provider=expected_provider_identity,
+                expected_model=expected_model_identity,
             )
             from api.expert_teams.data_egress import (
                 authorize_standalone_research_provider,
@@ -6441,6 +6504,8 @@ def _start_expert_team_execution(
 
             start_request = replace(
                 start_request,
+                provider=str(provider_context.get("provider") or "").strip(),
+                model=str(provider_context.get("model") or "").strip(),
                 metadata={
                     **start_request.metadata,
                     STRICT_PROVIDER_BINDING_METADATA_KEY: copy.deepcopy(
@@ -17883,7 +17948,11 @@ def handle_post(handler, parsed) -> bool:
                     },
                 )
             already_reserved = False
-            if str(run.get("workflow_state") or "") == "ready_to_generate":
+            if (
+                str(run.get("workflow_state") or "") == "ready_to_generate"
+                and expert_teams.classify_contract_version(run)
+                != expert_teams.EXPERT_TEAM_CONTRACT_V1
+            ):
                 run = expert_teams.reserve_expert_team_execution_start(
                     workspace,
                     str(run.get("run_id") or ""),
@@ -22877,6 +22946,7 @@ def _start_chat_stream_for_session(
     attachments=None,
     workspace: str,
     model: str,
+    runtime_model: str | None = None,
     model_provider=None,
     normalized_model: bool = False,
     diag=None,
@@ -23074,12 +23144,21 @@ def _start_chat_stream_for_session(
         }
         if backend_is_gateway:
             worker_kwargs["turn_id"] = reserved_turn_id
+            if runtime_model and runtime_model != model:
+                worker_kwargs["persisted_session_model"] = model
         if not backend_is_gateway:
             worker_kwargs["goal_related"] = goal_related
         from api.legacy_session_migration import start_legacy_migration_guarded_worker
         start_legacy_migration_guarded_worker(
             worker_target,
-            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            args=(
+                s.session_id,
+                msg,
+                runtime_model or model,
+                workspace,
+                stream_id,
+                attachments,
+            ),
             kwargs=worker_kwargs,
         )
         # Only an accepted, successfully-started turn may consume or reset the

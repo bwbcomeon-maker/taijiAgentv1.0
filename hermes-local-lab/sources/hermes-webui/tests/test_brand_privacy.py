@@ -1272,6 +1272,42 @@ def test_streaming_scrubber_masks_long_credentials_at_every_boundary(credential)
     assert expected.count("[REDACTED]") == 1
 
 
+def test_streaming_scrubber_preserves_structured_fact_id_across_hold_window():
+    import json
+
+    source = json.dumps(
+        {
+            "artifact_type": "stage_plan",
+            "payload": {
+                "facts": [
+                    {
+                        "fact_id": "fact-risk-supplier-interface",
+                        "section": {
+                            "heading": "下一步工作计划",
+                            "detail": "a" * 220 + "中文结尾",
+                        },
+                    }
+                ]
+            },
+            "blocking_issues": [],
+        },
+        ensure_ascii=False,
+    )
+
+    visible, _ = _stream_scrub_with_chunk_size(source, 1)
+
+    assert visible == source
+    assert json.loads(visible) == json.loads(source)
+
+
+def test_streaming_scrubber_masks_credential_after_underscore_window_boundary():
+    source = "before _sk-" + "A" * 320 + "; after"
+
+    visible, _ = _stream_scrub_with_chunk_size(source, 1)
+
+    assert visible == "before _[REDACTED]; after"
+
+
 def test_streaming_scrubber_is_chunk_size_invariant_when_scrubbing_shortens_text():
     dangerous = (
         "这是正常的业务说明，先保留这段可见内容。" * 8

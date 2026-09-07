@@ -489,6 +489,105 @@ def test_research_v2_system_delivery_can_continue_through_resume_mutation():
     ) is True
 
 
+def test_research_v2_delivery_projection_routes_the_authoritative_system_stage(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams, routes
+    from api.expert_teams import runtime
+
+    workspace = tmp_path / "delivery-projection"
+    run = _research_stage_run(expert_teams, runtime, workspace, "review")
+    _memory_storage(monkeypatch, runtime, run)
+    completed = _complete_with_artifact(
+        monkeypatch, runtime, workspace, run, _artifact_for(run)
+    )
+    authoritative = runtime._sync_derived(copy.deepcopy(completed))
+    stale_display = copy.deepcopy(authoritative)
+    stale_display["current_stage"] = copy.deepcopy(
+        stale_display["_tasks_template"][5]
+    )
+    stale_display["current_stage"].update({"task_id": "review", "index": 5})
+
+    projected = expert_teams.expert_team_run_view(stale_display)
+    assert projected["workflow"]["current_stage"]["task_id"] == "delivery"
+    assert projected["workspace"]["current_stage"]["id"] == "delivery"
+    assert projected["presentation"]["current_stage"]["id"] == "delivery"
+
+    cell = _memory_storage(monkeypatch, runtime, authoritative)
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as stale:
+        runtime.resume_expert_team(
+            workspace,
+            {
+                "run_id": authoritative["run_id"],
+                "session_id": authoritative["session_id"],
+                "stage_id": "review",
+                "expected_version": authoritative["version"],
+                "idempotency_key": "resume-stale-review",
+            },
+        )
+    assert stale.value.code == "stale_stage"
+    resumed = runtime.resume_expert_team(
+        workspace,
+        {
+            "run_id": authoritative["run_id"],
+            "session_id": authoritative["session_id"],
+            "stage_id": projected["workflow"]["current_stage"]["task_id"],
+            "expected_version": authoritative["version"],
+            "idempotency_key": "resume-delivery",
+        },
+    )
+
+    assert resumed["workflow_state"] == "delivery_validation_required"
+    assert cell["run"]["current_stage"]["task_id"] == "review"
+    assert routes._expert_team_resume_requires_execution(resumed) is True
+
+    malformed = copy.deepcopy(authoritative)
+    malformed["current_stage_index"] = 5
+    malformed["current_stage"] = copy.deepcopy(malformed["_tasks_template"][5])
+    malformed["current_stage"]["task_id"] = "review"
+    assert expert_teams.expert_team_run_view(malformed)["workflow"]["current_stage"]["task_id"] == "review"
+    _memory_storage(monkeypatch, runtime, malformed)
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as invalid:
+        runtime.resume_expert_team(
+            workspace,
+            {
+                "run_id": malformed["run_id"],
+                "session_id": malformed["session_id"],
+                "stage_id": "review",
+                "expected_version": malformed["version"],
+                "idempotency_key": "resume-corrupt-delivery-index",
+            },
+        )
+    assert invalid.value.code == "corrupt_run_state"
+
+    for label, template, index in (
+        ("missing", [], 6),
+        ("short", authoritative["_tasks_template"][:-1], 5),
+        (
+            "long",
+            authoritative["_tasks_template"] + [copy.deepcopy(authoritative["pending_system_stage"])],
+            7,
+        ),
+    ):
+        malformed = copy.deepcopy(authoritative)
+        malformed["_tasks_template"] = copy.deepcopy(template)
+        malformed["current_stage_index"] = index
+        assert expert_teams.expert_team_run_view(malformed)["workflow"]["current_stage"]["task_id"] == "review"
+        _memory_storage(monkeypatch, runtime, malformed)
+        with pytest.raises(expert_teams.ExpertTeamStateConflict) as invalid_template:
+            runtime.resume_expert_team(
+                workspace,
+                {
+                    "run_id": malformed["run_id"],
+                    "session_id": malformed["session_id"],
+                    "stage_id": "delivery",
+                    "expected_version": malformed["version"],
+                    "idempotency_key": f"resume-corrupt-delivery-template-{label}",
+                },
+            )
+        assert invalid_template.value.code == "corrupt_run_state"
+
+
 def test_system_delivery_reservation_replay_does_not_render_again(tmp_path, monkeypatch):
     from api import expert_teams, routes
 
@@ -530,3 +629,152 @@ def test_system_delivery_reservation_replay_does_not_render_again(tmp_path, monk
     assert status == 200
     assert payload["run"] == run
     assert renders == []
+
+
+def test_research_v2_auto_approved_direction_is_a_gateway_dependency(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    workspace = tmp_path / "direction-gateway"
+    run = _research_stage_run(expert_teams, runtime, workspace, "direction")
+    _memory_storage(monkeypatch, runtime, run)
+    completed = _complete_with_artifact(
+        monkeypatch, runtime, workspace, run, _artifact_for(run)
+    )
+
+    snapshot = expert_teams.verified_source_context_for_execution(workspace, completed)
+    research_stage = next(
+        stage for stage in completed["_tasks_template"] if stage["id"] == "research"
+    )
+    request = build_stage_gateway_request(
+        completed, research_stage, source_context=snapshot
+    )
+
+    import json
+    envelope = json.loads(request["messages"][1]["content"])
+    assert envelope["approved_input_artifacts"][0]["artifact_id"] == "direction:1"
+
+
+@pytest.mark.parametrize("tamper", ["delete", "sha"])
+def test_research_v2_auto_approval_journal_must_match_approved_direction(
+    tmp_path, monkeypatch, tamper
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import PromptContractError, build_stage_gateway_request
+
+    workspace = tmp_path / f"direction-{tamper}"
+    run = _research_stage_run(expert_teams, runtime, workspace, "direction")
+    _memory_storage(monkeypatch, runtime, run)
+    completed = _complete_with_artifact(
+        monkeypatch, runtime, workspace, run, _artifact_for(run)
+    )
+    snapshot = expert_teams.verified_source_context_for_execution(workspace, completed)
+    if tamper == "delete":
+        completed["automatic_stage_approvals"] = []
+    else:
+        completed["automatic_stage_approvals"][0]["artifact_sha256"] = "0" * 64
+
+    research_stage = next(
+        stage for stage in completed["_tasks_template"] if stage["id"] == "research"
+    )
+    with pytest.raises(PromptContractError):
+        build_stage_gateway_request(
+            completed, research_stage, source_context=snapshot
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "profile_id",
+        "contract_version",
+        "output_status",
+        "approval_kind",
+        "approved_ref_id",
+        "approved_ref_sha",
+        "journal_schema",
+        "journal_stage",
+        "journal_artifact_id",
+        "journal_attempt",
+    ],
+)
+def test_research_v2_auto_approval_requires_every_frozen_identity_and_audit_binding(
+    tmp_path, monkeypatch, tamper
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import PromptContractError, build_stage_gateway_request
+
+    workspace = tmp_path / f"direction-binding-{tamper}"
+    run = _research_stage_run(expert_teams, runtime, workspace, "direction")
+    _memory_storage(monkeypatch, runtime, run)
+    completed = _complete_with_artifact(
+        monkeypatch, runtime, workspace, run, _artifact_for(run)
+    )
+    snapshot = expert_teams.verified_source_context_for_execution(workspace, completed)
+    output = completed["stage_outputs"][-1]
+    approval = completed["automatic_stage_approvals"][0]
+    if tamper == "profile_id":
+        completed["launch_profile_snapshot"]["id"] = "other-profile"
+    elif tamper == "contract_version":
+        completed["launch_profile_snapshot"]["research_contract_version"] = "research-report/v1"
+    elif tamper == "output_status":
+        output["status"] = "confirmed"
+    elif tamper == "approval_kind":
+        output["approval_kind"] = "local_confirmation"
+    elif tamper == "approved_ref_id":
+        completed["approved_stage_artifact_refs"]["direction"]["artifact_id"] = "direction:other"
+    elif tamper == "approved_ref_sha":
+        completed["approved_stage_artifact_refs"]["direction"]["sha256"] = "0" * 64
+    elif tamper == "journal_schema":
+        approval["schema_version"] = "automatic-stage-approval/v0"
+    elif tamper == "journal_stage":
+        approval["stage_id"] = "research"
+    elif tamper == "journal_artifact_id":
+        approval["artifact_id"] = "direction:other"
+    else:
+        approval["stage_attempt"] = 2
+
+    research_stage = next(
+        stage for stage in completed["_tasks_template"] if stage["id"] == "research"
+    )
+    with pytest.raises(PromptContractError):
+        build_stage_gateway_request(
+            completed, research_stage, source_context=snapshot
+        )
+
+
+def test_content_standalone_cannot_substitute_an_automatic_approval_for_local_confirmation():
+    from api.expert_teams.prompts import PromptContractError, approved_inputs_for_stage
+
+    artifact = {"artifact_id": "plan:1", "sha256": "a" * 64, "stage_attempt": 1}
+    run = {
+        "team_id": "content-creator-team",
+        "product_mode": "standalone",
+        "review_policy": {"kind": "local_confirmation"},
+        "stage_outputs": [
+            {
+                "task_id": "plan",
+                "status": "approved",
+                "approval_kind": "automatic_contract_validation",
+                "artifact": artifact,
+            }
+        ],
+        "approved_stage_artifact_refs": {
+            "plan": {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]}
+        },
+        "automatic_stage_approvals": [
+            {
+                "schema_version": "automatic-stage-approval/v1",
+                "stage_id": "plan",
+                "stage_attempt": 1,
+                "artifact_id": artifact["artifact_id"],
+                "artifact_sha256": artifact["sha256"],
+            }
+        ],
+    }
+
+    with pytest.raises(PromptContractError, match="缺少已批准阶段产物：plan"):
+        approved_inputs_for_stage(run, "materials")

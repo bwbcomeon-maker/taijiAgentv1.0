@@ -1062,6 +1062,37 @@ def test_v3_brief_patch_uses_schema_whitelist_and_writes_nested_fields():
     }
 
 
+def test_v3_content_polish_renders_required_original_text_and_encodes_fixed_source_ref():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['answer'],questions:[],brief:{
+          originalRequest:'润色试点说明',documentTypeLabel:'材料润色',fieldSchema:[],fieldErrors:[],
+          sourcePolicySummary:{polish_original_enabled:true,polish_original_text:''},
+        }};
+        const schema=[{path:'source_policy.source_refs',required:true}];
+        const values={'source_policy.source_refs':'原始材料正文'};
+        const empty={'source_policy.source_refs':'   '};
+        console.log(JSON.stringify({html:hooks.briefPanel(card),patch:hooks.buildBriefPatch(values,schema),emptyPatch:hooks.buildBriefPatch(empty,schema)}));
+        """
+    )
+
+    assert 'name="source_policy.source_refs"' in result["html"]
+    assert "原始材料" in result["html"]
+    assert result["patch"] == {
+        "source_policy": {
+            "source_refs": [
+                {
+                    "source_id": "SRC-POLISH-ORIGINAL",
+                    "kind": "provided_text",
+                    "label": "待润色原文",
+                    "text": "原始材料正文",
+                }
+            ]
+        }
+    }
+    assert result["emptyPatch"] == {"source_policy": {"source_refs": []}}
+
+
 def test_v3_custom_confirmation_validates_before_request_and_links_server_field_errors():
     script = _read(SCRIPT)
     save_start = script.index("async function saveBrief(button, confirmAfter)")
@@ -2362,6 +2393,139 @@ def test_v3_delivery_drift_has_one_explicit_recovery_surface_and_no_stale_file_a
     assert 'data-et3-action="delivery-open-folder"' not in html
     assert 'data-et3-action="delivery-confirm"' not in html
     assert 'data-et3-action="submit-delivery-revision"' not in html
+
+
+def test_v3_semantic_delivery_block_returns_to_review_with_stage_bound_feedback_only():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:17,stage_id:'delivery',stage_attempt:1,artifact_id:'review:1',artifact_sha256:'a'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',researchV2:true,readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:17,currentStageId:'review',publicState:'ready',workflowState:'generated_invalid',allowedActions:['delivery_revise'],stageActionBinding:binding,productError:{schema:'taiji.product.error.v1',code:'expert_team_content_blocked',title:'阶段内容需要处理',message:'本次生成内容已保留，但存在必须处理的阻断项。',incidentId:'inc-0123456789ab',recoveryActions:[{id:'open_result'},{id:'export_diagnostics'}]},presentation:{detail:'已确认正文未通过交付语义检查，请退回内容阶段修改。'},workflow:{currentStage:{id:'review'}},brief:{sources:[]},progress:{done:6,total:7}};
+          let feedback='';const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const field={get value(){return feedback;},set value(value){feedback=value;},setAttribute(){},removeAttribute(){},focus(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-semantic-delivery-revision]')return field;if(selector==='[data-et3-live]')return live;return null;}};
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.window.buildExpertTeamStageActionPayload=(target,key)=>({...target.stageActionBinding,idempotency_key:key});
+          const requests=[];
+          context.window.api=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true};};
+          function button(action){return {dataset:{et3Action:action},textContent:action,disabled:false,setAttribute(){}};}
+          hooks.setCard(card);
+          const html=hooks.workbenchHtml(card);
+          await hooks.handleWorkbenchClick({target:{closest(){return button('submit-semantic-delivery-revision');}}});
+          const emptyMessage=live.textContent;
+          feedback='逐条标注模型知识，并删除可引用章节里的重复声明。';
+          await hooks.handleWorkbenchClick({target:{closest(){return button('submit-semantic-delivery-revision');}}});
+          console.log(JSON.stringify({html,requests,emptyMessage}));
+        })();
+        """
+    )
+
+    assert "正文需要修改后再交付" in result["html"]
+    assert "退回复核阶段修改" in result["html"]
+    assert "重新生成最终 DOCX" not in result["html"]
+    assert result["emptyMessage"] == "请先填写需要修改的内容。"
+    assert len(result["requests"]) == 1
+    assert result["requests"][0]["url"] == "/api/expert-teams/delivery/revise"
+    assert result["requests"][0]["body"] == {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "expected_version": 17,
+        "stage_id": "delivery",
+        "stage_attempt": 1,
+        "artifact_id": "review:1",
+        "artifact_sha256": "a" * 64,
+        "idempotency_key": result["requests"][0]["body"]["idempotency_key"],
+        "feedback": "逐条标注模型知识，并删除可引用章节里的重复声明。",
+    }
+
+
+def test_v3_research_semantic_delivery_block_reuses_the_bound_return_to_review_panel():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');
+            const context={window:{},document:{readyState:'loading',addEventListener(){},getElementById(){return null;}},console};
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            let source=fs.readFileSync('static/expert-team-v3.js','utf8');
+            source=source.replace('window.ExpertTeamV3 = Object.freeze({', 'window.__hooks={workbenchHtml,effectiveState}; window.ExpertTeamV3 = Object.freeze({');
+            vm.runInContext(source,context);
+            const binding={session_id:'session-research',run_id:'run-research',expected_version:265,stage_id:'delivery',stage_attempt:1,artifact_id:'review:1',artifact_sha256:'a'.repeat(64)};
+            const semanticRun={
+              run_id:'run-research',session_id:'session-research',schema_version:3,version:265,workflow_state:'generated_invalid',
+              view:{
+                product_mode:'standalone',public_state:'ready',allowed_actions:['delivery_revise'],stage_action_binding:binding,
+                product_error:{schema:'taiji.product.error.v1',code:'expert_team_content_blocked',title:'阶段内容需要处理',message:'本次生成内容已保留，但存在必须处理的阻断项。请查看问题后重新生成当前阶段。',incident_id:'inc-4275eaec366fb75c',retryable:true,recovery_actions:[{id:'open_result',label:'查看文档成果'},{id:'regenerate',label:'重新生成'},{id:'export_diagnostics',label:'导出完整诊断'}]},
+                presentation:{state:'generated_invalid',detail:'本次生成内容已保留，但存在必须处理的阻断项。请查看问题后重新生成当前阶段。'},
+                workflow:{stages:[],current_stage:{id:'review',task_id:'review'},progress:{done:6,total:6,current:'复核交付',current_index:5}},
+                workspace:{},stage_result:{content:'已保留的完整研究正文。'},research_progress:{safe_fallback_reason:'公网资料暂时不可用。'},
+                evidence_summary:{public_source_count:0,local_source_count:0,unverified_model_claim_count:7,source_basis:{id:'includes_model_knowledge',text:'包含模型知识·未外部核验'}},
+              },
+            };
+            const providerRun=JSON.parse(JSON.stringify(semanticRun));
+            providerRun.view.allowed_actions=['resume'];providerRun.view.stage_action_binding=null;
+            providerRun.view.product_error={schema:'taiji.product.error.v1',code:'provider_service_unavailable',title:'模型服务暂不可用',message:'模型服务返回异常或正在过载，请稍后重试。',incident_id:'inc-0123456789ab',retryable:true,recovery_actions:[{id:'retry',label:'重试'},{id:'export_diagnostics',label:'导出完整诊断'}]};
+            const semanticCard=context.window.buildExpertTeamCardFromRun(semanticRun,{});
+            const providerCard=context.window.buildExpertTeamCardFromRun(providerRun,{});
+            console.log(JSON.stringify({
+              semantic:{currentStageId:semanticCard.currentStageId,effectiveState:context.window.__hooks.effectiveState(semanticCard),html:context.window.__hooks.workbenchHtml(semanticCard)},
+              provider:{html:context.window.__hooks.workbenchHtml(providerCard)},
+            }));
+            """
+        )
+    )
+
+    assert result["semantic"]["currentStageId"] == "review"
+    assert result["semantic"]["effectiveState"] == "ready"
+    assert "阶段内容需要处理" in result["semantic"]["html"]
+    assert "inc-4275eaec366fb75c" in result["semantic"]["html"]
+    assert "正文需要修改后再交付" in result["semantic"]["html"]
+    assert 'data-et3-semantic-delivery-revision' in result["semantic"]["html"]
+    assert 'data-et3-action="submit-semantic-delivery-revision"' in result["semantic"]["html"]
+    assert "资料基础" in result["semantic"]["html"]
+    assert "重新生成最终 DOCX" not in result["semantic"]["html"]
+    assert result["semantic"]["html"].index("退回复核阶段修改") < result["semantic"]["html"].index("已保留的阶段结果")
+    assert "模型服务暂不可用" in result["provider"]["html"]
+    assert "正文需要修改后再交付" not in result["provider"]["html"]
+    assert 'data-et3-semantic-delivery-revision' not in result["provider"]["html"]
+
+
+def test_v3_nonresearch_semantic_delivery_block_reuses_the_bound_return_to_review_panel():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');
+            const context={window:{},document:{readyState:'loading',addEventListener(){},getElementById(){return null;}},console};
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            let source=fs.readFileSync('static/expert-team-v3.js','utf8');
+            source=source.replace('window.ExpertTeamV3 = Object.freeze({', 'window.__hooks={workbenchHtml,effectiveState}; window.ExpertTeamV3 = Object.freeze({');
+            vm.runInContext(source,context);
+            const binding={session_id:'session-content',run_id:'run-content',expected_version:18,stage_id:'delivery',stage_attempt:1,artifact_id:'review:1',artifact_sha256:'a'.repeat(64)};
+            const run={
+              run_id:'run-content',session_id:'session-content',schema_version:3,version:18,workflow_state:'generated_invalid',
+              view:{
+                product_mode:'standalone',public_state:'ready',allowed_actions:['delivery_revise'],stage_action_binding:binding,
+                product_error:{schema:'taiji.product.error.v1',code:'expert_team_content_blocked',title:'阶段内容需要处理',message:'本次生成内容已保留，但存在必须处理的阻断项。',incident_id:'inc-0123456789ab',retryable:true,recovery_actions:[{id:'open_result',label:'查看文档成果'},{id:'export_diagnostics',label:'导出完整诊断'}]},
+                presentation:{state:'generated_invalid',detail:'已确认正文未通过交付语义检查，请退回内容阶段修改。'},
+                workflow:{stages:[],current_stage:{id:'review',task_id:'review'},progress:{done:5,total:5,current:'复核交付',current_index:4}},workspace:{},stage_result:{content:'已保留的完整正文。'},
+              },
+            };
+            const card=context.window.buildExpertTeamCardFromRun(run,{});
+            const html=context.window.__hooks.workbenchHtml(card);
+            console.log(JSON.stringify({researchV2:card.researchV2,currentStageId:card.currentStageId,effectiveState:context.window.__hooks.effectiveState(card),html}));
+            """
+        )
+    )
+
+    assert result["researchV2"] is False
+    assert result["currentStageId"] == "review"
+    assert result["effectiveState"] == "ready"
+    assert "阶段内容需要处理" in result["html"]
+    assert "正文需要修改后再交付" in result["html"]
+    assert 'data-et3-semantic-delivery-revision' in result["html"]
+    assert 'data-et3-action="submit-semantic-delivery-revision"' in result["html"]
+    assert result["html"].index("退回复核阶段修改") < result["html"].index("已保留的阶段结果")
 
 
 def test_v3_delivery_recovery_posts_only_the_server_bound_identity_and_never_a_path():

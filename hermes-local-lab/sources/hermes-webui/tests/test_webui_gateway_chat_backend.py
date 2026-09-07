@@ -670,7 +670,7 @@ def test_gateway_http_401_with_key_suggests_key_mismatch():
 
 
 def test_gateway_public_errors_do_not_echo_provider_secrets_paths_or_raw_exceptions():
-    raw = "provider exploded sk-abcdefghijklmnopqrstuvwxyz at /private/provider/model.py"
+    raw = "provider exploded sk-FAKE-ERROR at /private/provider/model.py"
     exc = urllib.error.HTTPError(
         "http://gateway.local/v1/runs",
         503,
@@ -687,7 +687,7 @@ def test_gateway_public_errors_do_not_echo_provider_secrets_paths_or_raw_excepti
     for event in events:
         serialized = json.dumps(event, ensure_ascii=False)
         assert "provider exploded" not in serialized
-        assert "sk-abcdefghijklmnopqrstuvwxyz" not in serialized
+        assert "sk-FAKE-ERROR" not in serialized
         assert "/private/provider/model.py" not in serialized
         assert "HTTP 503" in serialized or "暂时不可用" in serialized
 
@@ -793,6 +793,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     s = new_session()
     s.profile = "alice"
+    s.model = "@zai:test-model"
+    s.model_provider = "zai"
+    s.expert_team_launch_transaction_id = "a" * 64
     prior_messages = [
         {"role": "user", "content": "Earlier question", "timestamp": 1.0},
         {"role": "assistant", "content": "Earlier answer", "timestamp": 2.0},
@@ -846,6 +849,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         str(tmp_path),
         stream_id,
         [],
+        model_provider="zai",
+        persisted_session_model="@zai:test-model",
         turn_envelope=placeholder_envelope,
     )
 
@@ -855,8 +860,55 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     ]
     assert saved.messages[-1]["content"] == "hello"
     assert saved.messages[-1]["_turnDuration"] > 0
+    assert saved.model == "@zai:test-model"
     reloaded = models.Session.load(s.session_id)
     assert reloaded.messages[-1]["_turnDuration"] == saved.messages[-1]["_turnDuration"]
+    assert reloaded.model == "@zai:test-model"
+    from api import routes
+    from api.expert_teams import launch_storage
+
+    run = {
+        "run_id": "run-gateway-persisted-model",
+        "session_id": s.session_id,
+        "product_mode": "standalone",
+        "launch_profile_id": "work-report",
+        "launch_profile_snapshot": {"id": "work-report"},
+    }
+    receipt = {
+        "state": "committed",
+        "transaction_id": "a" * 64,
+        "run_id": run["run_id"],
+        "session_id": s.session_id,
+        "workspace": str(tmp_path),
+        "launch_profile_id": run["launch_profile_id"],
+        "launch_profile_snapshot": run["launch_profile_snapshot"],
+        "session_options": {
+            "workspace": str(tmp_path),
+            "profile": "alice",
+            "model": "@zai:test-model",
+            "model_provider": "zai",
+        },
+        "initial_session_snapshot": {
+            "workspace": str(tmp_path),
+            "profile": "alice",
+            "model": "@zai:test-model",
+            "model_provider": "zai",
+        },
+    }
+    monkeypatch.setattr(
+        launch_storage,
+        "read_launch_transaction_for_run",
+        lambda _run_id: receipt,
+    )
+    assert routes._expert_team_standalone_execution_binding(
+        tmp_path, run, reloaded
+    ) == {
+        "workspace": str(tmp_path.resolve()),
+        "profile": "alice",
+        "model": "@zai:test-model",
+        "model_provider": "zai",
+        "source": "committed_launch_receipt",
+    }
     assert isinstance(saved.messages[0]["timestamp"], float)
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
@@ -869,6 +921,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-profile"] == "alice"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
+    assert payload["model"] == "test-model"
     assert payload["messages"] == list(effective_envelopes[-1].model_messages)
     assert "placeholder only" not in str(payload["messages"])
     expected_system_prompt = f"{gateway_chat.BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{streaming._WEBUI_PROGRESS_PROMPT}"
@@ -1079,7 +1132,7 @@ def test_gateway_final_save_validates_visible_assistant_but_keeps_internal_conte
     raw_user = "ordinary user /tmp/customer/input.txt"
     raw_content = (
         "业务回复：内部配置项 HERMES_WEBUI_PORT=8765，"
-        "Authorization: Bearer sk-gateway-internal-canary，随后继续。"
+        "Authorization: Bearer sk-FAKE-GW，随后继续。"
     )
     journal_events = []
 
@@ -1123,18 +1176,18 @@ def test_gateway_final_save_validates_visible_assistant_but_keeps_internal_conte
     assert saved.messages[-2]["content"] == raw_user
     assert saved.messages[-1]["content"] != raw_content
     assert "HERMES_WEBUI_PORT" not in saved.messages[-1]["content"]
-    assert "sk-gateway-internal-canary" not in saved.messages[-1]["content"]
+    assert "sk-FAKE-GW" not in saved.messages[-1]["content"]
     assert saved.context_messages[-1]["content"] == raw_content
     public_events = []
     while not subscriber.empty():
         public_events.append(subscriber.get_nowait())
     public_serialized = json.dumps([public_events, journal_events], ensure_ascii=False)
     assert "HERMES_WEBUI_PORT" not in public_serialized
-    assert "sk-gateway-internal-canary" not in public_serialized
+    assert "sk-FAKE-GW" not in public_serialized
 
 
 def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(monkeypatch):
-    raw_content = "HERMES_WEBUI_PORT=8765 Authorization: Bearer sk-runs-internal-canary"
+    raw_content = "HERMES_WEBUI_PORT=8765 Authorization: Bearer sk-FAKE-RUN"
 
     class StartResponse:
         def __enter__(self): return self
@@ -1161,7 +1214,7 @@ def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(mo
         session_id="sid-runs-public-internal",
         stream_id="stream-runs-public-internal",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -1170,7 +1223,7 @@ def test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text(mo
     assert result["public_final_text"] != raw_content
     public_serialized = json.dumps(events, ensure_ascii=False)
     assert "HERMES_WEBUI_PORT" not in public_serialized
-    assert "sk-runs-internal-canary" not in public_serialized
+    assert "sk-FAKE-RUN" not in public_serialized
 
 
 def test_gateway_runs_short_buffered_delta_is_not_duplicated_by_completed_output(monkeypatch):
@@ -1201,7 +1254,7 @@ def test_gateway_runs_short_buffered_delta_is_not_duplicated_by_completed_output
         session_id="sid-runs-short-buffered",
         stream_id="stream-runs-short-buffered",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -1246,7 +1299,7 @@ def test_gateway_runs_collects_private_image_candidate_without_public_path(monke
         session_id="sid-image",
         stream_id="stream-image",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: public_events.append((name, data)),
     )
 
@@ -1582,7 +1635,7 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(
     )
     vision_calls = []
 
-    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    secret = "ghp_FAKEFIXTURE"
 
     async def fake_vision_analyze_tool(**kwargs):
         vision_calls.append(kwargs)
@@ -2018,7 +2071,7 @@ def test_gateway_runs_terminal_events_keep_cancel_and_error_semantics(
         session_id="session-terminal",
         stream_id="stream-terminal",
         cancel_event=threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, payload: emitted.append((name, payload)),
     )
 
@@ -2071,7 +2124,7 @@ def test_gateway_runs_stops_orphan_when_started_session_id_does_not_match(monkey
         session_id="expected-session",
         stream_id="stream-orphan",
         cancel_event=threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, payload: None,
     )
 
@@ -2118,7 +2171,7 @@ def test_gateway_runs_same_name_tool_completion_matches_stable_id(monkeypatch):
             session_id="session-tools",
             stream_id=stream_id,
             cancel_event=threading.Event(),
-            brand_token_tail=[""],
+            brand_tail=[""],
             put_gateway_event=lambda name, payload: None,
         )
 
@@ -2193,7 +2246,7 @@ def test_gateway_run_incomplete_event_stream_stops_run_and_returns_error(monkeyp
         session_id="session-incomplete",
         stream_id="stream-incomplete",
         cancel_event=threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, payload: None,
     )
 
@@ -2743,7 +2796,7 @@ def test_gateway_runs_user_cancel_returns_cancelled_even_with_partial_text(monke
         session_id="sid-runs-cancel",
         stream_id="stream-runs-cancel",
         cancel_event=cancel,
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -2780,7 +2833,7 @@ def test_gateway_run_reasoning_uses_stateful_cross_chunk_filter(monkeypatch):
         session_id="sid-runs-reasoning",
         stream_id="stream-runs-reasoning",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -2823,7 +2876,7 @@ def test_gateway_runs_server_cancelled_preserves_cancelled_outcome(monkeypatch):
         session_id="sid-runs-server-cancel",
         stream_id="stream-runs-server-cancel",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -2859,7 +2912,7 @@ def test_gateway_runs_partial_eof_is_not_completed(monkeypatch):
         session_id="sid-runs-truncated",
         stream_id="stream-runs-truncated",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 
@@ -2895,7 +2948,7 @@ def test_gateway_runs_failed_discards_buffered_reasoning(monkeypatch):
         session_id="sid-runs-failed",
         stream_id="stream-runs-failed",
         cancel_event=gateway_chat.threading.Event(),
-        brand_token_tail=[""],
+        brand_tail=[""],
         put_gateway_event=lambda name, data: events.append((name, data)),
     )
 

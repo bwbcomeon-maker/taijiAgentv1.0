@@ -1253,6 +1253,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    persisted_session_model=None,
     display_msg=None,
     turn_id=None,
     turn_envelope=None,
@@ -1840,7 +1841,7 @@ def _run_gateway_chat_streaming(
             s.pending_attachments = None
             s.pending_started_at = None
             s.workspace = str(workspace)
-            s.model = model
+            s.model = persisted_session_model or model
             s.model_provider = model_provider
             try:
                 append_turn_journal_event_for_stream(

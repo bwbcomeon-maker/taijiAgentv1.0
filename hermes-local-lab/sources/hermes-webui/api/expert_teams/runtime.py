@@ -77,6 +77,101 @@ from .storage import latest_run_for_session, read_run, run_file_lock, run_path, 
 from .view import expert_team_run_view
 
 
+_CONTENT_POLISH_PROFILE_ID = "content-polish"
+_CONTENT_POLISH_ORIGINAL_SOURCE_ID = "SRC-POLISH-ORIGINAL"
+_CONTENT_POLISH_ORIGINAL_SOURCE_LABEL = "待润色原文"
+_CONTENT_POLISH_ORIGINAL_VERSIONED_ID = re.compile(
+    rf"^{re.escape(_CONTENT_POLISH_ORIGINAL_SOURCE_ID)}-[0-9a-f]{{64}}$"
+)
+
+
+def _is_content_polish_run(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    return str(profile.get("id") or run.get("launch_profile_id") or "") == _CONTENT_POLISH_PROFILE_ID
+
+
+def _is_content_polish_original_source_id(source_id: object) -> bool:
+    value = str(source_id or "")
+    return value == _CONTENT_POLISH_ORIGINAL_SOURCE_ID or bool(
+        _CONTENT_POLISH_ORIGINAL_VERSIONED_ID.fullmatch(value)
+    )
+
+
+def _content_polish_original_source_id(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"{_CONTENT_POLISH_ORIGINAL_SOURCE_ID}-{digest}"
+
+
+def merge_content_polish_original_source_patch(run: dict, patch: object) -> object:
+    """Merge the one editable polish source without changing generic ref patch semantics."""
+    if not isinstance(patch, dict) or not _is_content_polish_run(run):
+        return deepcopy(patch)
+    policy_patch = patch.get("source_policy") if isinstance(patch.get("source_policy"), dict) else None
+    submitted_refs = policy_patch.get("source_refs") if policy_patch else None
+    if submitted_refs is None:
+        return deepcopy(patch)
+    if not isinstance(submitted_refs, list) or len(submitted_refs) != 1:
+        raise ContractError("invalid_polish_original", "source_policy.source_refs", "润色原文不能为空")
+    submitted = submitted_refs[0] if isinstance(submitted_refs[0], dict) else {}
+    if (
+        str(submitted.get("source_id") or "") != _CONTENT_POLISH_ORIGINAL_SOURCE_ID
+        or str(submitted.get("kind") or "") != "provided_text"
+        or str(submitted.get("label") or "") != _CONTENT_POLISH_ORIGINAL_SOURCE_LABEL
+    ):
+        raise ContractError("invalid_polish_original", "source_policy.source_refs", "润色原文资料格式无效")
+    text = submitted.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ContractError("invalid_polish_original", "source_policy.source_refs", "润色原文不能为空")
+
+    existing = list(((run.get("document_brief") or {}).get("source_policy") or {}).get("source_refs") or [])
+    for ref in existing:
+        if not isinstance(ref, dict) or not _is_content_polish_original_source_id(ref.get("source_id")):
+            continue
+        if str(ref.get("kind") or "") != "provided_text":
+            raise ContractError("source_conflict", "source_policy.source_refs", "已绑定的润色原文资料类型冲突")
+    merged_refs = [
+        deepcopy(ref)
+        for ref in existing
+        if isinstance(ref, dict) and not _is_content_polish_original_source_id(ref.get("source_id"))
+    ]
+    merged_refs.append(
+        {
+            "source_id": _content_polish_original_source_id(text),
+            "kind": "provided_text",
+            "label": _CONTENT_POLISH_ORIGINAL_SOURCE_LABEL,
+            "text": text,
+        }
+    )
+    merged_patch = deepcopy(patch)
+    merged_patch["source_policy"] = {**policy_patch, "source_refs": merged_refs}
+    return merged_patch
+
+
+def _preserve_content_polish_original_text(run: dict, brief: dict, resolved_refs: list[dict]) -> list[dict]:
+    if not _is_content_polish_run(run):
+        return resolved_refs
+    original = next(
+        (
+            item
+            for item in ((brief.get("source_policy") or {}).get("source_refs") or [])
+            if isinstance(item, dict)
+            and _is_content_polish_original_source_id(item.get("source_id"))
+            and str(item.get("kind") or "") == "provided_text"
+            and isinstance(item.get("text"), str)
+        ),
+        None,
+    )
+    if original is None:
+        return resolved_refs
+    return [
+        {**ref, "text": original["text"]}
+        if _is_content_polish_original_source_id(ref.get("source_id"))
+        and str(ref.get("kind") or "") == "provided_text"
+        else ref
+        for ref in resolved_refs
+    ]
+
+
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _FINAL_DELIVERY_ARTIFACT_KINDS = {"final_document", "delivery_package", "quality_report"}
 _ACTION_JOURNAL_LIMIT = 128
@@ -1182,6 +1277,65 @@ def _current_stage(run: dict) -> dict:
 
 
 def _authoritative_stage_for_mutation(run: dict) -> dict:
+    pending = run.get("pending_system_stage")
+    profile = run.get("launch_profile_snapshot")
+    if (
+        str(run.get("workflow_state") or "") == "delivery_validation_required"
+        and isinstance(pending, dict)
+        and str(pending.get("executor") or "") == "system"
+    ):
+        system_steps = (
+            profile.get("post_approval_system_steps") or []
+            if isinstance(profile, dict)
+            else []
+        )
+        declared = [
+            (position, item)
+            for position, item in enumerate(system_steps)
+            if isinstance(item, dict)
+            and str(item.get("id") or "") == str(pending.get("id") or "")
+            and str(item.get("executor") or "") == "system"
+            and item == pending
+        ]
+        stages = profile.get("stages") or []
+        template = run.get("_tasks_template")
+        try:
+            current_index = int(run.get("current_stage_index"))
+        except (TypeError, ValueError):
+            current_index = -1
+        if (
+            len(declared) == 1
+            and isinstance(stages, list)
+            and isinstance(template, list)
+            and bool(template)
+            and len(template) == len(stages)
+            and all(
+                isinstance(template_task, dict)
+                and isinstance(frozen_task, dict)
+                and str(template_task.get("id") or "") == str(frozen_task.get("id") or "")
+                and str(template_task.get("executor") or "") == str(frozen_task.get("executor") or "")
+                and str(template_task.get("artifact_type") or "")
+                == str(frozen_task.get("artifact_type") or "")
+                for template_task, frozen_task in zip(template, stages)
+            )
+            and current_index == len(template) + declared[0][0]
+        ):
+            task = declared[0][1]
+            return {
+                "index": current_index,
+                "id": str(task.get("id") or ""),
+                "task_id": str(task.get("id") or ""),
+                "title": task.get("title"),
+                "phase": task.get("phase"),
+                "worker_id": task.get("worker_id"),
+                "worker_name": task.get("worker_name"),
+                "status": str(task.get("status") or "pending"),
+            }
+        raise ExpertTeamStateConflict(
+            "corrupt_run_state",
+            "expert team pending system stage does not match the frozen delivery position",
+            run,
+        )
     tasks = run.get("_tasks_template")
     if not isinstance(tasks, list) or not tasks:
         raise ExpertTeamStateConflict(
@@ -3244,7 +3398,7 @@ def update_expert_team_document_brief(workspace: Path, body: dict) -> dict:
     ) in {"starting", "generating", "revising", "awaiting_review", "awaiting_stage_input", "completed"}
     updated = patch_document_brief(
         run.get("document_brief") or {},
-        body.get("patch"),
+        merge_content_polish_original_source_patch(run, body.get("patch")),
         expected_revision=body.get("expected_brief_revision"),
         stage_started=stage_started,
     )
@@ -3282,7 +3436,7 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         )
     except SourceRegistryError as exc:
         raise ContractError(exc.code, f"source_policy.source_refs.{exc.source_id}", str(exc)) from exc
-    brief["source_policy"]["source_refs"] = resolved_refs
+    brief["source_policy"]["source_refs"] = _preserve_content_polish_original_text(run, brief, resolved_refs)
     checked_at = _now()
     validation = validate_document_brief(
         brief,
@@ -5178,6 +5332,7 @@ def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
     brief = run.get("document_brief") or {}
     if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
         from .documents import (
+            approved_material_ledger_for_run,
             evaluate_semantic_gates,
             resolve_approved_input_artifacts,
         )
@@ -5198,11 +5353,13 @@ def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
                 if needs_strict_source_semantics
                 else []
             )
+            material_ledger = approved_material_ledger_for_run(run)
             semantic_gates = evaluate_semantic_gates(
                 brief=brief,
                 artifact=artifact,
                 approved_inputs=artifact.get("input_refs") or [],
                 approved_artifacts=approved_artifacts,
+                material_ledger=material_ledger,
                 source_context=source_context,
                 source_requirement=(
                     (run.get("launch_profile_snapshot") or {}).get(
@@ -5856,6 +6013,114 @@ def _invalidate_generated_delivery_stage_reservation(
     return rows
 
 
+def _semantic_delivery_revision_context(run: dict, body: dict) -> tuple[dict, dict, int, str]:
+    """Bind a semantic delivery failure to its one frozen upstream model stage."""
+
+    if (
+        str(run.get("product_mode") or "") != "standalone"
+        or str(run.get("workflow_state") or "") != "generated_invalid"
+        or str(run.get("last_execution_error_code") or "") != "delivery_semantic_blocked"
+    ):
+        raise ExpertTeamStateConflict(
+            "stale_state",
+            "standalone delivery is not awaiting semantic revision",
+            run,
+        )
+    if str(body.get("stage_id") or "") != "delivery" or type(body.get("stage_attempt")) is not int:
+        raise ExpertTeamStateConflict(
+            "stale_stage",
+            "semantic delivery revision must bind the failed delivery stage",
+            run,
+        )
+    descriptor = run.get("pending_system_stage")
+    if (
+        not isinstance(descriptor, dict)
+        or descriptor.get("executor") != "system"
+        or str(descriptor.get("id") or "") != "delivery"
+    ):
+        raise ExpertTeamStateConflict(
+            "system_step_contract_missing",
+            "semantic delivery revision has no immutable delivery descriptor",
+            run,
+        )
+    failed_stage = run.get("current_stage_attempt_reservation")
+    failed_delivery = run.get("current_delivery_attempt_reservation")
+    attempt = int(body["stage_attempt"])
+    if (
+        not isinstance(failed_stage, dict)
+        or str(failed_stage.get("stage_id") or "") != "delivery"
+        or int(failed_stage.get("stage_attempt") or 0) != attempt
+        or str(failed_stage.get("executor") or "") != "system"
+        or str(failed_stage.get("artifact_type") or "") != "delivery_manifest"
+        or str(failed_stage.get("status") or "") != "generated_invalid"
+        or not isinstance(failed_delivery, dict)
+        or str(failed_delivery.get("status") or "") != "generated_invalid"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "semantic delivery failure reservation is missing or changed",
+            run,
+        )
+    stage_rows = [
+        item for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict) and item == failed_stage
+    ]
+    delivery_rows = [
+        item for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict) and item == failed_delivery
+    ]
+    if len(stage_rows) != 1 or len(delivery_rows) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "semantic delivery failure ledger is missing or ambiguous",
+            run,
+        )
+    target_index, target_stage_id = _standalone_delivery_revision_stage(run)
+    canonical = run.get("canonical_document_ref")
+    ref = run.get("current_stage_artifact_ref")
+    approved = (run.get("approved_stage_artifact_refs") or {}).get(target_stage_id)
+    expected = {
+        "artifact_id": str(body.get("artifact_id") or ""),
+        "sha256": str(body.get("artifact_sha256") or ""),
+    }
+    if (
+        not isinstance(canonical, dict)
+        or {"artifact_id": canonical.get("artifact_id"), "sha256": canonical.get("sha256")} != expected
+        or not isinstance(ref, dict)
+        or {"artifact_id": ref.get("artifact_id"), "sha256": ref.get("sha256")} != expected
+        or approved != expected
+        or failed_stage.get("input_refs") != [{"ref_type": "stage_artifact", **expected}]
+    ):
+        raise ExpertTeamStateConflict(
+            "stale_artifact",
+            "semantic delivery revision is not bound to the approved review artifact",
+            run,
+        )
+    return failed_stage, failed_delivery, target_index, target_stage_id
+
+
+def _invalidate_semantic_delivery_failure(
+    run: dict,
+    failed_stage: dict,
+    failed_delivery: dict,
+    *,
+    at: str,
+) -> tuple[list[dict], list[dict]]:
+    stage_rows = [deepcopy(item) for item in run.get("stage_attempt_reservations") or [] if isinstance(item, dict)]
+    delivery_rows = [deepcopy(item) for item in run.get("delivery_attempt_reservations") or [] if isinstance(item, dict)]
+    stage_matches = [index for index, item in enumerate(stage_rows) if item == failed_stage]
+    delivery_matches = [index for index, item in enumerate(delivery_rows) if item == failed_delivery]
+    if len(stage_matches) != 1 or len(delivery_matches) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "semantic delivery failure ledger changed before invalidation",
+            run,
+        )
+    stage_rows[stage_matches[0]] = {**stage_rows[stage_matches[0]], "status": "invalidated", "invalidated_at": at}
+    delivery_rows[delivery_matches[0]] = {**delivery_rows[delivery_matches[0]], "status": "invalidated", "invalidated_at": at}
+    return stage_rows, delivery_rows
+
+
 @_serialized_body_mutation
 def rerender_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
     """Regenerate only the bound DOCX while preserving confirmed model content."""
@@ -6014,6 +6279,67 @@ def request_standalone_expert_team_delivery_revision(workspace: Path, body: dict
     feedback = str(body.get("feedback") or "").strip()
     if not feedback:
         raise ValueError("standalone delivery revision feedback is required")
+    semantic_return = (
+        str(run.get("workflow_state") or "") == "generated_invalid"
+        and str(run.get("last_execution_error_code") or "") == "delivery_semantic_blocked"
+    )
+    if semantic_return:
+        failed_stage, failed_delivery, target_index, target_stage_id = _semantic_delivery_revision_context(run, body)
+        at = _now()
+        stage_rows, delivery_rows = _invalidate_semantic_delivery_failure(
+            run,
+            failed_stage,
+            failed_delivery,
+            at=at,
+        )
+        entry = {
+            "stage_id": target_stage_id,
+            "feedback": feedback,
+            "at": at,
+            "semantic_gate": "delivery_semantic_blocked",
+            "artifact_id": str(body.get("artifact_id") or ""),
+            "artifact_sha256": str(body.get("artifact_sha256") or ""),
+        }
+        outputs = [deepcopy(item) for item in run.get("stage_outputs") or [] if isinstance(item, dict)]
+        for output in reversed(outputs):
+            if str(output.get("stage_id") or output.get("task_id") or "") == target_stage_id:
+                output["status"] = "revision_requested"
+                output["revision_requested_at"] = at
+                output.setdefault("feedback_history", []).append(deepcopy(entry))
+                break
+        approved = deepcopy(run.get("approved_stage_artifact_refs") or {})
+        approved.pop(target_stage_id, None)
+        _record_action(run, body, "revise_delivery")
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate",
+            "delivery_semantic_revision_requested",
+            {
+                **_clear_execution_patch(),
+                "current_stage_index": target_index,
+                "stage_outputs": outputs,
+                "revision_feedback": [*deepcopy(run.get("revision_feedback") or []), deepcopy(entry)],
+                "delivery_revision_feedback": [*deepcopy(run.get("delivery_revision_feedback") or []), deepcopy(entry)],
+                "approved_stage_artifact_refs": approved,
+                "canonical_document_ref": None,
+                "current_stage_artifact_ref": None,
+                "current_stage_attempt_reservation": None,
+                "current_delivery_manifest_ref": None,
+                "current_delivery_attempt_reservation": None,
+                "stage_attempt_reservations": stage_rows,
+                "delivery_attempt_reservations": delivery_rows,
+                "delivery_gate": {"schema_version": "standalone-delivery-gate/v1", "status": "invalidated", "invalidated_at": at, "reason": "semantic_delivery_revision"},
+                "local_delivery_confirmation": None,
+                "pending_system_stage": None,
+                "pending_system_stage_result": "invalidated",
+                "semantic_validation": {},
+                "last_validation_error": "",
+                "last_execution_error": "",
+                "last_execution_error_code": "",
+                "last_execution_incident_id": "",
+            },
+        )
     attempt = body.get("delivery_attempt")
     stage_id = str(body.get("stage_id") or "")
     with delivery_attempt_lock(
