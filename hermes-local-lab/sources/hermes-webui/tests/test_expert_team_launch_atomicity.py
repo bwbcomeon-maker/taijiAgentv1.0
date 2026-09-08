@@ -177,6 +177,174 @@ def test_launch_route_atomically_creates_one_session_and_run(launch_env):
     assert len(list((workspace / ".taiji" / "expert-teams" / "runs").glob("*.json"))) == 1
 
 
+def test_research_launch_freezes_only_verified_uploaded_attachment(launch_env, monkeypatch):
+    routes, models, sessions, workspace = launch_env
+    from api import config, expert_teams, upload
+    from api.expert_teams import storage
+
+    source_session_id = "source-upload-session"
+    source_session = models.Session(session_id=source_session_id, workspace=str(workspace))
+    source_session.save(touch_updated_at=False, skip_index=True)
+    sessions[source_session_id] = source_session
+    monkeypatch.setattr(upload, "STATE_DIR", config.STATE_DIR)
+    attachment_dir = upload._session_attachment_dir(source_session_id)
+    attachment_dir.mkdir(parents=True)
+    source_name = "澄岳能源集团综合管理部调研参考资料.txt"
+    source_text = "澄岳能源集团综合管理部现有日常办公流程包括会议纪要、材料流转和资源统筹。"
+    (attachment_dir / source_name).write_text(source_text, encoding="utf-8")
+    body = _launch_body(
+        launch_profile_id="research-report",
+        prompt="请结合附件，调研人工智能在澄岳能源集团综合管理部日常办公中的应用，形成内部汇报用的深度报告，重点分析可行路径和实施建议。",
+        idempotency_key="launch-research-uploaded-source",
+        writing_style="government",
+        depth="deep",
+        session_options={**_launch_body()["session_options"], "workspace": str(workspace)},
+        source_session_id=source_session_id,
+        source_attachments=[{
+            "name": source_name,
+            "ref": source_name,
+            "mime": "text/plain",
+            "size": len(source_text.encode("utf-8")),
+        }],
+    )
+
+    response = _post(routes, "/api/expert-teams/launch", body)
+
+    assert response.status == 200, response.json_body()
+    payload = response.json_body()
+    assert payload["ok"] is True
+    run = storage.read_run(workspace, payload["run"]["run_id"])
+    receipt = _launch_receipt(body)
+    refs = run["document_brief"]["source_policy"]["source_refs"]
+    assert len(refs) == 1
+    assert refs[0]["kind"] == "attachment"
+    assert refs[0]["label"] == source_name
+    assert run["document_brief"]["original_request"] == body["prompt"]
+    assert run["document_brief"]["exact_title"] == "人工智能在澄岳能源集团综合管理部日常办公中的应用调研报告"
+    assert "请结合附件" not in run["document_brief"]["exact_title"]
+    assert receipt["writing_style"] == "government"
+    assert receipt["depth"] == "deep"
+    assert run["research_writing_contract"]["writing_style"]["id"] == "government"
+    assert run["research_writing_contract"]["depth"] == "deep"
+    context = expert_teams.verified_source_context_for_execution(workspace, run)
+    assert context["sources"][0]["content_text"] == source_text
+    assert context["sources"][0]["content_sha256"] == refs[0]["sha256"]
+    source_id = context["sources"][0]["source_id"]
+    gateway_request = routes._expert_team_enterprise_gateway_request(workspace, run)
+    envelope = json.loads(gateway_request["messages"][1]["content"])
+    provider_segments = envelope["source_context"]["sources"][0]["segments"]
+    assert "".join(segment["text"] for segment in provider_segments) == source_text
+    assert envelope["source_context"]["sources"][0]["provider_projection_truncated"] is False
+    from api.expert_teams.prompts import _system_message
+    source_register_prompt = _system_message(
+        "source_register",
+        run["document_brief"],
+        research_v3=True,
+        research_v3_source_ids=(source_id,),
+    )
+    assert source_id in source_register_prompt
+    assert "brief-confirmed" not in source_register_prompt
+    assert "不得把附件事实归入原始诉求" in source_register_prompt
+    from api.expert_teams.stage_artifacts import _research_v3_user_background_snapshot
+    source_register_snapshot = _research_v3_user_background_snapshot(context, run["document_brief"])
+    assert [item["source_id"] for item in source_register_snapshot["sources"]] == [source_id]
+
+
+def test_research_v3_launch_keeps_receipt_and_run_profile_snapshots_identical(
+    launch_env,
+):
+    routes, _models, _sessions, workspace = launch_env
+    body = _launch_body(
+        launch_profile_id="research-report",
+        prompt="根据用户提供资料研究央国企人工智能辅助办公的治理与推广条件",
+        idempotency_key="launch-research-v3-profile-binding",
+        session_options={"workspace": str(workspace), "profile": "default"},
+    )
+
+    response = _post(routes, "/api/expert-teams/launch", body)
+
+    assert response.status == 200, response.json_body()
+    run = response.json_body()["run"]
+    receipt = _launch_receipt(body)
+    assert run["launch_profile_snapshot"] == receipt["launch_profile_snapshot"]
+    assert "formal_report_writing_contract" not in run["launch_profile_snapshot"]
+    assert run["research_writing_contract"]["writing_style"]["id"] == "central_enterprise"
+    assert run["research_writing_contract"]["depth"] == "standard"
+
+
+def test_research_v3_launch_then_http_resume_reaches_mock_worker_with_receipt_binding(
+    launch_env,
+    monkeypatch,
+):
+    routes, _models, _sessions, workspace = launch_env
+    body = _launch_body(
+        launch_profile_id="research-report",
+        prompt="根据用户提供资料研究央国企人工智能辅助办公的治理与推广条件",
+        idempotency_key="launch-research-v3-http-resume",
+        session_options={
+            "workspace": str(workspace),
+            "profile": "default",
+            "model": "openai/gpt-5.4-mini",
+            "model_provider": "openai",
+        },
+    )
+    launched = _post(routes, "/api/expert-teams/launch", body)
+    assert launched.status == 200, launched.json_body()
+    run = launched.json_body()["run"]
+    receipt = _launch_receipt(body)
+    assert run["launch_profile_snapshot"] == receipt["launch_profile_snapshot"]
+
+    worker_calls = []
+    import api.runtime_adapter as runtime_adapter
+
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(runtime_adapter, "build_runtime_adapter", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_provider_binding_identity_in_profile",
+        lambda *, model, provider, profile: (str(provider), str(model), None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+            "provider_metadata": {"network_scope": "unknown"},
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda _session, **kwargs: worker_calls.append(kwargs)
+        or {"stream_id": "mock-first-v3-stream", "turn_id": "mock-first-v3-turn"},
+    )
+
+    resumed = _post(
+        routes,
+        "/api/expert-teams/resume",
+        {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "expected_version": run["version"],
+            "stage_id": run["current_stage"]["task_id"],
+            "idempotency_key": "resume-research-v3-first-dispatch",
+        },
+    )
+
+    assert resumed.status == 200, resumed.json_body()
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["model_provider"] == "openai"
+    assert worker_calls[0]["stream_id"]
+
+
 def test_launch_idempotency_conflict_never_creates_a_second_session(launch_env):
     routes, _models, sessions, workspace = launch_env
     body = _launch_body(session_options={"workspace": str(workspace), "profile": "default"})

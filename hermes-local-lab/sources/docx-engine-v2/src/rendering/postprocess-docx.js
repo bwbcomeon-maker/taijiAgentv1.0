@@ -31,6 +31,17 @@ async function postprocessDocx({ docxPath, renderPlan, outputPath } = {}) {
 
   bindPlannedContent({ entries, documentXml: documentXml.toString('utf8'), renderPlan, outputPath });
   normalizePortableFooters(entries);
+  const draft = renderPlan.renderInputBinding?.researchWorkingDraft;
+  if (draft) {
+    const paragraph = (text) => `<w:p><w:r><w:t xml:space="preserve">${escapeXmlText(text)}</w:t></w:r></w:p>`;
+    let xml = entries.get('word/document.xml').toString('utf8');
+    xml = xml.replace(/<w:body>/, `<w:body>${paragraph(draft.label)}`);
+    const appendix = paragraph('工作稿审阅意见（待核实）') + draft.notes.map(paragraph).join('');
+    const sectionIndex = xml.lastIndexOf('<w:sectPr');
+    if (sectionIndex < 0) throw new Error('Draft document is missing final section properties.');
+    xml = xml.slice(0, sectionIndex) + appendix + xml.slice(sectionIndex);
+    entries.set('word/document.xml', Buffer.from(xml, 'utf8'));
+  }
 
   await writeZipEntries(entries, outputPath);
   return { status: 'postprocessed', documentPath: outputPath };
@@ -168,7 +179,81 @@ function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], render
   for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
     nextXml = `${nextXml.slice(0, insertion.index)}${insertion.xml}${nextXml.slice(insertion.index)}`;
   }
-  return addDirectoryBookmarks(replaceStaticDirectories(nextXml, renderPlan), renderPlan);
+  const withDirectory = replaceStaticDirectories(nextXml, renderPlan);
+  return applyStandaloneResearchHeadingHierarchy(addDirectoryBookmarks(withDirectory, renderPlan), renderPlan);
+}
+
+function applyStandaloneResearchHeadingHierarchy(documentXml, renderPlan) {
+  if (String(renderPlan?.templateId || '') !== 'standalone-research-report') {
+    return documentXml;
+  }
+  const sections = renderPlan?.templateData?.sections || renderPlan?.sections || [];
+  const anchors = resolveSectionAnchors(paragraphRanges(documentXml), sections);
+  const replacements = anchors
+    .map((anchor, index) => ({ anchor, section: sections[index] || {} }))
+    .filter(({ anchor }) => anchor)
+    .map(({ anchor, section }) => ({
+      start: anchor.start,
+      end: anchor.end,
+      xml: paragraphXmlWithHeadingStyle(anchor.xml, standaloneResearchHeadingStyle(section.level)),
+    }));
+
+  let nextXml = documentXml;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, replacement.start)}${replacement.xml}${nextXml.slice(replacement.end)}`;
+  }
+  return applyStandaloneResearchDirectoryIndentation(nextXml, sections);
+}
+
+function standaloneResearchHeadingStyle(level) {
+  const normalized = Math.max(1, Math.min(3, Number(level || 2) - 1));
+  return `Heading${normalized}`;
+}
+
+function paragraphXmlWithHeadingStyle(paragraphXml, styleId) {
+  const style = `<w:pStyle w:val="${styleId}"/>`;
+  const source = String(paragraphXml || '');
+  if (/<w:pStyle\b[^>]*\/>/.test(source)) {
+    return source.replace(/<w:pStyle\b[^>]*\/>/, style);
+  }
+  if (/<w:pPr\b[^>]*>/.test(source)) {
+    return source.replace(/(<w:pPr\b[^>]*>)/, `$1${style}`);
+  }
+  return source.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${style}</w:pPr>`);
+}
+
+function applyStandaloneResearchDirectoryIndentation(documentXml, sections) {
+  const replacements = (sections || []).map((section, index) => {
+    const bookmark = sectionBookmarkName(index);
+    const paragraph = paragraphRanges(documentXml).find((candidate) => candidate.xml.includes(`w:name="${bookmark}"`));
+    if (!paragraph) {
+      return null;
+    }
+    const indent = Math.max(0, Number(section.level || 2) - 2) * 420;
+    return {
+      start: paragraph.start,
+      end: paragraph.end,
+      xml: paragraphXmlWithIndent(paragraph.xml, indent),
+    };
+  }).filter(Boolean);
+
+  let nextXml = documentXml;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    nextXml = `${nextXml.slice(0, replacement.start)}${replacement.xml}${nextXml.slice(replacement.end)}`;
+  }
+  return nextXml;
+}
+
+function paragraphXmlWithIndent(paragraphXml, indent) {
+  const indentation = `<w:ind w:left="${indent}" w:right="0" w:firstLine="0" w:hanging="0"/>`;
+  const source = String(paragraphXml || '');
+  if (/<w:ind\b[^>]*\/>/.test(source)) {
+    return source.replace(/<w:ind\b[^>]*\/>/, indentation);
+  }
+  if (/<w:pPr\b[^>]*>/.test(source)) {
+    return source.replace(/(<w:pPr\b[^>]*>)/, `$1${indentation}`);
+  }
+  return source.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr>${indentation}</w:pPr>`);
 }
 
 function compactCoverPageSpacing(documentXml) {

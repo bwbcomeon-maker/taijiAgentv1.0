@@ -634,6 +634,37 @@ def _polish_preservation_result(
     }, issues
 
 
+def _bounded_research_working_draft(delivery: dict | None) -> dict | None:
+    """Validate the complete review binding before projecting a draft notice."""
+    if not isinstance(delivery, dict) or delivery.get("execution_policy") != "bounded_report_v1" or delivery.get("result_grade") == "formal_research_report":
+        return None
+    if delivery.get("result_grade") not in {"blocked", "quality_review_required", "preliminary_research_draft"}:
+        return None
+    from .research_review import aggregate_review_ledger
+
+    ledger = delivery.get("review_ledger")
+    aggregate = aggregate_review_ledger(ledger, canonical=delivery.get("canonical"), sidecar=delivery.get("sidecar"))
+    if aggregate["review"] != delivery.get("review") or not aggregate["structure"]["all_chapter_bodies_present"]:
+        raise ValueError("review binding or chapter body is invalid")
+    for unit in ledger["units"]:
+        receipt = unit.get("receipt") or {}
+        if receipt.get("stage_id") != "review" or type(receipt.get("execution_attempt")) is not int or receipt["execution_attempt"] < 1 or receipt.get("packet_sha256") != _sha256_payload(unit["result"]) or not _HEX64.fullmatch(str(receipt.get("content_sha256") or "")) or any(not str(receipt.get(key) or "").strip() for key in ("delivery_id", "execution_start_id", "stream_id")):
+            raise ValueError("review receipt is invalid")
+    findings = [item for item in aggregate["review"]["findings"] if item["verdict"] != "supported" or item["revision_required"]]
+    notes = [str(item["rationale"]) for item in findings]
+    notes.extend(str(issue) for row in aggregate["chapter_quality"] for issue in row.get("issues") or [])
+    notes.extend(
+        "事实依据待核实：" + str(claim.get("statement") or "存在争议或相互矛盾的资料依据。")
+        for claim in delivery["sidecar"].get("claims") or []
+        if claim.get("status") in {"contested", "blocked"} or any(ref.get("relationship") == "contradicts" for ref in claim.get("evidence_refs") or [])
+    )
+    return {
+        "label": "工作稿 · 待核实，不作为正式研究结论",
+        "resultGrade": str(delivery["result_grade"]),
+        "notes": notes or ["当前正文尚未满足正式研究报告的全部门槛。"],
+    }
+
+
 def _research_citation_result(
     *,
     brief: dict,
@@ -642,6 +673,7 @@ def _research_citation_result(
     source_context: dict | None,
     markdown: str,
     product_mode: str,
+    research_v3_delivery: dict | None = None,
 ) -> tuple[dict, list[dict]]:
     strict = (
         str(brief.get("document_type") or "") == "research_report"
@@ -703,6 +735,44 @@ def _research_citation_result(
         for item in payload.get("claim_usage") or []
         if isinstance(item, dict)
     ]
+    if isinstance(research_v3_delivery, dict):
+        # v3 has a closed chapter ledger, provenance sidecar, and independent
+        # review receipt.  Its delivery gate must verify those bindings rather
+        # than applying the legacy v2 rule that every approved claim text and
+        # source id reappear verbatim in the rendered document.
+        canonical = research_v3_delivery.get("canonical")
+        sidecar = research_v3_delivery.get("sidecar")
+        review = research_v3_delivery.get("review")
+        issues = []
+        expected_body = str((canonical or {}).get("body") or "")
+        expected_sha = str((canonical or {}).get("body_sha256") or "")
+        expected_markdown = f"# {brief.get('exact_title') or ''}\n\n{expected_body}"
+        if not expected_body or _normalized_markdown(markdown) != _normalized_markdown(expected_markdown):
+            issues.append(_semantic_issue("research_v3_canonical_mismatch", "canonical:body", "交付正文未逐字绑定已审核的 v3 canonical 正文"))
+        if not isinstance(sidecar, dict) or sidecar.get("canonical_body_sha256") != expected_sha or not str(sidecar.get("sidecar_sha256") or ""):
+            issues.append(_semantic_issue("research_v3_sidecar_invalid", "provenance:sidecar", "交付正文缺少与 canonical 一致的可信来源旁表"))
+        if not isinstance(review, dict) or review.get("review_status") != "reviewer_assessed_passed":
+            issues.append(_semantic_issue("research_v3_review_unapproved", "review:independent", "交付正文尚未通过独立分章审核"))
+        sidecar_claims = {
+            str(item.get("claim_id") or "").strip(): item
+            for item in ((sidecar or {}).get("claims") or [])
+            if isinstance(item, dict) and str(item.get("claim_id") or "").strip()
+        }
+        if not required_claim_ids.issubset(sidecar_claims):
+            issues.append(_semantic_issue("research_v3_claim_binding_missing", "provenance:claims", "提纲 claim 未完整绑定到可信来源旁表"))
+        if any(str(sidecar_claims[claim_id].get("status") or "") in {"contested", "blocked"} for claim_id in required_claim_ids if claim_id in sidecar_claims):
+            issues.append(_semantic_issue("research_v3_factual_blocked", "provenance:claims", "存在争议或阻断事实，不能交付正式研究报告"))
+        result_grade = str(research_v3_delivery.get("result_grade") or "")
+        deliverable_grades = {"formal_research_report"}
+        if research_v3_delivery.get("execution_policy") == "bounded_report_v1":
+            deliverable_grades.update({"preliminary_research_draft", "quality_review_required"})
+        if result_grade not in deliverable_grades:
+            issues.append(_semantic_issue("research_v3_grade_blocked", "review:grade", "研究报告当前等级不允许交付"))
+        return {
+            "status": "passed" if not issues else "failed",
+            "required_claim_count": len(required_claim_ids),
+            "validated_claim_count": len(required_claim_ids) if not issues else 0,
+        }, issues
     usage_by_claim = {
         str(item.get("claim_id") or "").strip(): item
         for item in usage_rows
@@ -1045,6 +1115,7 @@ def evaluate_semantic_gates(
     source_context: dict | None = None,
     source_requirement: dict | None = None,
     product_mode: str = "enterprise",
+    research_v3_delivery: dict | None = None,
 ) -> dict:
     """Evaluate delivery semantics without mutating the delivery attempt tree."""
 
@@ -1056,6 +1127,12 @@ def evaluate_semantic_gates(
     required_sections = required_sections_for_brief(brief)
     document_sections = document_section_headings(markdown)
     issues = []
+    working_draft = None
+    if product_mode == "standalone" and brief.get("document_type") == "research_report" and research_v3_delivery and research_v3_delivery.get("review_ledger") is not None:
+        try:
+            working_draft = _bounded_research_working_draft(research_v3_delivery)
+        except (ValueError, TypeError, KeyError):
+            issues.append(_semantic_issue("research_v3_review_binding_invalid", "review:binding", "工作稿的审核回执或正文身份无效"))
     if headings != [str(brief.get("exact_title") or "")]:
         issues.append(_semantic_issue("title_mismatch", "document:h1", "正文唯一 H1 与确认标题不一致"))
     if artifact.get("artifact_type") not in {"reviewed_document", "reviewed_research_document"}:
@@ -1150,18 +1227,31 @@ def evaluate_semantic_gates(
         source_context=source_context,
         markdown=markdown,
         product_mode=product_mode,
+        research_v3_delivery=research_v3_delivery,
     )
     issues.extend(source_issues)
     evidence_issues.extend(citation_issues)
     issues.extend(evidence_issues)
     for item in unresolved_quality_issues(artifact):
         issues.append(_semantic_issue(item["code"], item["target_id"], item["message"]))
+    if working_draft:
+        review_checks = {"citation_completeness", "unsupported_claims", "unresolved_contradictions"}
+        finding_ids = {str(item["finding_id"]) for item in research_v3_delivery["review"]["findings"] if item["verdict"] != "supported" or item["revision_required"]}
+        for item in issues:
+            quality_only = item["code"] in {"research_v3_review_unapproved", "research_v3_factual_blocked", "research_v3_grade_blocked"}
+            quality_only = quality_only or (item["code"] in {"review_check_failed", "review_attestation_missing"} and item["target_id"] in {f"review-check:{key}" for key in review_checks})
+            quality_only = quality_only or (item["code"] == "review_issue_unresolved" and item["target_id"] in {f"review-issue:{key}" for key in finding_ids})
+            if quality_only:
+                item["completion_blocking"] = False
+                item["disposition"] = "unresolved_working_draft"
+    blocking_issues = [item for item in issues if item.get("completion_blocking", True)]
+    blocking_evidence = [item for item in evidence_issues if item.get("completion_blocking", True)]
     report = {
         "schema_version": "expert-semantic-gates/v1",
         "brief_status": "passed" if brief.get("status") == "confirmed" else "failed",
-        "semantic_status": "passed" if not issues else "failed",
-        "evidence_status": "passed" if not evidence_issues else "failed",
-        "status": "passed" if brief.get("status") == "confirmed" and not issues else "failed",
+        "semantic_status": "passed" if not blocking_issues else "failed",
+        "evidence_status": "passed" if not blocking_evidence else "failed",
+        "status": "passed" if brief.get("status") == "confirmed" and not blocking_issues else "failed",
         "artifact_id": str(artifact.get("artifact_id") or ""),
         "artifact_sha256": str(artifact.get("sha256") or ""),
         "brief_revision": int(brief.get("confirmed_revision") or 0),
@@ -1176,6 +1266,11 @@ def evaluate_semantic_gates(
         },
         "issues": issues,
     }
+    if working_draft:
+        report["research_result_grade"] = research_v3_delivery["result_grade"]
+        report["research_review_status"] = research_v3_delivery["review"]["review_status"]
+        report["validation_scope"] = "working_draft_export"
+        report["research_working_draft"] = working_draft
     return report
 
 
@@ -1190,6 +1285,7 @@ def write_semantic_gates_snapshot(
     source_context: dict | None = None,
     source_requirement: dict | None = None,
     product_mode: str = "enterprise",
+    research_v3_delivery: dict | None = None,
 ) -> dict:
     """Evaluate delivery semantics and persist one immutable upstream report."""
 
@@ -1202,6 +1298,7 @@ def write_semantic_gates_snapshot(
         source_context=source_context,
         source_requirement=source_requirement,
         product_mode=product_mode,
+        research_v3_delivery=research_v3_delivery,
     )
     path = Path(delivery_dir).expanduser().resolve() / "reviews" / "semantic-gates.json"
     _immutable_json(path, report, label="semantic gates")
@@ -1416,6 +1513,18 @@ def prepare_canonical_delivery_inputs(
         source_context=source_context,
         source_requirement=source_requirement,
         product_mode=str(run.get("product_mode") or "enterprise"),
+        research_v3_delivery=(
+            {
+                "canonical": run.get("research_v3_canonical_document"),
+                "sidecar": run.get("research_v3_provenance_sidecar"),
+                "review": run.get("research_v3_independent_review"),
+                "review_ledger": run.get("research_v3_review_ledger"),
+                "result_grade": run.get("research_v3_result_grade"),
+                "execution_policy": (run.get("research_writing_contract") or {}).get("execution_policy"),
+            }
+            if str(profile.get("research_contract_version") or "") == "research-report/v3"
+            else None
+        ),
     )
     assets = deepcopy(asset_manifest) if isinstance(asset_manifest, dict) else {
         "schema_version": "expert-asset-manifest/v1",
@@ -1503,6 +1612,9 @@ def build_render_input_binding(
     for field in ("sha256",):
         if not _HEX64.fullmatch(payload["brief"][field]) or not _HEX64.fullmatch(payload["canonicalArtifact"][field]):
             raise FinalDocumentDeliveryError("render input upstream binding is invalid")
+    gates = json.loads(Path(semantic_gates_path).read_text(encoding="utf-8"))
+    if gates.get("research_working_draft"):
+        payload["researchWorkingDraft"] = deepcopy(gates["research_working_draft"])
     payload["render_input_fingerprint"] = _sha256_payload(payload)
     return payload
 
@@ -1608,6 +1720,25 @@ def build_delivery_binding_v2(
     return binding
 
 
+def _validate_research_working_draft_document(document: Path, render_input: dict) -> None:
+    draft = render_input.get("researchWorkingDraft")
+    if not draft:
+        return
+    import zipfile
+    from xml.etree import ElementTree
+
+    try:
+        with zipfile.ZipFile(document) as archive:
+            root = ElementTree.fromstring(archive.read("word/document.xml"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs = ["".join(p.itertext()) for p in root.findall("w:body/w:p", ns)]
+        expected_tail = ["工作稿审阅意见（待核实）", *draft["notes"]]
+        if not paragraphs or paragraphs[0] != draft["label"] or paragraphs[-len(expected_tail):] != expected_tail:
+            raise ValueError("working draft notice is missing or changed")
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        raise FinalDocumentDeliveryError("research working draft notice failed verification") from exc
+
+
 def build_delivery_binding_v3(
     delivery_dir: Path,
     *,
@@ -1668,6 +1799,7 @@ def build_delivery_binding_v3(
         automatic_report = json.loads(expected_quality.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FinalDocumentDeliveryError("automatic quality report is invalid") from exc
+    _validate_research_working_draft_document(expected_document, render_input)
     document_sha256 = sha256_file(expected_document)
     standalone_quality, standalone_quality_path = write_standalone_quality_report(
         root,

@@ -119,6 +119,36 @@ function contractFixture({ templateId, documentType, sourceSha256 = 'e'.repeat(6
   };
 }
 
+test('bounded research draft notice is fingerprint bound and rendered without changing source', async (t) => {
+  const root = makeTempDir(t);
+  const sourcePath = path.join(root, 'source.md');
+  const assetManifestPath = path.join(root, 'asset-manifest.json');
+  const source = '# 研究工作稿\n\n## 研究问题\n\n完整保留已批准研究正文。\n\n## 分析\n\n现有依据仍需核实。\n';
+  fs.writeFileSync(sourcePath, source, 'utf8');
+  fs.writeFileSync(assetManifestPath, '{"schema_version":"expert-asset-manifest/v1","assets":[]}', 'utf8');
+  const templateId = 'standalone-research-report';
+  const contract = contractFixture({ templateId, documentType: 'research_report', sourceSha256: sha256File(sourcePath), assetManifestSha256: sha256File(assetManifestPath) });
+  contract.documentMetadata.title = '研究工作稿';
+  contract.rendererIdentity = describeRendererIdentity({ engineRoot: ENGINE_ROOT, profileId: 'standalone-default' });
+  contract.renderInputBinding.rendererIdentity = contract.rendererIdentity;
+  contract.renderInputBinding.template.packageSha256 = readJson(path.join(ENGINE_ROOT, 'templates', templateId, 'template-package.binding.json')).packageSha256;
+  contract.renderInputBinding.researchWorkingDraft = {
+    label: '工作稿 · 待核实，不作为正式研究结论', resultGrade: 'blocked',
+    notes: ['政策引用尚待核实，保留此审核意见。'],
+  };
+  contract.renderInputFingerprint = canonicalSha256(contract.renderInputBinding);
+  const result = await runDocumentJob({ engineRoot: ENGINE_ROOT, templateId, sourcePath, sourceType: 'markdown', assetDir: root, assetManifestPath, deliveryDir: path.join(root, 'delivery'), ...contract });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const xml = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath)).get('word/document.xml').toString('utf8');
+  assert.ok(xml.includes(contract.renderInputBinding.researchWorkingDraft.label));
+  assert.ok(xml.includes(contract.renderInputBinding.researchWorkingDraft.notes[0]));
+  assert.ok(xml.includes('完整保留已批准研究正文。'));
+  assert.equal(fs.readFileSync(sourcePath, 'utf8'), source);
+  contract.renderInputBinding.researchWorkingDraft.notes[0] = '篡改意见';
+  const rejected = await runDocumentJob({ engineRoot: ENGINE_ROOT, templateId, sourcePath, sourceType: 'markdown', assetDir: root, assetManifestPath, deliveryDir: path.join(root, 'tampered'), ...contract });
+  assert.equal(rejected.ok, false);
+});
+
 test('registry exposes standalone templates after existing enterprise templates', () => {
   assert.deepEqual(
     listTemplates({ rootDir: ENGINE_ROOT }).map((template) => template.id),

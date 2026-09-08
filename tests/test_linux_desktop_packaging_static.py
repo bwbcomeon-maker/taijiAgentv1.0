@@ -3235,7 +3235,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("return baked", updates)
 
         self.assertNotIn("-taiji-shell-", index)
-        self.assertIn('static/commands.js?v=__WEBUI_VERSION__"', index)
+        self.assertIn('static/commands.js?v=__WEBUI_VERSION__&etlaunch=__EXPERT_TEAM_LAUNCH_REVISION__"', index)
+        self.assertIn('.replace("__EXPERT_TEAM_LAUNCH_REVISION__", expert_team_launch_revision)', routes)
         self.assertIn('static/panels.js?v=__WEBUI_VERSION__"', index)
         self.assertIn("const VQ = '?v=__WEBUI_VERSION__';", sw)
 

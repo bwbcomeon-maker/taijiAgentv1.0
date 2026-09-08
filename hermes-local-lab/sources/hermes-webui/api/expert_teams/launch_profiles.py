@@ -7,6 +7,7 @@ from copy import deepcopy
 from .contracts import ContractError
 from .data_egress import RESEARCH_PUBLIC_QUERY_POLICY
 from .document_capabilities import resolve_document_capability
+from .research_contract import RESEARCH_REPORT_V3
 
 
 CONTENT_CREATOR_TEAM_ID = "content-creator-team"
@@ -99,7 +100,10 @@ _LAUNCH_PROFILES = {
     },
     "research-report": {
         "id": "research-report",
-        "research_contract_version": "research-report/v2",
+        # New launches use the chapter-bound formal report contract. Persisted
+        # runs carry their own profile snapshot, so this does not reinterpret
+        # the historical v2 workflow.
+        "research_contract_version": RESEARCH_REPORT_V3,
         "research_query_egress_policy": deepcopy(RESEARCH_PUBLIC_QUERY_POLICY),
         "capability_id": "research-report",
         "team_id": DEEP_RESEARCH_TEAM_ID,
@@ -243,3 +247,11 @@ def get_launch_profile(profile_id: str | None) -> dict:
             "当前任务类型不可启动",
         )
     return deepcopy(profile)
+
+
+def build_research_v3_candidate_profile() -> dict:
+    """Return the same immutable v3 snapshot used by new public launches."""
+    profile = get_launch_profile("research-report")
+    profile["research_contract_version"] = RESEARCH_REPORT_V3
+    profile["research_v3_candidate"] = True
+    return profile

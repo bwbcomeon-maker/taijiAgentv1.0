@@ -92,8 +92,9 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
     minimum_ready = requirement.get("minimum_ready") if isinstance(requirement, dict) else None
     source_policy = candidate.get("source_policy")
     profile_review = profile.get("review_policy")
-    research_v2 = bool(
-        profile.get("research_contract_version") == "research-report/v2"
+    research_v2_or_v3 = bool(
+        profile.get("research_contract_version")
+        in {"research-report/v2", "research-report/v3"}
         and str(run.get("launch_profile_id") or "") == "research-report"
         and str(run.get("team_id") or "") == "deep-research-team"
         and str(candidate.get("document_type") or "") == "research_report"
@@ -113,7 +114,7 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
         and isinstance(profile_review, dict)
         and profile_review.get("kind") == "local_confirmation"
         and (
-            research_v2
+            research_v2_or_v3
             or (
                 type(minimum_ready) is int
                 and minimum_ready == 0

@@ -9,10 +9,18 @@ import unicodedata
 from copy import deepcopy
 
 from .contracts import ContractError
+from .research_contract import (
+    RESEARCH_V3_START_FIELDS,
+    ResearchV3SpecError,
+    normalize_research_v3_start_spec,
+)
 
 
 _LAUNCH_FIELDS = frozenset(
-    {"launch_profile_id", "prompt", "idempotency_key", "session_options"}
+    {
+        "launch_profile_id", "prompt", "idempotency_key", "session_options",
+        "source_session_id", "source_attachments", *RESEARCH_V3_START_FIELDS,
+    }
 )
 _SESSION_OPTION_FIELDS = frozenset(
     {"workspace", "profile", "project_id", "model", "model_provider"}
@@ -26,8 +34,12 @@ _MAX_LENGTHS = {
     "project_id": 240,
     "model": 512,
     "model_provider": 128,
+    "source_session_id": 240,
 }
 _IDEMPOTENCY_PATTERN = re.compile(r"[A-Za-z0-9:._-]+")
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,240}")
+_MAX_SOURCE_ATTACHMENTS = 8
+_MAX_SOURCE_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 
 def _nfc_text(value: object) -> str:
@@ -84,6 +96,54 @@ def _optional_session_text(options: dict, field: str) -> str | None:
     return normalized
 
 
+def _source_attachments(body: dict) -> tuple[str, list[dict]]:
+    raw = body.get("source_attachments", [])
+    if raw is None:
+        raw = []
+    if type(raw) is not list or len(raw) > _MAX_SOURCE_ATTACHMENTS:
+        raise ContractError("source_attachments_invalid", "source_attachments", "研究资料附件数量无效")
+    source_session_id = _nfc_text(body.get("source_session_id", ""))
+    if raw and _SAFE_SESSION_ID.fullmatch(source_session_id) is None:
+        raise ContractError("source_session_invalid", "source_session_id", "资料来源会话无效")
+    if not raw and source_session_id:
+        raise ContractError("source_attachments_required", "source_attachments", "资料来源会话未携带附件")
+    normalized = []
+    for index, item in enumerate(raw):
+        if type(item) is not dict or set(item) != {"name", "ref", "mime", "size"}:
+            raise ContractError("source_attachment_invalid", f"source_attachments.{index}", "研究资料附件格式无效")
+        name = _nfc_text(item.get("name", ""))
+        ref = _nfc_text(item.get("ref", ""))
+        mime = _nfc_text(item.get("mime", ""))
+        size = item.get("size")
+        safe_upload_name = lambda value: bool(
+            value and len(value) <= 200 and value not in {".", ".."}
+            and "/" not in value and "\\" not in value and "\x00" not in value
+        )
+        if not safe_upload_name(name) or not safe_upload_name(ref):
+            raise ContractError("source_attachment_invalid", f"source_attachments.{index}", "研究资料附件名称无效")
+        if type(size) is not int or isinstance(size, bool) or not 0 < size <= _MAX_SOURCE_ATTACHMENT_BYTES:
+            raise ContractError("source_attachment_invalid", f"source_attachments.{index}.size", "研究资料附件大小无效")
+        if len(mime) > 128:
+            raise ContractError("source_attachment_invalid", f"source_attachments.{index}.mime", "研究资料附件类型无效")
+        normalized.append({"name": name, "ref": ref, "mime": mime, "size": size})
+    return source_session_id, normalized
+
+
+def _research_v3_start_spec(body: dict) -> dict:
+    """Validate the two explicit v3 writing choices when the caller sent them."""
+    requested = {
+        field: body[field]
+        for field in RESEARCH_V3_START_FIELDS
+        if field in body
+    }
+    if not requested:
+        return {}
+    try:
+        return normalize_research_v3_start_spec(requested)
+    except ResearchV3SpecError as exc:
+        raise ContractError(exc.code, exc.field, exc.message) from exc
+
+
 def validate_standalone_launch_request(body: dict) -> dict:
     """Validate the one-request portal launch contract without side effects."""
     if type(body) is not dict:
@@ -137,11 +197,15 @@ def validate_standalone_launch_request(body: dict) -> dict:
         for field in _SESSION_OPTION_FIELDS
         if (value := _optional_session_text(raw_options, field)) is not None
     }
+    source_session_id, source_attachments = _source_attachments(body)
     return {
         "launch_profile_id": launch_profile_id,
         "prompt": prompt,
         "idempotency_key": idempotency_key,
         "session_options": options,
+        "source_session_id": source_session_id,
+        "source_attachments": source_attachments,
+        **_research_v3_start_spec(body),
     }
 
 
@@ -152,6 +216,13 @@ def launch_request_fingerprint(validated: dict) -> str:
         "launch_profile_id": str(validated["launch_profile_id"]),
         "prompt": str(validated["prompt"]),
         "session_options": deepcopy(validated.get("session_options") or {}),
+        "source_session_id": str(validated.get("source_session_id") or ""),
+        "source_attachments": deepcopy(validated.get("source_attachments") or []),
+        **{
+            field: str(validated[field])
+            for field in RESEARCH_V3_START_FIELDS
+            if field in validated
+        },
     }
     encoded = json.dumps(
         canonical,

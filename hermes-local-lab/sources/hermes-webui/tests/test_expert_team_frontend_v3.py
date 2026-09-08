@@ -19,6 +19,30 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_research_working_draft_delivery_shows_real_count_and_finished_research():
+    result = _run_v3_hooks("""
+      const html = hooks.workbenchHtml({
+        productMode:'standalone', publicState:'awaiting_delivery_confirmation',
+        workflowState:'awaiting_review', allowedActions:[],
+        researchV3:{grade:'quality_review_required',completed_units:7,total_units:7,
+          review:{findings:[{verdict:'concern',rationale:'请核实 <script> 数据',revision_required:true}]},
+          body_count:{actual_body_count:12126,minimum:8000,maximum:12000,formal_word_count_passed:false}},
+        brief:{sources:[]}, standaloneDelivery:{}, team:{title:'深度材料研究团'}
+      });
+      process.stdout.write(JSON.stringify({html}));
+    """)
+    assert "研究已结束 · 等待文档确认" in result["html"]
+    assert "待复核工作稿" in result["html"]
+    assert "正文实际 12126 字" in result["html"]
+    assert "超出目标篇幅" in result["html"]
+    assert "正式 DOCX" not in result["html"]
+    assert "正在形成研究报告" not in result["html"]
+    assert "尚无可用证据" not in result["html"]
+    assert "审阅意见" in result["html"]
+    assert "请核实 &lt;script&gt; 数据" in result["html"]
+    assert "<script> 数据" not in result["html"]
+
+
 def _run_node(source: str) -> dict:
     completed = subprocess.run(
         ["node", "-e", source],

@@ -384,6 +384,7 @@
     const view=run.view||{};
     const researchV2=Object.prototype.hasOwnProperty.call(view,'research_progress')&&
       Object.prototype.hasOwnProperty.call(view,'evidence_summary');
+    const researchV3=Object.prototype.hasOwnProperty.call(view,'research_v3');
     const workspace=buildExpertTeamWorkspace(run);
     const productMode=str(view.product_mode);
     const standalone=productMode==='standalone';
@@ -474,7 +475,10 @@
       confirmationGroup:str(question&&question.confirmation_group)
     }));
     const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
-    const productError=normalizedProductError(view.product_error);
+    // Pre-dispatch failures have no durable Run mutation by design.  Their
+    // product error therefore arrives beside ``run`` in the response and must
+    // remain visible to the workbench that renders that same response.
+    const productError=normalizedProductError(data.product_error||view.product_error);
     const diagnostics=normalizedDiagnostics(view.diagnostics);
     const draftIdentity={
       stageAttempt:Number(standalone?(stageActionBinding&&stageActionBinding.stage_attempt||0):(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0)),
@@ -496,6 +500,7 @@
       version:Number(run.version||0),
       productMode,
       researchV2,
+      researchV3:researchV3?(view.research_v3||{}):null,
       researchProgress:researchV2?normalizedResearchProgress(view.research_progress):null,
       evidenceSummary:researchV2?normalizedResearchEvidenceSummary(view.evidence_summary):null,
       publicState,

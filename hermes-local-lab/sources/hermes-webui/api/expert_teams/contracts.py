@@ -391,7 +391,7 @@ def validate_document_brief(
         )
     source_policy = normalized.get("source_policy") or {}
     automatic_fallback_authorized = bool(
-        research_contract_version == "research-report/v2"
+        research_contract_version in {"research-report/v2", "research-report/v3"}
         and standalone
         and document_type == "research_report"
         and task_mode == "create"

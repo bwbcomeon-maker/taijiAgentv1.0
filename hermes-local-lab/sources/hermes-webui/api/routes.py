@@ -1988,17 +1988,32 @@ def _expert_team_revision_feedback(run: dict) -> str:
     if feedback:
         return feedback
     task_id = str(current.get("task_id") or "")
+    research_v3_review = (
+        task_id == "review"
+        and isinstance(run.get("research_v3_chapter_ledger"), dict)
+    )
     for output in reversed(run.get("stage_outputs") or []):
         if not isinstance(output, dict) or str(output.get("task_id") or "") != task_id:
             continue
         history = output.get("feedback_history") if isinstance(output.get("feedback_history"), list) else []
-        if history:
-            return str((history[-1] or {}).get("feedback") or "").strip()
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            # Delivery feedback has already produced the targeted v3 draft
+            # revision.  It is recorded on review for audit history, but must
+            # not turn a fresh independent review into a revision of delivery.
+            if research_v3_review and str(entry.get("artifact_id") or "").startswith("delivery:"):
+                continue
+            feedback = str(entry.get("feedback") or "").strip()
+            if feedback:
+                return feedback
     for entry in reversed(run.get("revision_feedback") or []):
         if not isinstance(entry, dict):
             continue
         entry_stage_id = str(entry.get("stage_id") or "")
         if entry_stage_id and entry_stage_id != task_id:
+            continue
+        if research_v3_review and str(entry.get("artifact_id") or "").startswith("delivery:"):
             continue
         feedback = str(entry.get("feedback") or "").strip()
         if feedback:
@@ -3408,6 +3423,8 @@ def _coordinate_expert_team_start(
     validated_body: dict,
     *,
     launch_profile_snapshot: dict | None = None,
+    brief_source_refs: list[dict] | None = None,
+    source_registry: dict | None = None,
 ) -> dict:
     """Commit one standalone start across receipt, Run, and Session truth."""
     from api import expert_teams
@@ -3615,6 +3632,8 @@ def _coordinate_expert_team_start(
                     validated_body,
                     run_id=run_id,
                     launch_profile_snapshot=launch_profile_snapshot,
+                    brief_source_refs=brief_source_refs,
+                    source_registry=source_registry,
                 )
                 initial_run = expert_teams.bind_initial_standalone_source_context(
                     workspace,
@@ -4102,6 +4121,78 @@ def _validate_expert_team_launch_pair_before_publish(
         )
 
 
+def _launch_uploaded_research_sources(
+    workspace: Path,
+    run_id: str,
+    *,
+    source_session_id: str,
+    source_attachments: list[dict],
+) -> tuple[list[dict], dict]:
+    """Re-home only verified chat uploads into the new Run's source boundary."""
+    from api import expert_teams
+    if not source_attachments:
+        return [], {}
+    from api.models import get_session
+    from api.upload import _session_attachment_dir
+    from api.expert_teams.source_registry import (
+        SourceRegistryError,
+        materialize_uploaded_attachment_source,
+        resolve_source_registry,
+    )
+
+    try:
+        get_session(source_session_id)
+        inbox = _session_attachment_dir(source_session_id).resolve()
+    except Exception as exc:
+        raise expert_teams.ContractError(
+            "source_attachment_unavailable",
+            "source_session_id",
+            "研究资料附件已不可用，请重新选择后发起。",
+        ) from exc
+    refs = []
+    for item in source_attachments:
+        ref = str(item.get("ref") or "")
+        candidate = (inbox / ref).resolve()
+        try:
+            candidate.relative_to(inbox)
+            metadata = candidate.lstat()
+            if candidate.name != ref or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("unsafe attachment")
+            data = candidate.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise expert_teams.ContractError(
+                "source_attachment_unavailable",
+                "source_attachments",
+                "研究资料附件已不可用，请重新选择后发起。",
+            ) from exc
+        if len(data) != int(item.get("size") or 0):
+            raise expert_teams.ContractError(
+                "source_attachment_changed",
+                "source_attachments",
+                "研究资料附件已变化，请重新选择后发起。",
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        source_id = "ATT-" + hashlib.sha256(
+            f"{source_session_id}\0{ref}\0{digest}".encode("utf-8")
+        ).hexdigest()[:24]
+        try:
+            refs.append(
+                materialize_uploaded_attachment_source(
+                    workspace,
+                    run_id,
+                    source_id,
+                    label=str(item.get("name") or ref),
+                    data=data,
+                )
+            )
+        except SourceRegistryError as exc:
+            raise expert_teams.ContractError(exc.code, "source_attachments", str(exc)) from exc
+    try:
+        return resolve_source_registry(workspace, run_id, refs)
+    except SourceRegistryError as exc:
+        raise expert_teams.ContractError(exc.code, "source_attachments", str(exc)) from exc
+
+
 def _coordinate_expert_team_launch(validated_body: dict) -> dict:
     """Create one Session and one v3 Run behind a global visibility receipt."""
     from api import expert_teams
@@ -4206,6 +4297,10 @@ def _coordinate_expert_team_launch(validated_body: dict) -> dict:
                 session_id=session_id,
                 workspace=str(workspace),
                 initial_session_snapshot=initial_session_snapshot,
+                source_session_id=str(validated_body.get("source_session_id") or ""),
+                source_attachments=list(validated_body.get("source_attachments") or []),
+                writing_style=validated_body.get("writing_style"),
+                depth=validated_body.get("depth"),
             )
             launch_storage.write_launch_transaction(receipt)
         else:
@@ -4320,10 +4415,28 @@ def _coordinate_expert_team_launch(validated_body: dict) -> dict:
             "prompt": validated_body["prompt"],
             "idempotency_key": idempotency_key,
         }
+        for field in ("writing_style", "depth"):
+            if field in receipt:
+                start_body[field] = receipt[field]
+        source_attachments = list(receipt.get("source_attachments") or [])
+        if source_attachments and str(receipt.get("launch_profile_id") or "") != "research-report":
+            raise expert_teams.ContractError(
+                "source_attachments_unsupported",
+                "source_attachments",
+                "当前文档任务不支持研究资料附件",
+            )
+        source_refs, source_registry = _launch_uploaded_research_sources(
+            workspace,
+            expected_run_id,
+            source_session_id=str(receipt.get("source_session_id") or ""),
+            source_attachments=source_attachments,
+        )
         try:
             run_result = _coordinate_expert_team_start(
                 start_body,
                 launch_profile_snapshot=launch_profile_snapshot,
+                brief_source_refs=source_refs,
+                source_registry=source_registry,
             )
         except Exception as exc:
             failed = dict(receipt)
@@ -5404,8 +5517,27 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
     stream_id = str(run.get("execution_stream_id") or "")
+    journal_completed = False
+    if stream_id and runtime_adapter_name == "LegacyJournalRuntimeAdapter":
+        try:
+            from api.run_journal import latest_run_summary
+
+            journal = latest_run_summary(str(run.get("session_id") or ""), stream_id)
+            journal_completed = (
+                journal.get("terminal") is True
+                and str(journal.get("terminal_state") or "").lower() == "completed"
+            )
+        except Exception:
+            # A missing or unreadable journal cannot prove completion; retain
+            # the durable worker-liveness protection below.
+            journal_completed = False
     active_stream_ids = _active_stream_id_set()
-    if stream_id and stream_id in active_stream_ids and str(run.get("workflow_state") or "") == "generating":
+    if (
+        stream_id
+        and stream_id in active_stream_ids
+        and str(run.get("workflow_state") or "") == "generating"
+        and not journal_completed
+    ):
         run["execution_status"] = "running"
         run["workflow_state"] = "generating"
         run["needs_resume"] = False
@@ -5431,7 +5563,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                         "stream_id": stream_id,
                         "stage_id": str(run.get("execution_stage_id") or ""),
                         "attempt": int(run.get("execution_attempt") or 0),
-                        "id": "expert-team-chat-delivery",
+                        "id": f"expert-team-chat-delivery:{stream_id}",
                         "label": "专家团生成结果",
                         "kind": "chat",
                         "exists": True,
@@ -5480,6 +5612,23 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                     stream_id=stream_id,
                 )
         except expert_teams.ExpertTeamStateConflict as exc:
+            if exc.code in {
+                "research_v3_unit_protocol_invalid",
+                "research_v3_review_protocol_invalid",
+                "review_protocol_invalid",
+            }:
+                label = (
+                    "本章节生成结果格式无效，请重新生成当前章节。"
+                    if exc.code == "research_v3_unit_protocol_invalid"
+                    else "独立审核结果格式或冻结引用无效，请重新审核当前章节。"
+                )
+                return expert_teams.fail_expert_team_execution(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    label,
+                    stream_id=stream_id,
+                    error_code=exc.code,
+                )
             current = exc.run or expert_teams.read_expert_team_run(
                 workspace, str(run.get("run_id") or "")
             )
@@ -6256,6 +6405,10 @@ def _start_expert_team_execution(
             "run": _fail_known_pre_dispatch(error),
         }, 409), 409
     except Exception as exc:
+        logger.exception(
+            "expert-team pre-dispatch setup failed before reservation: %s",
+            type(exc).__name__,
+        )
         error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
         return _backend_failure({
             "ok": False,
@@ -6359,6 +6512,17 @@ def _start_expert_team_execution(
                 "error": str(exc),
                 "run": exc.run or run,
             }, 409
+
+    # Reservation assigns the immutable v3 chapter/review unit. Rebuild only
+    # the prompt envelope now that its identity is durable; dependency refs
+    # remain identical to the pre-reservation request used above.
+    if (
+        classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1
+        and str(((reserved_run.get("launch_profile_snapshot") or {}).get("research_contract_version") or "")) == "research-report/v3"
+    ):
+        enterprise_gateway_request = _expert_team_enterprise_gateway_request(
+            workspace, reserved_run
+        )
 
     reservation_id = str(reserved_run.get("execution_start_id") or "")
     result = None
@@ -13431,6 +13595,12 @@ def handle_get(handler, parsed) -> bool:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
+            expert_team_v3_revision = str(
+                (_INDEX_HTML_PATH.parent / "expert-team-v3.js").stat().st_mtime_ns
+            )
+            expert_team_launch_revision = str(
+                (_INDEX_HTML_PATH.parent / "commands.js").stat().st_mtime_ns
+            )
             from api.extensions import inject_extension_tags
 
             csrf_token = ""
@@ -13447,6 +13617,8 @@ def handle_get(handler, parsed) -> bool:
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
                 .replace("__WEBUI_VERSION__", version_token)
+                .replace("__EXPERT_TEAM_V3_REVISION__", expert_team_v3_revision)
+                .replace("__EXPERT_TEAM_LAUNCH_REVISION__", expert_team_launch_revision)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
             )

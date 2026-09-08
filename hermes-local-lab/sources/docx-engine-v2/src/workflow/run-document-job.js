@@ -313,6 +313,9 @@ function validateBoundJobContract(contract, templatePackage, observed = {}) {
     throw new ContractFailure('template_selection_required', 'Template is incompatible with document type.');
   }
   const binding = contract.renderInputBinding;
+  if (binding.researchWorkingDraft && (contract.documentMetadata.documentType !== 'research_report' || contract.rendererIdentity.profileId !== 'standalone-default')) {
+    throw new ContractFailure('render_input_binding_invalid', 'Research working drafts require the standalone research report contract.');
+  }
   if (
     binding.canonicalArtifact.artifactId !== contract.canonicalBinding.artifactId
     || binding.canonicalArtifact.sha256 !== contract.canonicalBinding.artifactSha256

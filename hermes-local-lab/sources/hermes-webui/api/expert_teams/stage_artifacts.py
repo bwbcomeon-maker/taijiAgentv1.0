@@ -464,6 +464,7 @@ def canonicalize_trusted_payload(
     artifact_type,
     source_snapshot=None,
     brief=None,
+    research_v3=False,
 ):
     result = deepcopy(parsed)
     if artifact_type == "material_ledger":
@@ -478,7 +479,7 @@ def canonicalize_trusted_payload(
                 _evidence_ref(ref, sources, segments, f"payload.claims.{claim_index}.evidence.{index}")
                 for index, ref in enumerate(claim.get("evidence") or [])
             ]
-        if _is_automatic_fallback_research(brief):
+        if not research_v3 and _is_automatic_fallback_research(brief):
             result["payload"]["model_knowledge_time_basis"] = (
                 _trusted_model_knowledge_time_basis(source_snapshot)
             )
@@ -499,6 +500,49 @@ def _trusted_sources(snapshot):
             }
         )
     return rows
+
+
+def _research_v3_user_background_snapshot(snapshot, brief):
+    """Expose one re-derivable provenance source for confirmed pasted material."""
+    if not isinstance(snapshot, dict):
+        return snapshot
+    if any(
+        isinstance(source, dict) and str(source.get("kind") or "") == "attachment"
+        for source in snapshot.get("sources") or []
+    ):
+        return snapshot
+    original = str((brief or {}).get("original_request") or "")
+    revision = int((brief or {}).get("confirmed_revision") or 0)
+    confirmed_sha256 = str((brief or {}).get("confirmed_sha256") or "")
+    if not original or revision < 1 or not _HEX64.fullmatch(confirmed_sha256):
+        raise StageArtifactError("confirmed_brief_required", "brief")
+    content_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    augmented = deepcopy(snapshot)
+    sources = list(augmented.get("sources") or [])
+    if any(str(source.get("source_id") or "") == "brief-confirmed" for source in sources if isinstance(source, dict)):
+        raise StageArtifactError("reserved_source_id", "source_snapshot.sources")
+    sources.append(
+        {
+            "source_id": "brief-confirmed",
+            "kind": "user_background",
+            "label": "已确认用户材料",
+            "locator": f"brief:confirmed:{revision}:{confirmed_sha256}",
+            "content_sha256": content_sha256,
+            "content_text": original,
+            "segments": [
+                {
+                    "segment_id": "brief-confirmed:INPUT",
+                    "char_start": 0,
+                    "char_end": len(original),
+                    "locator": f"brief:confirmed:{revision}:{confirmed_sha256}",
+                    "text": original,
+                    "text_sha256": content_sha256,
+                }
+            ],
+        }
+    )
+    augmented["sources"] = sources
+    return augmented
 
 
 def _validate_material_ledger(payload, snapshot):
@@ -614,7 +658,30 @@ def _validate_contradictions(value, path):
         _string_list(row["chosen_source_ids"], f"{item_path}.chosen_source_ids", unique=True)
 
 
-def _validate_evidence_matrix(payload, snapshot, brief=None):
+def _validate_evidence_matrix(payload, snapshot, brief=None, *, research_v3=False):
+    if research_v3:
+        _exact(payload, ("claims", "contradictions", "gaps"), path="payload")
+        claims = _unique_rows(payload["claims"], "claim_id", "payload.claims")
+        for index, row in enumerate(claims):
+            path = f"payload.claims.{index}"
+            _exact(row, ("claim_id", "statement", "claim_type", "evidence", "status", "confidence", "notes", "origin_tier"), path=path)
+            _string(row["statement"], f"{path}.statement")
+            _enum(row["claim_type"], {"fact", "estimate", "analysis", "recommendation"}, f"{path}.claim_type")
+            _enum(row["status"], {"verified", "unverified", "contested", "blocked"}, f"{path}.status")
+            _enum(row["confidence"], {"high", "medium", "low"}, f"{path}.confidence")
+            _enum(row["origin_tier"], {"public_web", "local_knowledge", "user_background", "model_knowledge"}, f"{path}.origin_tier")
+            _string(row["notes"], f"{path}.notes")
+            if not isinstance(row["evidence"], list):
+                raise StageArtifactError("invalid_type", f"{path}.evidence")
+            if row["origin_tier"] == "model_knowledge" and (row["evidence"] or row["status"] == "verified"):
+                raise StageArtifactError("model_knowledge_must_be_unverified", f"{path}.origin_tier")
+            if row["origin_tier"] != "model_knowledge" and not row["evidence"]:
+                raise StageArtifactError("source_backed_claim_requires_evidence", f"{path}.evidence")
+            for evidence in row["evidence"]:
+                _exact(evidence, ("source_id", "segment_id", "segment_sha256", "locator", "relationship"), path=f"{path}.evidence")
+        _validate_contradictions(payload["contradictions"], "payload.contradictions")
+        _validate_search_gaps(payload["gaps"], "payload.gaps")
+        return
     v2 = _is_automatic_fallback_research(brief)
     payload_fields = (
         "claims",
@@ -711,16 +778,18 @@ def _validate_evidence_matrix(payload, snapshot, brief=None):
         _string(time_basis["label"], "payload.model_knowledge_time_basis.label")
 
 
-def _validate_research_outline(payload, brief):
+def _validate_research_outline(payload, brief, *, research_v3=False):
     _exact(payload, ("sections", "conclusion_boundaries"), path="payload")
     rows = _unique_rows(payload["sections"], "section_id", "payload.sections")
     for index, row in enumerate(rows):
         item_path = f"payload.sections.{index}"
-        _exact(row, ("section_id", "heading", "thesis", "claim_ids", "source_ids", "open_questions"), path=item_path)
+        _exact(row, ("section_id", "heading", "thesis", "claim_ids", "source_ids", "open_questions", "chapter_kind") if research_v3 else ("section_id", "heading", "thesis", "claim_ids", "source_ids", "open_questions"), path=item_path)
         _string(row["heading"], f"{item_path}.heading")
         _string(row["thesis"], f"{item_path}.thesis")
         for field in ("claim_ids", "source_ids", "open_questions"):
             _string_list(row[field], f"{item_path}.{field}", unique=True)
+        if research_v3:
+            _enum(row["chapter_kind"], {"background", "analysis", "comparison", "recommendation", "other"}, f"{item_path}.chapter_kind")
     _require_section_headings(
         (row["heading"] for row in rows),
         brief,
@@ -776,7 +845,7 @@ def _validate_delivery_manifest(payload):
         raise StageArtifactError("local_confirmation_required", "payload.local_confirmation_required")
 
 
-def _validate_payload(artifact_type, payload, brief, source_snapshot):
+def _validate_payload(artifact_type, payload, brief, source_snapshot, *, research_v3=False):
     if artifact_type == "writing_plan":
         _validate_writing_plan(payload, brief)
     elif artifact_type == "material_ledger":
@@ -786,9 +855,9 @@ def _validate_payload(artifact_type, payload, brief, source_snapshot):
     elif artifact_type == "source_register":
         _validate_source_register(payload, source_snapshot)
     elif artifact_type == "evidence_matrix":
-        _validate_evidence_matrix(payload, source_snapshot, brief)
+        _validate_evidence_matrix(payload, source_snapshot, brief, research_v3=research_v3)
     elif artifact_type == "research_outline":
-        _validate_research_outline(payload, brief)
+        _validate_research_outline(payload, brief, research_v3=research_v3)
     elif artifact_type == "document_draft":
         _validate_document_payload(payload, brief)
     elif artifact_type == "reviewed_document":
@@ -868,7 +937,7 @@ def artifact_digest(artifact):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, source_snapshot=None, now):
+def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, source_snapshot=None, now, research_v3=False):
     if not isinstance(stage_attempt, int) or stage_attempt <= 0:
         raise StageArtifactError("invalid_stage_attempt", "stage_attempt")
     _string(stage_id, "stage_id")
@@ -876,11 +945,16 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
     if brief.get("status") != "confirmed" or not _HEX64.fullmatch(str(brief.get("confirmed_sha256") or "")):
         raise StageArtifactError("confirmed_brief_required", "brief")
     artifact_type = parsed.get("artifact_type")
+    effective_source_snapshot = (
+        _research_v3_user_background_snapshot(source_snapshot, brief)
+        if research_v3 and artifact_type in {"source_register", "evidence_matrix"}
+        else source_snapshot
+    )
     if artifact_type in _SOURCE_BOUND_TYPES:
-        if not isinstance(source_snapshot, dict):
+        if not isinstance(effective_source_snapshot, dict):
             raise StageArtifactError("source_snapshot_required", "source_snapshot")
-        expected_snapshot_id = source_snapshot.get("snapshot_id")
-        expected_sha = source_snapshot.get("snapshot_sha256") or source_snapshot.get("sha256")
+        expected_snapshot_id = effective_source_snapshot.get("snapshot_id")
+        expected_sha = effective_source_snapshot.get("snapshot_sha256") or effective_source_snapshot.get("sha256")
         if not any(
             ref.get("ref_type") == "source_context"
             and ref.get("snapshot_id") == expected_snapshot_id
@@ -891,10 +965,11 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
     trusted = canonicalize_trusted_payload(
         parsed,
         artifact_type=artifact_type,
-        source_snapshot=source_snapshot,
+        source_snapshot=effective_source_snapshot,
         brief=brief,
+        research_v3=research_v3,
     )
-    _validate_payload(artifact_type, trusted["payload"], brief, source_snapshot)
+    _validate_payload(artifact_type, trusted["payload"], brief, effective_source_snapshot, research_v3=research_v3)
     markdown = trusted.get("deliverable_markdown")
     if artifact_type in _DOCUMENT_TYPES:
         headings = re.findall(r"(?m)^#\s+(.+?)\s*$", markdown or "")

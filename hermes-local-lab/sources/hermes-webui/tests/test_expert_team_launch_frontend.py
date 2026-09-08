@@ -136,6 +136,51 @@ def test_failed_launch_keeps_the_current_session_and_reuses_the_same_key():
     ]
 
 
+def test_research_attachment_upload_result_is_preserved_in_atomic_launch_request():
+    script = _read(COMMANDS)
+    start = script.index("let _expertTeamPendingLaunch")
+    end = script.index("if(typeof window!=='undefined')window.sendExpertTeamAction", start)
+    snippet = script[start:end]
+    source = textwrap.dedent(
+        f"""
+        global.window=global;
+        global.S={{session:{{session_id:'upload-session',workspace:'/work'}},activeProfile:'default',busy:false}};
+        global._activeProject='';
+        global.NO_PROJECT_FILTER='__all__';
+        global.$=()=>null;
+        global._readPersistedModelState=()=>null;
+        global.showToast=()=>{{}};
+        global.renderSessionList=async()=>{{}};
+        global.requests=[];
+        global.api=async(_path,options)=>{{
+          requests.push(JSON.parse(options.body));
+          throw new Error('offline');
+        }};
+        {snippet}
+        (async()=>{{
+          await sendExpertTeamAction({{
+            launch_profile_id:'research-report',prompt:'请结合附件形成报告',
+            writing_style:'government',depth:'deep',
+            source_session_id:'upload-session',
+            source_attachments:[{{name:'资料.txt',ref:'资料.txt',mime:'text/plain',size:8}}],
+          }});
+          console.log(JSON.stringify(requests[0]));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    completed = subprocess.run(
+        ["node", "-e", source], cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["source_session_id"] == "upload-session"
+    assert result["source_attachments"] == [
+        {"name": "资料.txt", "ref": "资料.txt", "mime": "text/plain", "size": 8}
+    ]
+    assert result["writing_style"] == "government"
+    assert result["depth"] == "deep"
+
+
 def test_committed_launch_stays_successful_when_sidebar_refresh_fails():
     script = _read(COMMANDS)
     start = script.index("let _expertTeamPendingLaunch")

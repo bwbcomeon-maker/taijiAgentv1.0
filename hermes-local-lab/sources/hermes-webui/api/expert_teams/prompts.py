@@ -293,18 +293,37 @@ def _research_v2_automatic_approval_matches(
     artifact: dict,
     approved_refs: dict,
 ) -> bool:
-    """Accept only the server-owned automatic approval for research-report/v2."""
+    """Accept only the server-owned automatic approval for formal research."""
     profile = run.get("launch_profile_snapshot")
+    contract_version = str(profile.get("research_contract_version") or "") if isinstance(profile, dict) else ""
     if not isinstance(profile, dict) or not (
         str(run.get("product_mode") or "") == "standalone"
         and str(run.get("launch_profile_id") or "") == "research-report"
         and str(run.get("team_id") or "") == "deep-research-team"
         and str(profile.get("id") or "") == "research-report"
-        and str(profile.get("research_contract_version") or "") == "research-report/v2"
+        and contract_version in {"research-report/v2", "research-report/v3"}
         and str(output.get("status") or "") == "approved"
         and str(output.get("approval_kind") or "") == "automatic_contract_validation"
     ):
         return False
+    # The v3 writer and reviewer own their own persisted unit/review ledgers.
+    # Its foundation artifacts are automatically approved after strict stage
+    # validation.  The final draft is also server-approved, but review may use
+    # it only when the immutable canonical body and its artifact agree.
+    if contract_version == "research-report/v3":
+        if dependency not in {"direction", "research", "evidence", "outline", "draft"}:
+            return False
+        if dependency == "draft":
+            canonical = run.get("research_v3_canonical_document")
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            if not (
+                artifact.get("artifact_type") == "research_document_draft"
+                and payload.get("schema_version") == "research-v3/draft-canonical/v1"
+                and isinstance(canonical, dict)
+                and payload.get("canonical_body_sha256") == canonical.get("body_sha256")
+                and artifact.get("deliverable_markdown") == canonical.get("body")
+            ):
+                return False
     artifact_id = str(artifact.get("artifact_id") or "")
     artifact_sha256 = str(artifact.get("sha256") or "")
     try:
@@ -429,9 +448,16 @@ def _latest_stage_protocol_error(run: dict, stage_id: str) -> dict | None:
     return None
 
 
-def _response_template(artifact_type: str, brief: dict) -> str:
+def _response_template(artifact_type: str, brief: dict, *, research_v3: bool = False) -> str:
     payload_schema = deepcopy(_PAYLOAD_SCHEMAS[artifact_type])
-    if _is_automatic_fallback_research(brief):
+    if research_v3 and artifact_type == "evidence_matrix":
+        payload_schema["claims"][0].pop("origin_tier", None)
+        payload_schema["claims"][0]["claim_type"] = "<fact|estimate|analysis|recommendation>"
+        payload_schema["claims"][0]["status"] = "<verified|unverified|contested|blocked>"
+        payload_schema["claims"][0]["origin_tier"] = "<public_web|local_knowledge|user_background|model_knowledge>"
+    elif research_v3 and artifact_type == "research_outline":
+        payload_schema["sections"][0]["chapter_kind"] = "<background|analysis|comparison|recommendation|other>"
+    elif _is_automatic_fallback_research(brief):
         if artifact_type == "evidence_matrix":
             payload_schema["claims"][0]["origin_tier"] = (
                 "<public_web|local_knowledge|model_knowledge>"
@@ -472,8 +498,19 @@ def _system_message(
     *,
     previous_protocol_error: dict | None = None,
     is_revision: bool = False,
+    research_v3: bool = False,
+    research_v3_source_ids: tuple[str, ...] = (),
 ) -> str:
     requires_document = artifact_type in _DOCUMENT_ARTIFACT_TYPES
+    if research_v3 and artifact_type == "evidence_matrix":
+        missing_fact_rule = (
+            "上传资料可作为 user_background 依据；必须使用 source_context 中列出的 source_id 和 segment_id，"
+            "不得把附件事实归入原始诉求。无法确认时标记 unverified，不得编造。"
+            if research_v3_source_ids
+            else "用户提供资料可作为 user_background 依据；必须用 brief-confirmed / brief-confirmed:INPUT，并由服务端重算摘要。无法确认时标记 unverified，不得编造。"
+        )
+    else:
+        missing_fact_rule = None
     output_contract = _canonical_json(
         {
             "artifact_type": artifact_type,
@@ -484,7 +521,7 @@ def _system_message(
         }
     )
     allows_placeholders = brief_declares_labeled_placeholders(brief)
-    missing_fact_rule = (
+    missing_fact_rule = missing_fact_rule or (
         "缺失的事实和数据不得编造，必须写入本阶段输出合同允许的缺口字段"
         "（如 assumptions、gaps、search_gaps、open_questions 或 open_issues），"
         "并在文档对应位置明确标注“待补充”或“需人工确认”；"
@@ -574,6 +611,33 @@ def _system_message(
             "draft 和 reviewed_document 必须逐项保留原文关键数字、标识、机构名称与明确结论，"
             "review_report.fact_traceability 必须在逐项核对后标记为 passed，修改说明只描述表达层调整。"
         )
+    elif research_v3 and document_type == "research_report":
+        provenance_rule = (
+            "上传资料使用 user_background，并引用 source_context 中列出的 source_id / segment_id；"
+            "不得把附件事实归入原始诉求。凡使用 source_context 证据的事实、分析或矛盾判断均为 user_background；"
+            "model_knowledge 只能无证据且为 unverified。"
+            if research_v3_source_ids
+            else "用户粘贴资料使用 user_background，并引用 brief-confirmed / brief-confirmed:INPUT；"
+        )
+        task_specific_rule = (
+            "这是 research-report/v3 分章正式报告。writing_contract、已批准产物和 source_context 是冻结上下文；"
+            "正文不得出现程序 claim_id 或 source_id。evidence_matrix 使用 fact、estimate、analysis、recommendation；"
+            "状态只能是 verified、unverified、contested、blocked；来源只能是 public_web、local_knowledge、"
+            f"user_background、model_knowledge。{provenance_rule}"
+            "不要把资料编号、E01-P01 等正常读者出处误当作程序标识。"
+            "方案前提尚未满足、验证条件未完成或资源约束，应如实列为条件、缺口或 unverified/blocked 判断，"
+            "不得仅因其与当前状态不同就制造 contested；只有不同来源对同一既成事实作出互斥表述时才标 contested。"
+            "contradictions.source_ids 必须是不同的冻结 source_id；不得把同一附件的多个段落重复填入其中。"
+            "资料不足须明确边界，争议或阻断事实不得降级为正式报告。"
+        )
+        if artifact_type == "source_register":
+            allowed_source_ids = ", ".join(research_v3_source_ids) if research_v3_source_ids else "brief-confirmed"
+            task_specific_rule += (
+                f"本阶段合法机器 source_id 仅为：{allowed_source_ids}；"
+                "source_assessments 与 search_gaps.source_ids 只能使用上述 source_id。"
+                "E01、E02、E03、E04 与 E01-P01 等仅是给读者核对的材料/段落定位，"
+                "必须写入 applicability 或 reason，绝不可填写为 source_id。"
+            )
     elif _is_automatic_fallback_research(brief) and (
         document_type == "research_report"
         or artifact_type in {
@@ -658,7 +722,7 @@ def _system_message(
             "不要复述上一次输出，严格按下面格式重新生成。\n"
             f"{marker_correction}"
         )
-    response_template = _response_template(artifact_type, brief)
+    response_template = _response_template(artifact_type, brief, research_v3=research_v3)
     return (
         "[SYSTEM PURPOSE]\n"
         f"你正在生成 {artifact_type}，只能完成本阶段职责。\n"
@@ -691,6 +755,90 @@ def _system_message(
         "不得使用“暂无”或“待完善”作为缺失事实占位表述；"
         "如需 DOCUMENT，H1 必须等于 Brief exact_title。"
         "不得调用工具、网络或文件系统。"
+    )
+
+
+def _research_v3_unit_system_message(
+    stage_id: str,
+    unit: dict,
+    review_material: dict | None = None,
+    draft_context: dict | None = None,
+) -> str:
+    identity = _canonical_json(unit)
+    if stage_id == "draft":
+        context = draft_context if isinstance(draft_context, dict) else {}
+        previous = context.get("previous_unit_bodies")
+        continuation = ""
+        if isinstance(previous, list) and previous:
+            continuation = (
+                "\n[CHAPTER CONTINUATION]\n以下是同章已完成单元，必须在其基础上续写；"
+                "不得重写或重复其中的标题、事实、试点叙述、比较或建议。\n"
+                + _canonical_json(previous)
+                + "\n"
+            )
+        feedback = context.get("quality_revision_feedback")
+        if isinstance(feedback, list) and feedback:
+            continuation += (
+                "[QUALITY REVISION]\n"
+                + _canonical_json(feedback)
+                + "\n保留已核验事实、限制和待确认条件；建议只能写为拟议，"
+                "不得编造已批准人选、日期或阈值。\n"
+            )
+        retry_feedback = context.get("protocol_retry_feedback")
+        if isinstance(retry_feedback, str) and retry_feedback.strip():
+            continuation += "[RETRY CORRECTION]\n" + retry_feedback.strip() + "\n"
+        return (
+            "[SYSTEM PURPOSE]\n你只起草一个 research-report/v3 章节单元。\n"
+            "[UNIT IDENTITY]\n" + identity + "\n"
+            "[OUTPUT CONTRACT]\n只能输出一个 JSON 包，正文只包含本章节内容，不得重复 H1 或其他章节。"
+            "claim_usages 只登记实际使用的已批准 claim；每项格式为"
+            "{claim_id,usages:[{usage_id,chapter_id,rendered_excerpt}]}，excerpt 必须逐字出现在本章节。\n"
+            "<<<TAIJI_RESEARCH_V3_UNIT>>>\n{\"body\":\"<本章正文>\",\"claim_usages\":[]}\n"
+            "<<<TAIJI_RESEARCH_V3_UNIT_END>>>\n"
+            "body 是 JSON 字符串，正文中的双引号必须写为 \\\"，优先用《》表示资料或标题；不得输出未转义的双引号。\n"
+            "不得输出解释、Markdown 代码围栏、程序 claim_id/source_id、ATT 或未核验事实。"
+            "用户资料应以附件名称和 E01-P01 等段落号作为读者出处。"
+            + continuation
+        )
+    material = review_material if isinstance(review_material, dict) else {}
+    canonical = material.get("canonical") if isinstance(material.get("canonical"), dict) else {}
+    sidecar = material.get("sidecar") if isinstance(material.get("sidecar"), dict) else {}
+    chapter_id = str(unit.get("chapter_id") or "")
+    usage_rows = sidecar.get("usages")
+    usage_ids = [
+        str(item.get("usage_id") or "")
+        for item in usage_rows
+        if isinstance(item, dict)
+        and str(item.get("chapter_id") or "") == chapter_id
+        and str(item.get("usage_id") or "")
+    ] if isinstance(usage_rows, list) else []
+    reviewed_source_refs = [
+        {
+            key: item.get(key)
+            for key in ("source_id", "segment_id", "text_sha256")
+        }
+        for item in sidecar.get("review_source_excerpts") or []
+        if isinstance(item, dict)
+    ]
+    return (
+        "[SYSTEM PURPOSE]\n你是独立审核员，只审核指定的 research-report/v3 章节，不能改写正文。\n"
+        "[UNIT IDENTITY]\n" + identity + "\n"
+        "[FROZEN REVIEW BINDING]\n" + _canonical_json({
+            "canonical_body_sha256": canonical.get("body_sha256"),
+            "sidecar_sha256": sidecar.get("sidecar_sha256"),
+            "chapter_id": chapter_id,
+            "usage_ids": usage_ids,
+            "reviewed_source_refs": reviewed_source_refs,
+        }) + "\n"
+        "[OUTPUT CONTRACT]\n只能输出一个 JSON 包；findings 只能有一项，必须如实给出 supported、concern、blocked 或 not_checked。\n"
+        "必须逐字复制 FROZEN REVIEW BINDING 中的 canonical_body_sha256、sidecar_sha256、chapter_id、usage_ids 和 reviewed_source_refs；"
+        "冻结数组有值时不得输出 []，reviewed_source_refs 的每项必须保留 source_id、segment_id、text_sha256 三个字段。\n"
+        "quality_assessment 的三个判断可为 passed、concern、failed 或 not_applicable；concern 必须保留具体 issues，"
+        "不得改写为 passed。\n"
+        "<<<TAIJI_RESEARCH_V3_REVIEW>>>\n"
+        "{\"reviewer_assessed\":true,\"canonical_body_sha256\":\"<冻结值>\",\"sidecar_sha256\":\"<冻结值>\",\"chapter_id\":\"<冻结值>\",\"usage_ids\":[\"<冻结 usage_id>\"],\"reviewed_source_refs\":[{\"source_id\":\"<冻结 source_id>\",\"segment_id\":\"<冻结 segment_id>\",\"text_sha256\":\"<冻结 text_sha256>\"}],\"findings\":[{\"finding_id\":\"<id>\",\"verdict\":\"supported\",\"rationale\":\"<理由>\",\"revision_required\":false}],\"quality_assessment\":{\"formal_style\":\"passed\",\"analysis_depth\":\"passed\",\"recommendation_applicability\":\"not_applicable\",\"issues\":[]}}\n"
+        "<<<TAIJI_RESEARCH_V3_REVIEW_END>>>\n"
+        "不得输出解释、代码围栏或正文；争议和阻断必须据实保留，不能为了交付而降级。"
     )
 
 
@@ -812,6 +960,7 @@ def build_stage_gateway_request(
 ) -> dict:
     declared = _catalog_stage(run, stage)
     brief = _confirmed_brief(run)
+    research_v3 = str(((run.get("launch_profile_snapshot") or {}).get("research_contract_version") or "")) == "research-report/v3"
     stage_key = (str(run.get("team_id") or ""), str(declared.get("id") or ""))
     uses_source_context = (
         stage_key in _SOURCE_STAGES
@@ -853,6 +1002,8 @@ def build_stage_gateway_request(
         "source_context": source_value,
         "revision_context": revision_context,
     }
+    if research_v3 and isinstance(run.get("research_writing_contract"), dict):
+        envelope["writing_contract"] = deepcopy(run["research_writing_contract"])
     if stage_inputs:
         envelope["stage_inputs"] = stage_inputs
     boundary_assumptions = [
@@ -862,6 +1013,17 @@ def build_stage_gateway_request(
     ]
     if boundary_assumptions:
         envelope["research_boundary_assumptions"] = boundary_assumptions
+    research_v3_source_ids = tuple(
+        str(item.get("source_id") or "")
+        for item in (source_value or {}).get("sources") or []
+        if isinstance(item, dict) and str(item.get("source_id") or "")
+    )
+    if research_v3 and str(declared.get("id") or "") == "research" and not research_v3_source_ids:
+        envelope["user_background_provenance"] = {
+            "source_id": "brief-confirmed",
+            "segment_id": "brief-confirmed:INPUT",
+            "reader_locator_rule": "E01-Pxx 等仅可作为可读材料定位，不是 source_id",
+        }
     input_consumptions = [
         {
             "input_id": str(item.get("input_id") or ""),
@@ -875,11 +1037,78 @@ def build_stage_gateway_request(
     ]
     if input_consumptions:
         envelope["research_input_consumptions"] = input_consumptions
-    system = _system_message(
-        str(declared["artifact_type"]),
-        brief,
-        previous_protocol_error=_latest_stage_protocol_error(run, str(declared["id"])),
-        is_revision=revision_context is not None,
+    active_key = "research_v3_active_unit" if str(declared.get("id") or "") == "draft" else "research_v3_active_review_unit"
+    active_unit = run.get(active_key) if research_v3 else None
+    draft_context = None
+    if research_v3 and str(declared.get("id") or "") in {"draft", "review"} and isinstance(active_unit, dict):
+        unit_identity = {
+            key: active_unit.get(key)
+            for key in ("unit_id", "chapter_id", "unit_attempt", "unit_input_sha256", "execution_start_id")
+        }
+        envelope["research_v3_unit"] = unit_identity
+        if str(declared.get("id") or "") == "draft":
+            ledger = run.get("research_v3_chapter_ledger")
+            active_ledger_unit = next(
+                (
+                    item
+                    for item in (ledger.get("units") if isinstance(ledger, dict) else []) or []
+                    if isinstance(item, dict)
+                    and item.get("unit_id") == active_unit.get("unit_id")
+                ),
+                {},
+            )
+            active_unit_index = int(active_ledger_unit.get("unit_index") or 0)
+            unit_identity["budget"] = deepcopy(active_ledger_unit.get("budget"))
+            previous = [
+                {
+                    "unit_id": str(item.get("unit_id") or ""),
+                    "body": str((item.get("result") or {}).get("body") or ""),
+                }
+                for item in (ledger.get("units") if isinstance(ledger, dict) else []) or []
+                if isinstance(item, dict)
+                and item.get("chapter_id") == active_unit.get("chapter_id")
+                and int(item.get("unit_index") or 0) < active_unit_index
+                and isinstance(item.get("result"), dict)
+            ]
+            revisions = run.get("research_v3_review_revisions")
+            feedback_by_chapter = (
+                revisions.get("feedback_by_chapter")
+                if isinstance(revisions, dict) and isinstance(revisions.get("feedback_by_chapter"), dict)
+                else {}
+            )
+            feedback = feedback_by_chapter.get(str(active_unit.get("chapter_id") or ""))
+            draft_context = {
+                "previous_unit_bodies": previous,
+                "quality_revision_feedback": deepcopy(feedback) if isinstance(feedback, list) else [],
+                "protocol_retry_feedback": (
+                    str(active_ledger_unit.get("last_failure") or "")
+                    if int(active_unit.get("unit_attempt") or 0) > 1
+                    else ""
+                ),
+            }
+            if previous or feedback or draft_context["protocol_retry_feedback"]:
+                envelope["research_v3_chapter_continuation"] = deepcopy(draft_context)
+        if str(declared.get("id") or "") == "review":
+            material = run.get("research_v3_review_material")
+            if not isinstance(material, dict):
+                raise PromptContractError("research_v3_review_material_missing", "独立审核缺少冻结正文与来源旁表")
+            envelope["research_v3_review_material"] = deepcopy(material)
+    system = (
+        _research_v3_unit_system_message(
+            str(declared.get("id") or ""),
+            unit_identity,
+            run.get("research_v3_review_material"),
+            draft_context,
+        )
+        if research_v3 and isinstance(active_unit, dict) and str(declared.get("id") or "") in {"draft", "review"}
+        else _system_message(
+            str(declared["artifact_type"]),
+            brief,
+            previous_protocol_error=_latest_stage_protocol_error(run, str(declared["id"])),
+            is_revision=revision_context is not None,
+            research_v3=research_v3,
+            research_v3_source_ids=research_v3_source_ids,
+        )
     )
     user = _canonical_json(envelope)
     input_refs = [

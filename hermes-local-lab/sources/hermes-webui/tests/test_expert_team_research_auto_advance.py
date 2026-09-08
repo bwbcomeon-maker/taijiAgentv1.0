@@ -25,7 +25,12 @@ def _memory_storage(monkeypatch, runtime, initial):
     return cell
 
 
-def _research_stage_run(expert_teams, runtime, workspace, stage_id):
+def _research_stage_run(expert_teams, runtime, workspace, stage_id, *, launch_profile_snapshot=None):
+    if launch_profile_snapshot is None:
+        from api.expert_teams.launch_profiles import get_launch_profile
+
+        launch_profile_snapshot = copy.deepcopy(get_launch_profile("research-report"))
+        launch_profile_snapshot["research_contract_version"] = "research-report/v2"
     run = expert_teams.build_standalone_expert_team_run(
         {
             "launch_profile_id": "research-report",
@@ -34,6 +39,7 @@ def _research_stage_run(expert_teams, runtime, workspace, stage_id):
             "idempotency_key": f"auto-{stage_id}-start",
         },
         run_id=f"et-auto-{stage_id}",
+        launch_profile_snapshot=launch_profile_snapshot,
     )
     run = expert_teams.bind_initial_standalone_source_context(workspace, run)
     index = next(
@@ -198,6 +204,120 @@ def test_research_v2_valid_model_stage_auto_approves_and_advances(
     if stage_id == "review":
         assert completed["canonical_document_ref"]["artifact_id"] == artifact["artifact_id"]
         assert completed["pending_system_stage"]["id"] == "delivery"
+
+
+def test_research_v3_valid_direction_auto_advances_and_recovers_a_valid_backlog(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime, stage_artifacts
+    from api.expert_teams.launch_profiles import build_research_v3_candidate_profile
+
+    profile = build_research_v3_candidate_profile()
+    run = _research_stage_run(
+        expert_teams,
+        runtime,
+        tmp_path,
+        "direction",
+        launch_profile_snapshot=profile,
+    )
+    artifact = _artifact_for(run)
+    _memory_storage(monkeypatch, runtime, run)
+
+    completed = _complete_with_artifact(monkeypatch, runtime, tmp_path, run, artifact)
+
+    assert completed["workflow_state"] == "ready_to_generate"
+    assert completed["approved_stage_artifact_refs"]["direction"] == {
+        "artifact_id": artifact["artifact_id"],
+        "sha256": artifact["sha256"],
+    }
+
+    backlog = _research_stage_run(
+        expert_teams,
+        runtime,
+        tmp_path / "backlog",
+        "direction",
+        launch_profile_snapshot=profile,
+    )
+    backlog["workflow_state"] = "awaiting_review"
+    backlog["stage_artifacts"] = [copy.deepcopy(artifact)]
+    backlog["current_stage_artifact_ref"] = {
+        "artifact_id": artifact["artifact_id"],
+        "sha256": artifact["sha256"],
+        "stage_attempt": 1,
+    }
+    backlog["current_stage_attempt_reservation"]["status"] = "generated_valid"
+    backlog["stage_attempt_reservations"][-1]["status"] = "generated_valid"
+    backlog["stage_outputs"] = [{
+        "id": "direction-delivery",
+        "task_id": "direction",
+        "stage_id": "direction",
+        "stage_attempt": 1,
+        "content": "contract-valid-model-output",
+        "artifact": copy.deepcopy(artifact),
+        "status": "generated",
+    }]
+    backlog = runtime._sync_derived(backlog)
+    monkeypatch.setattr(stage_artifacts, "validate_stage_artifact", lambda *_a, **_k: {"blocking_count": 0})
+    view = expert_teams.expert_team_run_view(backlog)
+    assert view["allowed_actions"] == ["resume"]
+    assert view["stage_action_binding"]["artifact_id"] == artifact["artifact_id"]
+    cell = _memory_storage(monkeypatch, runtime, backlog)
+
+    resumed = runtime.resume_expert_team(
+        tmp_path / "backlog",
+        {
+            "run_id": backlog["run_id"],
+            "session_id": backlog["session_id"],
+            "stage_id": "direction",
+            "stage_attempt": 1,
+            "artifact_id": artifact["artifact_id"],
+            "artifact_sha256": artifact["sha256"],
+            "expected_version": backlog["version"],
+            "idempotency_key": "research-v3-valid-direction-recovery",
+        },
+    )
+
+    assert resumed["workflow_state"] == "ready_to_generate"
+    assert resumed["stage_outputs"][-1]["status"] == "approved"
+    assert cell["run"] == resumed
+
+
+def test_research_v3_persisted_direction_approval_binds_the_research_request(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.launch_profiles import build_research_v3_candidate_profile
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _research_stage_run(
+        expert_teams,
+        runtime,
+        tmp_path,
+        "direction",
+        launch_profile_snapshot=build_research_v3_candidate_profile(),
+    )
+    _memory_storage(monkeypatch, runtime, run)
+    completed = _complete_with_artifact(
+        monkeypatch, runtime, tmp_path, run, _artifact_for(run)
+    )
+    research_stage = next(
+        stage for stage in completed["_tasks_template"] if stage["id"] == "research"
+    )
+
+    request = build_stage_gateway_request(
+        completed,
+        research_stage,
+        source_context=expert_teams.verified_source_context_for_execution(tmp_path, completed),
+    )
+
+    assert __import__("json").loads(request["messages"][1]["content"])["approved_input_artifacts"] == [
+        completed["stage_outputs"][-1]["artifact"]
+    ]
+    envelope = __import__("json").loads(request["messages"][1]["content"])
+    assert envelope["user_background_provenance"]["source_id"] == "brief-confirmed"
+    assert "E01-Pxx" in envelope["user_background_provenance"]["reader_locator_rule"]
 
 
 def test_research_v2_blocking_artifact_retries_only_current_stage_and_keeps_snapshot(
@@ -487,6 +607,57 @@ def test_research_v2_system_delivery_can_continue_through_resume_mutation():
             "pending_system_stage": {"id": "delivery", "executor": "system"},
         }
     ) is True
+
+
+def test_failed_research_system_delivery_can_resume_from_projected_delivery_stage(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    workspace = tmp_path / "failed-delivery-resume"
+    failed = _research_stage_run(expert_teams, runtime, workspace, "review")
+    failed["current_stage_index"] = len(failed["_tasks_template"])
+    failed["pending_system_stage"] = copy.deepcopy(
+        failed["launch_profile_snapshot"]["post_approval_system_steps"][0]
+    )
+    failed["workflow_state"] = "generated_invalid"
+    failed["last_execution_error_code"] = "delivery_semantic_blocked"
+    failed["research_v3_result_grade"] = "preliminary_research_draft"
+    failed["current_stage_attempt_reservation"] = {
+        "reservation_id": "delivery-reservation-1",
+        "stage_id": "delivery",
+        "stage_attempt": 1,
+        "executor": "system",
+        "artifact_type": "delivery_manifest",
+        "input_refs": [],
+        "input_binding_sha256": hashlib.sha256(b"[]").hexdigest(),
+        "idempotency_key": "system-delivery-1",
+        "status": "generated_invalid",
+        "created_at": "2026-08-03T10:00:00+08:00",
+    }
+    failed["stage_attempt_reservations"] = [
+        copy.deepcopy(failed["current_stage_attempt_reservation"])
+    ]
+    failed = runtime._sync_derived(failed)
+    projected = expert_teams.expert_team_run_view(failed)
+    cell = _memory_storage(monkeypatch, runtime, failed)
+
+    assert projected["workflow"]["current_stage"]["task_id"] == "delivery"
+    resumed = runtime.resume_expert_team(
+        workspace,
+        {
+            "run_id": failed["run_id"],
+            "session_id": failed["session_id"],
+            "stage_id": "delivery",
+            "expected_version": failed["version"],
+            "idempotency_key": "resume-failed-delivery",
+        },
+    )
+
+    assert resumed["workflow_state"] == "generated_invalid"
+    assert resumed["events"][-1]["type"] == "system_stage_retry_requested"
+    assert cell["run"]["current_stage"]["task_id"] == "review"
 
 
 def test_research_v2_delivery_projection_routes_the_authoritative_system_stage(

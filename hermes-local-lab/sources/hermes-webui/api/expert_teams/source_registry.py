@@ -285,6 +285,35 @@ def _write_provided_text(root: Path, run_id: str, source_id: str, text: object) 
     return target
 
 
+def materialize_uploaded_attachment_source(
+    workspace: Path,
+    run_id: str,
+    source_id: str,
+    *,
+    label: str,
+    data: bytes,
+) -> dict:
+    """Copy an already-uploaded UTF-8 attachment into this Run's trusted source area."""
+    root = _trusted_workspace_root(workspace)
+    source_id = _safe_id(source_id)
+    if not isinstance(data, bytes) or not data:
+        raise SourceRegistryError("source_unresolved", source_id, "资料不能为空")
+    if len(data) > _MAX_SOURCE_BYTES:
+        raise SourceRegistryError("source_too_large", source_id, "单份资料不能超过 10MB")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SourceRegistryError("source_invalid_utf8", source_id, "资料必须使用 UTF-8 编码") from exc
+    target = _write_provided_text(root, run_id, source_id, text)
+    return {
+        "source_id": source_id,
+        "kind": "attachment",
+        "label": str(label or source_id).strip() or source_id,
+        "locator": target.relative_to(root).as_posix(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 def _validated_retrieved_at(value: str, source_id: str = "") -> str:
     retrieved_at = str(value or "").strip()
     try:

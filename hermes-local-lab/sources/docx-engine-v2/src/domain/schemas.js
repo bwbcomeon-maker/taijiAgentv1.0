@@ -460,6 +460,14 @@ const schemas = {
       canonicalMarkdownSha256: sha256Schema,
       assetManifestSha256: sha256Schema,
       semanticGatesSha256: sha256Schema,
+      researchWorkingDraft: {
+        type: 'object', additionalProperties: false, required: ['label', 'resultGrade', 'notes'],
+        properties: {
+          label: { const: '工作稿 · 待核实，不作为正式研究结论' },
+          resultGrade: { enum: ['blocked', 'quality_review_required', 'preliminary_research_draft'] },
+          notes: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
+        },
+      },
       template: {
         type: 'object', additionalProperties: false, required: ['id', 'version', 'packageSha256'],
         properties: { id: { type: 'string', minLength: 1 }, version: { type: 'string', minLength: 1 }, packageSha256: sha256Schema },

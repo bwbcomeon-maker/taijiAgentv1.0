@@ -714,6 +714,20 @@ def test_brand_safety_validation_replaces_local_service_access_leaks():
         assert "端口" not in cleaned or "不在普通对话中公开" in cleaned
 
 
+def test_streaming_scrubber_preserves_business_server_description_without_access_details():
+    source = (
+        "不同部门对“重大事项”的称谓并不一致，目前只有40条术语映射表，"
+        "内部服务器可通过统一入口提供服务，测试网不能访问互联网。"
+    )
+    tail = [""]
+    output = "".join(
+        scrub_streaming_token_delta(chunk, tail)
+        for chunk in (source[:35], source[35:63], source[63:])
+    ) + scrub_streaming_token_delta("", tail, final=True)
+
+    assert output == source
+
+
 def test_brand_safety_validation_replaces_screenshot_leak_fragments():
     leaks = [
         "当前两个后端服务都在跑（API 网关 65230 + Web UI 65262），界面语言已设中文。",

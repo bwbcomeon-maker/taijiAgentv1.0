@@ -42,7 +42,8 @@ def _run_v3_hooks(body: str) -> dict:
               'window.ExpertTeamV3 = Object.freeze({{',
               `window.__researchV2Hooks={{
                 renderTeamDialog,statePanel,workbenchHtml,
-                scheduleResearchAutoContinuation,handleWorkbenchClick,
+                scheduleResearchAutoContinuation,handleWorkbenchClick,cardFromResponse,
+                uploadResearchLaunchSources,
                 setSelectedTeam(value){{
                   state.selectedTeam=value;
                   state.selectedExample=(value.examples||[]).find(item=>item.available===true)||null;
@@ -52,6 +53,7 @@ def _run_v3_hooks(body: str) -> dict:
                 setBusy(value){{ state.busy=Boolean(value); }},
                 getCollapsed(){{ return state.collapsed; }},
                 getAutoContinuationKeyCount(){{ return state.autoContinuationKeys.size; }},
+                getAutoContinuationFailureKeyCount(){{ return state.autoContinuationFailureKeys.size; }},
               }};\n  window.ExpertTeamV3 = Object.freeze({{`
             );
             vm.runInContext(source,context);
@@ -60,6 +62,52 @@ def _run_v3_hooks(body: str) -> dict:
             """
         )
     )
+
+
+def test_research_attachment_upload_uses_the_session_created_from_expert_center():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');
+            const uploads=[];
+            class TestFormData{
+              constructor(){this.values=[];}
+              append(...value){this.values.push(value);}
+            }
+            const file={name:'资料.txt',size:8,lastModified:1};
+            const context={
+              window:{},console,queueMicrotask,setTimeout,FormData:TestFormData,URL,
+              location:{href:'http://localhost/session/expert-center'},
+              document:{readyState:'loading',baseURI:'http://localhost/session/expert-center',addEventListener(){},getElementById(id){return id==='expertTeamV3ResearchSources'?{files:[file]}:null;}},
+              fetch:async(_url,options)=>{
+                uploads.push(options.body.values);
+                return {ok:true,json:async()=>({ref:'资料.txt',name:'资料.txt',mime:'text/plain',size:8})};
+              },
+            };
+            vm.createContext(context);
+            let source=`let S={session:null}; async function newSession(){S.session={session_id:'created-from-expert-center'};return S.session;}\n`+fs.readFileSync('static/expert-team-v3.js','utf8');
+            source=source.replace(
+              'window.ExpertTeamV3 = Object.freeze({',
+              'window.__attachmentHook=uploadResearchLaunchSources; window.ExpertTeamV3 = Object.freeze({'
+            );
+            vm.runInContext(source,context);
+            (async()=>{
+              const payload=await context.window.__attachmentHook();
+              console.log(JSON.stringify({payload,uploads,windowState:context.window.S||null}));
+            })().catch(error=>{console.error(error);process.exit(1);});
+            """
+        )
+    )
+
+    assert result["windowState"] is None
+    assert result["payload"] == {
+        "source_session_id": "created-from-expert-center",
+        "source_attachments": [{"name": "资料.txt", "ref": "资料.txt", "mime": "text/plain", "size": 8}],
+    }
+    assert result["uploads"] == [[
+        ["session_id", "created-from-expert-center"],
+        ["file", {"name": "资料.txt", "size": 8, "lastModified": 1}, "资料.txt"],
+    ]]
 
 
 def test_presenter_projects_research_v2_contract_without_inventing_frontend_state():
@@ -281,12 +329,132 @@ def test_research_v2_failed_auto_continuation_is_not_rescheduled_for_the_same_sn
         hooks.scheduleResearchAutoContinuation(card);
         setTimeout(()=>{
           hooks.scheduleResearchAutoContinuation(card);
-          setTimeout(()=>console.log(JSON.stringify({calls,keyCount:hooks.getAutoContinuationKeyCount()})),0);
+          setTimeout(()=>console.log(JSON.stringify({calls,keyCount:hooks.getAutoContinuationKeyCount(),failureKeyCount:hooks.getAutoContinuationFailureKeyCount()})),0);
         },0);
         """
     )
 
-    assert result == {"calls": 1, "keyCount": 1}
+    assert result == {"calls": 1, "keyCount": 1, "failureKeyCount": 1}
+
+
+def test_research_v3_valid_awaiting_review_stage_resumes_once_with_its_bound_artifact():
+    result = _run_v3_hooks(
+        """
+        const calls=[];
+        context.window.api=async(_endpoint, request)=>{calls.push(JSON.parse(request.body));return {};};
+        const card={
+          researchV3:{completed_units:0,total_units:7},runId:'research-run',sourceSessionId:'research-session',version:7,
+          workflowState:'awaiting_review',currentStageId:'direction',productMode:'standalone',
+          publicState:'awaiting_stage_confirmation',allowedActions:['resume'],pendingInputId:'',
+          stageActionBinding:{session_id:'research-session',run_id:'research-run',expected_version:7,stage_id:'direction',stage_attempt:1,artifact_id:'direction:1',artifact_sha256:'a'.repeat(64)},
+        };
+        hooks.setCard(card);
+        hooks.scheduleResearchAutoContinuation(card);
+        setTimeout(()=>{
+          hooks.scheduleResearchAutoContinuation(card);
+          setTimeout(()=>console.log(JSON.stringify({calls,keyCount:hooks.getAutoContinuationKeyCount(),failureKeyCount:hooks.getAutoContinuationFailureKeyCount()})),0);
+        },0);
+        """
+    )
+
+    assert len(result["calls"]) == 1
+    assert result["calls"][0]["artifact_id"] == "direction:1"
+    assert result["calls"][0]["artifact_sha256"] == "a" * 64
+    assert result["calls"][0]["stage_attempt"] == 1
+    assert result["keyCount"] == 1
+    assert result["failureKeyCount"] == 0
+
+
+def test_research_v3_delivery_auto_continuation_uses_the_pending_system_stage():
+    result = _run_v3_hooks(
+        """
+        const calls=[];
+        context.window.api=async(_endpoint, request)=>{calls.push(JSON.parse(request.body));return {};};
+        const card={
+          researchV3:{completed_units:7,total_units:7},runId:'research-run',sourceSessionId:'research-session',version:57,
+          workflowState:'delivery_validation_required',currentStageId:'review',productMode:'standalone',
+          publicState:'generating_document',allowedActions:[],pendingInputId:'',
+        };
+        hooks.setCard(card);
+        hooks.scheduleResearchAutoContinuation(card);
+        setTimeout(()=>console.log(JSON.stringify({calls})),0);
+        """
+    )
+
+    assert len(result["calls"]) == 1
+    assert result["calls"][0]["stage_id"] == "delivery"
+    assert result["calls"][0]["expected_version"] == 57
+
+
+def test_research_v3_ready_review_exposes_the_existing_start_generation_action():
+    result = _run_v3_hooks(
+        """
+        const card={
+          researchV3:{completed_units:7,total_units:7},runId:'research-run',sourceSessionId:'research-session',version:56,
+          workflowState:'ready_to_generate',currentStageId:'review',productMode:'standalone',
+          publicState:'ready',allowedActions:['start_generation'],pendingInputId:'',
+          team:{title:'深度材料研究团'},brief:{originalRequest:'形成深度研究报告'},evidenceSummary:{},
+        };
+        console.log(JSON.stringify({html:hooks.workbenchHtml(card)}));
+        """
+    )
+
+    assert "正文已生成" in result["html"]
+    assert "开始独立审核" in result["html"]
+    assert 'data-et3-action="start-generation"' in result["html"]
+
+
+def test_research_v3_product_error_response_is_presented_and_stops_auto_continuation():
+    presented = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');
+            const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const run={
+              run_id:'research-run',session_id:'research-session',schema_version:3,version:7,
+              team_id:'deep-research-team',launch_profile_id:'research-report',
+              view:{product_mode:'standalone',public_state:'ready',allowed_actions:['resume'],
+                research_v3:{completed_units:0,total_units:7},workflow:{stages:[],current_stage:{},progress:{}},workspace:{},presentation:{}}
+            };
+            const card=context.window.buildExpertTeamCardFromRun(run,{
+              ok:false,run,
+              product_error:{schema:'taiji.product.error.v1',code:'backend_unavailable',title:'服务暂不可用',message:'已停止自动继续。'}
+            });
+            console.log(JSON.stringify({researchV3:Boolean(card.researchV3),productError:card.productError}));
+            """
+        )
+    )
+    assert presented == {
+        "researchV3": True,
+        "productError": {
+            "schema": "taiji.product.error.v1",
+            "code": "backend_unavailable",
+            "title": "服务暂不可用",
+            "message": "已停止自动继续。",
+            "incidentId": "",
+            "retryable": False,
+            "recoveryActions": [],
+        },
+    }
+
+    scheduled = _run_v3_hooks(
+        """
+        let calls=0;
+        context.window.api=async()=>{calls+=1;return {};};
+        const card={
+          researchV3:{completed_units:0,total_units:7},runId:'research-run',sourceSessionId:'research-session',version:7,
+          workflowState:'ready_to_generate',currentStageId:'direction',productMode:'standalone',
+          publicState:'ready',allowedActions:['resume'],pendingInputId:'',
+          productError:{schema:'taiji.product.error.v1',code:'backend_unavailable'},
+        };
+        hooks.setCard(card);
+        hooks.scheduleResearchAutoContinuation(card);
+        setTimeout(()=>console.log(JSON.stringify({calls,keyCount:hooks.getAutoContinuationKeyCount()})),0);
+        """
+    )
+
+    assert scheduled == {"calls": 0, "keyCount": 0}
 
 
 def test_research_v2_close_remains_available_while_auto_continuation_is_busy():

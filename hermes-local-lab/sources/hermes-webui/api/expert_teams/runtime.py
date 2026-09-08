@@ -18,6 +18,15 @@ from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
 from .launch_profiles import get_launch_profile
+from .research_contract import (
+    RESEARCH_ROUTE_V3,
+    RESEARCH_V3_START_FIELDS,
+    ResearchV3SpecError,
+    formal_report_writing_contract,
+    is_research_v3_run,
+    normalize_research_v3_start_spec,
+    research_contract_route,
+)
 from .rollout import enforce_new_contract_rollout
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
@@ -27,6 +36,7 @@ from .contracts import (
     classify_contract_version,
     confirm_document_brief,
     patch_document_brief,
+    required_sections_for_brief,
     validate_document_brief,
 )
 from .data_egress import authorize_research_public_query, load_model_policy_registry
@@ -195,6 +205,7 @@ _RUN_FILE_LOCK_DEPTH = threading.local()
 _EXPECTED_CURSOR_UNSET = object()
 _STANDALONE_START_FIELDS = frozenset(
     {"launch_profile_id", "prompt", "session_id", "idempotency_key"}
+    | RESEARCH_V3_START_FIELDS
 )
 _STANDALONE_START_MAX_LENGTHS = {
     "launch_profile_id": 128,
@@ -1280,7 +1291,8 @@ def _authoritative_stage_for_mutation(run: dict) -> dict:
     pending = run.get("pending_system_stage")
     profile = run.get("launch_profile_snapshot")
     if (
-        str(run.get("workflow_state") or "") == "delivery_validation_required"
+        str(run.get("workflow_state") or "")
+        in {"delivery_validation_required", "generated_invalid"}
         and isinstance(pending, dict)
         and str(pending.get("executor") or "") == "system"
     ):
@@ -1756,7 +1768,9 @@ def _sync_derived(run: dict) -> dict:
 
 def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict | None = None) -> dict:
     previous = str(run.get("workflow_state") or "")
-    if previous in TERMINAL_STATES:
+    if previous in TERMINAL_STATES and not (
+        previous == "cancelled" and event == "research_v3_duplicate_delivery_feedback_restored"
+    ):
         raise ValueError(f"Cannot transition terminal expert team run from {previous} to {state}")
     next_run = deepcopy(run)
     next_run["workflow_state"] = state
@@ -1836,6 +1850,16 @@ def validate_standalone_start_request(body: dict) -> dict:
             field,
             "任务类型和流程由服务端启动配置决定",
         )
+    requested_research_fields = {
+        field: body[field]
+        for field in RESEARCH_V3_START_FIELDS
+        if field in body
+    }
+    if requested_research_fields:
+        try:
+            validated.update(normalize_research_v3_start_spec(requested_research_fields))
+        except ResearchV3SpecError as exc:
+            raise ContractError(exc.code, exc.field, exc.message) from exc
 
     from api.models import is_safe_session_id
 
@@ -1858,6 +1882,7 @@ def _standalone_start_context(
     *,
     launch_profile_snapshot: dict | None = None,
     started_at: str,
+    brief_source_refs: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     validated = validate_standalone_start_request(body)
     profile = (
@@ -1874,6 +1899,43 @@ def _standalone_start_context(
             "launch_profile_id",
             "启动配置快照与任务类型不匹配",
         )
+    if any(field in validated for field in RESEARCH_V3_START_FIELDS):
+        if research_contract_route(profile) != RESEARCH_ROUTE_V3:
+            raise ContractError(
+                "research_v3_profile_not_enabled",
+                "launch_profile_id",
+                "当前研究任务仍使用 research-report/v2；新版规格须随 v3 运行时一并启用",
+            )
+    research_version = str(profile.get("research_contract_version") or "").strip()
+    research_route = research_contract_route(profile)
+    if (
+        str(profile.get("id") or "") == "research-report"
+        and research_version
+        and research_route is None
+    ):
+        raise ContractError(
+            "research_contract_version_unsupported",
+            "launch_profile_id",
+            "研究报告启动配置的合同版本不受支持",
+        )
+    writing_contract = None
+    if research_route == RESEARCH_ROUTE_V3:
+        # The candidate profile is server-owned; only its two explicit start
+        # fields can vary.  Freeze defaults here so a later public-default
+        # activation cannot reinterpret a persisted run.
+        try:
+            writing_spec = normalize_research_v3_start_spec(
+                {
+                    "writing_style": validated.get(
+                        "writing_style", "central_enterprise"
+                    ),
+                    "depth": validated.get("depth", "standard"),
+                }
+            )
+        except ResearchV3SpecError as exc:
+            raise ContractError(exc.code, exc.field, exc.message) from exc
+        writing_contract = formal_report_writing_contract(**writing_spec)
+
     brief_seed = {
         "task_mode": profile["task_mode"],
         "document_control": {"render_template_id": profile["render_template_id"]},
@@ -1881,32 +1943,74 @@ def _standalone_start_context(
             profile.get("content_constraints") or {}
         ),
     }
-    if profile.get("research_contract_version") == "research-report/v2":
+    if profile.get("research_contract_version") in {
+        "research-report/v2",
+        "research-report/v3",
+    }:
         launch_date = str(started_at or "")[:10]
         request_summary = " ".join(validated["prompt"].split()).translate(
             str.maketrans({"「": "", "」": ""})
         )
         if len(request_summary) > 48:
             request_summary = request_summary[:47].rstrip() + "…"
+        # A title must be a readable document label, not the whole operational
+        # request and not one hard-coded topic for every report.
+        topic_match = re.search(
+            r"(?:研究|调研|分析)\s*(?:主题(?:为|是)?\s*)?[“\"「](?P<topic>[^\n”\"」]{2,80})[”\"」]",
+            validated["prompt"],
+        )
+        if topic_match:
+            title_subject = " ".join(topic_match.group("topic").split())
+        else:
+            subject_match = re.search(
+                r"(?:调研|研究|分析)\s*(?P<topic>[^，,。；;]{2,80})",
+                validated["prompt"],
+            )
+            title_subject = (
+                " ".join(subject_match.group("topic").split())
+                if subject_match
+                else request_summary
+            )
+        title_subject = re.sub(r"^(?:请|帮我|基于|根据|围绕|就)", "", title_subject).strip()
+        title_subject = re.sub(r"(?:形成|撰写|编制|生成|起草).{0,16}(?:报告|材料).*$", "", title_subject).strip()
+        title_subject = title_subject.strip("：:，,。；; ")
+        if len(title_subject) > 36:
+            title_subject = title_subject[:36].rstrip()
+        v3_title = f"{title_subject or '专题'}调研报告"
         brief_seed.update(
             {
-                "exact_title": f"关于「{request_summary}」的深度研究报告",
+                "exact_title": (
+                    v3_title
+                    if profile.get("research_contract_version")
+                    == "research-report/v3"
+                    else f"关于「{request_summary}」的深度研究报告"
+                ),
                 "purpose": "围绕原始诉求形成资料研究、分析与结论边界",
-                "audience": "任务发起者",
+                "audience": (
+                    str(writing_contract["writing_style"]["audience"])
+                    if writing_contract is not None
+                    else "任务发起者"
+                ),
                 "usage_scenario": "专题研究与决策参考",
                 "source_policy": {
                     "mode": "automatic_fallback",
                     "as_of_date": launch_date,
                     "citation_style": "source_id",
                     "unknown_fact_action": "block_final",
-                    "source_refs": [],
+                    "source_refs": deepcopy(brief_source_refs or []),
                 },
                 "details": {
-                    "core_question": validated["prompt"],
+                    "core_question": (
+                        title_subject or request_summary
+                        if profile.get("research_contract_version") == "research-report/v3"
+                        else validated["prompt"]
+                    ),
                     "time_range": {"start": "", "end": launch_date},
                 },
             }
         )
+    elif brief_source_refs:
+        raise ContractError("source_attachments_unsupported", "source_attachments", "当前文档任务不支持研究资料附件")
     resolved = {
         "session_id": validated["session_id"],
         "prompt": validated["prompt"],
@@ -1918,6 +2022,14 @@ def _standalone_start_context(
         "document_type": profile["document_type"],
         "document_brief_seed": brief_seed,
     }
+    if writing_contract is not None:
+        resolved["research_writing_contract"] = deepcopy(writing_contract)
+        resolved["document_brief_seed"]["content_constraints"] = {
+            **deepcopy(resolved["document_brief_seed"].get("content_constraints") or {}),
+            "required_sections": deepcopy(
+                writing_contract["sections"]["required_core"]
+            ),
+        }
     return profile, resolved
 
 
@@ -1926,6 +2038,8 @@ def _build_expert_team_run(
     *,
     run_id: str | None = None,
     launch_profile_snapshot: dict | None = None,
+    brief_source_refs: list[dict] | None = None,
+    source_registry: dict | None = None,
 ) -> dict:
     started_at = _now()
     standalone = "launch_profile_id" in body
@@ -1936,6 +2050,7 @@ def _build_expert_team_run(
             body,
             launch_profile_snapshot=launch_profile_snapshot,
             started_at=started_at,
+            brief_source_refs=brief_source_refs,
         )
 
     contract_version = classify_contract_version(resolved_body)
@@ -1954,11 +2069,11 @@ def _build_expert_team_run(
         research_contract_version = str(
             (launch_profile or {}).get("research_contract_version") or ""
         )
-        if research_contract_version == "research-report/v2":
+        if research_contract_version in {"research-report/v2", "research-report/v3"}:
             validation = validate_document_brief(
                 document_brief,
                 runtime_capabilities={"approved_public_search": False},
-                source_registry={},
+                source_registry=source_registry or {},
                 model_policy_registry={},
                 now=started_at,
                 research_contract_version=research_contract_version,
@@ -1984,8 +2099,11 @@ def _build_expert_team_run(
     research_intake_ready = bool(
         standalone
         and (launch_profile or {}).get("research_contract_version")
-        == "research-report/v2"
+        in {"research-report/v2", "research-report/v3"}
     )
+    run_title = prompt[:120]
+    if research_intake_ready and isinstance(document_brief, dict):
+        run_title = str(document_brief.get("exact_title") or run_title)
     run = {
         "schema_version": 3 if standalone else 2,
         "version": 1,
@@ -1994,7 +2112,7 @@ def _build_expert_team_run(
         "team_id": template["id"],
         "team_title": template["title"],
         "team_image": template.get("image") or "",
-        "title": prompt[:120],
+        "title": run_title,
         "prompt": prompt,
         "created_at": started_at,
         "updated_at": started_at,
@@ -2036,8 +2154,18 @@ def _build_expert_team_run(
                 "document_brief": document_brief,
                 "stage_artifacts": [],
                 "canonical_document_ref": None,
+                "source_registry": deepcopy(source_registry or {}),
             }
         )
+        if research_contract_version == "research-report/v3":
+            writing_contract = resolved_body.get("research_writing_contract")
+            if not isinstance(writing_contract, dict):
+                raise ContractError(
+                    "research_v3_contract_missing",
+                    "research_writing_contract",
+                    "新版研究报告缺少冻结写作合同",
+                )
+            run["research_writing_contract"] = deepcopy(writing_contract)
     if standalone and launch_profile is not None:
         run.update(
             {
@@ -2064,12 +2192,16 @@ def build_standalone_expert_team_run(
     *,
     run_id: str,
     launch_profile_snapshot: dict | None = None,
+    brief_source_refs: list[dict] | None = None,
+    source_registry: dict | None = None,
 ) -> dict:
     """Build a standalone run without making it visible to public readers."""
     return _build_expert_team_run(
         validate_standalone_start_request(body),
         run_id=run_id,
         launch_profile_snapshot=launch_profile_snapshot,
+        brief_source_refs=brief_source_refs,
+        source_registry=source_registry,
     )
 
 
@@ -2108,7 +2240,7 @@ def bind_initial_standalone_source_context(workspace: Path, run: dict) -> dict:
         workspace,
         str(bound.get("run_id") or ""),
         brief,
-        {},
+        bound.get("source_registry") if isinstance(bound.get("source_registry"), dict) else {},
         brief_sha256=brief_digest(brief),
         brief_revision=int(brief.get("confirmed_revision") or 0),
         allow_empty=True,
@@ -2164,6 +2296,1081 @@ def _research_v2_run(run: dict) -> bool:
     )
 
 
+def _research_v3_draft_run(run: dict) -> bool:
+    """Recognize the one v3 stage that owns a persisted chapter ledger."""
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        is_research_v3_run(run)
+        and str(current.get("task_id") or current.get("id") or "") == "draft"
+    )
+
+
+def _research_v3_review_run(run: dict) -> bool:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        is_research_v3_run(run)
+        and str(current.get("task_id") or current.get("id") or "") == "review"
+    )
+
+
+def _research_v3_verified_approved_artifact(
+    run: dict,
+    *,
+    stage_id: str,
+    artifact_type: str,
+) -> dict:
+    """Recompute an upstream artifact digest before consuming its payload."""
+    from .stage_artifacts import artifact_digest
+
+    refs = run.get("approved_stage_artifact_refs")
+    ref = refs.get(stage_id) if isinstance(refs, dict) else None
+    if not isinstance(ref, dict):
+        raise ExpertTeamStateConflict(
+            "research_v3_approved_artifact_missing",
+            f"research v3 requires approved {stage_id} evidence",
+            run,
+        )
+    artifact = next(
+        (
+            item
+            for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict)
+            and item.get("artifact_id") == ref.get("artifact_id")
+            and item.get("sha256") == ref.get("sha256")
+        ),
+        None,
+    )
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("stage_id") != stage_id
+        or artifact.get("artifact_type") != artifact_type
+        or artifact.get("validation_status") != "valid"
+        or artifact.get("sha256") != artifact_digest(artifact)
+    ):
+        raise ExpertTeamStateConflict(
+            "research_v3_approved_artifact_invalid",
+            f"research v3 approved {stage_id} artifact failed integrity checks",
+            run,
+        )
+    return deepcopy(artifact)
+
+
+def _research_v3_user_background_context(run: dict) -> list[dict]:
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    if any(
+        isinstance(ref, dict) and str(ref.get("kind") or "") == "attachment"
+        for ref in ((brief.get("source_policy") or {}).get("source_refs") or [])
+    ):
+        return []
+    original = str(brief.get("original_request") or "").strip()
+    revision = int(brief.get("confirmed_revision") or 0)
+    digest = str(brief.get("confirmed_sha256") or "")
+    if not original or revision < 1 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ExpertTeamStateConflict(
+            "research_v3_brief_background_invalid",
+            "research v3 requires the confirmed original request for user-background provenance",
+            run,
+        )
+    return [
+        {
+            "source_id": "brief-confirmed",
+            "run_id": str(run.get("run_id") or ""),
+            "input_ref": f"brief:confirmed:{revision}:{digest}",
+            "revision": revision,
+            "content_text": original,
+        }
+    ]
+
+
+def _research_v3_review_material(workspace: Path, run: dict) -> dict:
+    from .research_chapters import ChapterLedgerError, assemble_canonical_from_ledger
+    from .research_v3_runtime import ResearchV3RuntimeError, build_independent_review_context
+
+    try:
+        canonical = assemble_canonical_from_ledger(run.get("research_v3_chapter_ledger"))
+    except ChapterLedgerError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+    stored = run.get("research_v3_canonical_document")
+    if not isinstance(stored, dict) or stored.get("body_sha256") != canonical["body_sha256"] or stored.get("body") != canonical["body"]:
+        raise ExpertTeamStateConflict("research_v3_canonical_binding_mismatch", "review must bind the current full draft ledger body", run)
+    evidence = _research_v3_verified_approved_artifact(run, stage_id="evidence", artifact_type="evidence_matrix")
+    try:
+        context = build_independent_review_context(
+            canonical,
+            verify_source_context_snapshot(workspace, run),
+            ledger=run.get("research_v3_chapter_ledger"),
+            run_id=str(run.get("run_id") or ""),
+            approved_claims=(evidence.get("payload") or {}).get("claims"),
+            user_background_context=_research_v3_user_background_context(run),
+        )
+    except ResearchV3RuntimeError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+    return {"canonical": canonical, **context}
+
+
+def _research_v3_quality_revision_plan(
+    run: dict,
+    *,
+    chapter_quality: object | None = None,
+    review: object | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Derive bounded revision work from persisted review evidence and body shape."""
+    ledger = run.get("research_v3_chapter_ledger")
+    plan = ledger.get("plan") if isinstance(ledger, dict) else {}
+    chapters = plan.get("chapters") if isinstance(plan, dict) else []
+    units = ledger.get("units") if isinstance(ledger, dict) else []
+    ordered_ids = [
+        str(item.get("chapter_id") or "")
+        for item in chapters
+        if isinstance(item, dict) and str(item.get("chapter_id") or "")
+    ]
+    feedback: dict[str, list[str]] = {}
+
+    def add(chapter_id: object, message: str) -> None:
+        chapter = str(chapter_id or "")
+        if chapter in ordered_ids and message not in feedback.setdefault(chapter, []):
+            feedback[chapter].append(message)
+
+    review_value = review if isinstance(review, dict) else run.get("research_v3_independent_review")
+    for finding in (review_value or {}).get("findings") or []:
+        if isinstance(finding, dict) and finding.get("revision_required") is True:
+            add(finding.get("chapter_id"), str(finding.get("rationale") or "请按独立审核意见修订本章。"))
+    quality_rows = chapter_quality if isinstance(chapter_quality, list) else run.get("research_v3_chapter_quality")
+    for row in quality_rows or []:
+        if not isinstance(row, dict) or not isinstance(row.get("issues"), list):
+            continue
+        for issue in row["issues"]:
+            if isinstance(issue, str) and issue.strip():
+                add(row.get("chapter_id"), issue.strip())
+
+    chapter_units: dict[str, list[dict]] = {chapter_id: [] for chapter_id in ordered_ids}
+    for unit in units or []:
+        if isinstance(unit, dict) and unit.get("chapter_id") in chapter_units:
+            chapter_units[unit["chapter_id"]].append(unit)
+    for chapter_id, rows in chapter_units.items():
+        seen_headings: set[str] = set()
+        seen_heading_fragments: set[str] = set()
+        for unit in sorted(rows, key=lambda item: int(item.get("unit_index") or 0)):
+            body = str((unit.get("result") or {}).get("body") or "")
+            headings = {
+                re.sub(r"\s+", "", match.group(1)).strip()
+                for match in re.finditer(r"(?m)^#{2,4}\s+(.+?)\s*$", body)
+            }
+            # Do not treat a planned multi-unit chapter as defective by
+            # itself.  Only repeated headings, or a shared substantial
+            # Chinese heading phrase such as “试点观察”, are evidence that a
+            # continuation has repeated the earlier unit's analysis.
+            fragments = {
+                compact[offset : offset + 4]
+                for heading in headings
+                for compact in [re.sub(r"[^\u4e00-\u9fff]", "", heading)]
+                for offset in range(max(0, len(compact) - 3))
+            }
+            # Broad analytical labels can properly recur when a later unit
+            # continues from framing into comparison.  They do not establish
+            # duplicate prose on their own; exact headings and substantive
+            # phrases such as “试点观察” remain revision evidence.
+            shared_fragments = (fragments & seen_heading_fragments) - {"评价维度"}
+            if headings & seen_headings or shared_fragments:
+                add(
+                    chapter_id,
+                    "合并同章重复的现状、试点、评价或建议叙述；保留每项关键事实、限制与待确认条件，只保留一次完整论证。",
+                )
+            seen_headings.update(headings)
+            seen_heading_fragments.update(fragments)
+        body = "\n".join(str((unit.get("result") or {}).get("body") or "") for unit in rows)
+        if re.search(r"\bATT-[A-Za-z0-9-]+", body) or re.search(r"\bclaim(?:_id)?\b", body, re.I):
+            add(
+                chapter_id,
+                "正文不得暴露 ATT、claim 或其他机器标识；读者出处改为附件名称和当前附件中实际使用的原始段落号，来源追溯仍保留在旁表。",
+            )
+    for chapter_id, messages in feedback.items():
+        if any("合并同章重复" in message for message in messages):
+            add(
+                chapter_id,
+                "可围绕当前材料中的路径适用条件、实际资源约束及冲突、分步行动、验证方法与回退条件补足分析；建议必须写为拟议，不得编造已批准人选、日期或阈值。",
+            )
+    return [chapter_id for chapter_id in ordered_ids if chapter_id in feedback], feedback
+
+
+def _research_v3_begin_quality_revision(
+    run: dict,
+    *,
+    chapter_quality: object | None = None,
+    review: object | None = None,
+    chapter_ids: list[str] | None = None,
+    unit_ids: list[str] | None = None,
+    feedback_by_chapter: dict[str, list[str]] | None = None,
+    revision_kind: str = "quality_review",
+) -> dict | None:
+    """Re-open only reviewed chapters, preserving the old review as revision evidence."""
+    from .research_chapters import ChapterLedgerError, assemble_canonical_from_ledger, begin_quality_revision
+
+    ledger = run.get("research_v3_chapter_ledger")
+    policy = (run.get("research_writing_contract") or {}).get("execution_policy")
+    if revision_kind == "quality_review" and policy == "bounded_report_v1":
+        return None
+    try:
+        canonical = assemble_canonical_from_ledger(ledger)
+        if chapter_ids is None:
+            targets, feedback = _research_v3_quality_revision_plan(
+                run, chapter_quality=chapter_quality, review=review
+            )
+        else:
+            targets = [str(item or "") for item in chapter_ids]
+            feedback = {
+                str(chapter_id): [str(message) for message in messages if str(message).strip()]
+                for chapter_id, messages in (feedback_by_chapter or {}).items()
+                if isinstance(messages, list)
+            }
+        if not targets:
+            return None
+        revised = begin_quality_revision(
+            ledger,
+            canonical_body_sha256=canonical["body_sha256"],
+            chapter_ids=targets,
+            unit_ids=unit_ids,
+            revision_kind=revision_kind,
+        )
+    except ChapterLedgerError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+    parent = revised["ledger"]["parent"]
+    reservations = [
+        deepcopy(item) for item in run.get("stage_attempt_reservations") or [] if isinstance(item, dict)
+    ]
+    draft_reservation = next(
+        (
+            deepcopy(item)
+            for item in reservations
+            if item.get("reservation_id") == parent["reservation_id"]
+            and item.get("stage_id") == "draft"
+        ),
+        None,
+    )
+    if not isinstance(draft_reservation, dict):
+        raise ExpertTeamStateConflict(
+            "research_v3_draft_reservation_missing",
+            "research v3 revision cannot reactivate its frozen draft reservation",
+            run,
+        )
+    draft_reservation["status"] = "checkpointed"
+    draft_reservation["updated_at"] = _now()
+    for index, item in enumerate(reservations):
+        if item.get("reservation_id") == draft_reservation["reservation_id"]:
+            reservations[index] = deepcopy(draft_reservation)
+            break
+    return {
+        "research_v3_chapter_ledger": revised["ledger"],
+        "research_v3_active_unit": None,
+        "research_v3_canonical_document": None,
+        "research_v3_body_count": None,
+        "research_v3_result_grade_before_review": None,
+        "research_v3_result_grade": "quality_review_required",
+        "research_v3_review_ledger": None,
+        "research_v3_active_review_unit": None,
+        "research_v3_review_material": None,
+        "research_v3_provenance_sidecar": None,
+        "research_v3_mechanical_binding": None,
+        "research_v3_independent_review": None,
+        "research_v3_chapter_quality": None,
+        "research_v3_structure_check": None,
+        "research_v3_review_revisions": {
+            "reviewed_canonical_body_sha256": canonical["body_sha256"],
+            "chapter_ids": targets,
+            "feedback_by_chapter": feedback,
+            "revision_round": revised["ledger"]["quality_revision_round"],
+        },
+        "stage_attempt_reservations": reservations,
+        "current_stage_attempt_reservation": draft_reservation,
+        "current_stage_index": max(0, int(run.get("current_stage_index") or 0) - 1),
+    }
+
+
+def _research_v3_delivery_feedback_revision_patch(
+    run: dict,
+    *,
+    feedback: str,
+    delivery_target_index: int,
+) -> dict:
+    """Map named user delivery corrections onto their frozen v3 chapter units."""
+    if not is_research_v3_run(run):
+        raise ExpertTeamStateConflict(
+            "research_v3_delivery_revision_unavailable",
+            "research v3 delivery feedback requires a frozen chapter ledger",
+            run,
+        )
+    ledger = run.get("research_v3_chapter_ledger")
+    plan = ledger.get("plan") if isinstance(ledger, dict) else None
+    chapters = plan.get("chapters") if isinstance(plan, dict) else None
+    if not isinstance(chapters, list):
+        raise ExpertTeamStateConflict(
+            "research_v3_delivery_revision_unavailable",
+            "research v3 delivery feedback is missing its frozen chapter plan",
+            run,
+        )
+    targets = [
+        str(chapter.get("chapter_id") or "")
+        for chapter in chapters
+        if isinstance(chapter, dict)
+        and str(chapter.get("chapter_id") or "")
+        and str(chapter.get("title") or "").strip()
+        and f"{str(chapter.get('title') or '').strip()}章" in feedback
+    ]
+    if not targets:
+        raise ExpertTeamStateConflict(
+            "research_v3_delivery_revision_target_missing",
+            "delivery feedback must name the affected research v3 chapter",
+            run,
+        )
+    revision_base = deepcopy(run)
+    # Delivery feedback initially targets review; preserve that anchor so the
+    # existing revision helper returns to draft, not to the delivered cursor.
+    revision_base["current_stage_index"] = int(delivery_target_index)
+    revision_patch = _research_v3_begin_quality_revision(
+        revision_base,
+        chapter_ids=targets,
+        feedback_by_chapter={chapter_id: [feedback] for chapter_id in targets},
+        revision_kind="delivery_feedback",
+    )
+    if revision_patch is None:
+        raise ExpertTeamStateConflict(
+            "research_v3_delivery_revision_target_missing",
+            "delivery feedback did not produce a research v3 revision target",
+            run,
+        )
+    return revision_patch
+
+
+def _quality_revision_limit_feedback_context(run: dict, body: dict) -> dict | None:
+    """Bind user feedback to the current draft after the automatic cap."""
+    if not (
+        is_research_v3_run(run)
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(run.get("workflow_state") or "") == "generated_invalid"
+        and str(run.get("last_execution_error_code") or "") == "quality_revision_limit"
+        and str((run.get("current_stage") or {}).get("task_id") or "") == "review"
+        and not any(
+            str(run.get(field) or "").strip()
+            for field in (
+                "execution_start_id",
+                "execution_stream_id",
+                "execution_runtime_run_id",
+                "orphan_runtime_run_id",
+            )
+        )
+    ):
+        return None
+    reservation = run.get("current_stage_attempt_reservation")
+    ledger = run.get("research_v3_review_ledger")
+    approved = run.get("approved_stage_artifact_refs")
+    draft = approved.get("draft") if isinstance(approved, dict) else None
+    if not (
+        isinstance(reservation, dict)
+        and str(reservation.get("stage_id") or "") == "review"
+        and str(reservation.get("status") or "") == "generated_invalid"
+        and isinstance(ledger, dict)
+        and all(
+            isinstance(unit, dict) and str(unit.get("status") or "") == "completed"
+            for unit in ledger.get("units") or []
+        )
+        and isinstance(draft, dict)
+        and str(draft.get("artifact_id") or "").startswith("research-v3-draft:")
+        and re.fullmatch(r"[0-9a-f]{64}", str(draft.get("sha256") or ""))
+        and str(body.get("stage_id") or "") == "review"
+        and int(body.get("stage_attempt") or 0) == int(reservation.get("stage_attempt") or 0)
+        and str(body.get("artifact_id") or "") == str(draft.get("artifact_id") or "")
+        and str(body.get("artifact_sha256") or "") == str(draft.get("sha256") or "")
+    ):
+        return None
+    return deepcopy(draft)
+
+
+def _research_v3_delivery_feedback_identity(entry: dict) -> str:
+    fields = {
+        key: str(entry.get(key) or "")
+        for key in (
+            "artifact_id",
+            "artifact_sha256",
+            "delivery_binding_sha256",
+            "document_sha256",
+            "feedback",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _research_v3_delivery_feedback_consumed(run: dict, entry: dict) -> bool:
+    identity = _research_v3_delivery_feedback_identity(entry)
+    return any(
+        isinstance(item, dict) and str(item.get("identity") or "") == identity
+        for item in run.get("research_v3_delivery_feedback_consumptions") or []
+    )
+
+
+def _research_v3_delivery_feedback_consumption_patch(
+    run: dict, entry: dict, revision_patch: dict
+) -> list[dict]:
+    rows = [
+        deepcopy(item)
+        for item in run.get("research_v3_delivery_feedback_consumptions") or []
+        if isinstance(item, dict)
+    ]
+    identity = _research_v3_delivery_feedback_identity(entry)
+    if not any(str(item.get("identity") or "") == identity for item in rows):
+        revision = revision_patch.get("research_v3_review_revisions") or {}
+        rows.append(
+            {
+                "identity": identity,
+                "artifact_id": str(entry.get("artifact_id") or ""),
+                "artifact_sha256": str(entry.get("artifact_sha256") or ""),
+                "delivery_binding_sha256": str(entry.get("delivery_binding_sha256") or ""),
+                "document_sha256": str(entry.get("document_sha256") or ""),
+                "chapter_ids": deepcopy(revision.get("chapter_ids") or []),
+                "revision_round": int(revision.get("revision_round") or 0),
+            }
+        )
+    return rows
+
+
+def _research_v3_duplicate_delivery_feedback_restore_patch(run: dict, entry: dict) -> dict | None:
+    """Restore the prior complete draft after one persisted feedback was replayed.
+
+    This compatibility path is intentionally narrower than ordinary revision:
+    it requires a cancelled local call, exactly one feedback entry, and two
+    consecutive identical delivery-feedback rounds.  It never adopts a live
+    or partial retry result.
+    """
+    if (
+        not is_research_v3_run(run)
+        or str(run.get("workflow_state") or "") != "cancelled"
+        or not _research_v3_draft_run(run)
+        or any(str(run.get(field) or "").strip() for field in ("execution_start_id", "execution_stream_id"))
+    ):
+        return None
+    feedback_rows = [
+        item for item in run.get("delivery_revision_feedback") or []
+        if isinstance(item, dict) and str(item.get("artifact_id") or "").startswith("delivery:")
+    ]
+    if len(feedback_rows) != 1 or feedback_rows[0] != entry:
+        return None
+    revision = run.get("research_v3_review_revisions")
+    targets = list(revision.get("chapter_ids") or []) if isinstance(revision, dict) else []
+    feedback_by_chapter = revision.get("feedback_by_chapter") if isinstance(revision, dict) else {}
+    if (
+        not targets
+        or not isinstance(feedback_by_chapter, dict)
+        or any(str(entry.get("feedback") or "") not in (feedback_by_chapter.get(chapter_id) or []) for chapter_id in targets)
+    ):
+        return None
+    from .research_chapters import (
+        ChapterLedgerError,
+        assemble_canonical_from_ledger,
+        restore_superseded_delivery_feedback_revision,
+    )
+    from .research_v3_runtime import ResearchV3RuntimeError, finalize_draft_checkpoint
+
+    try:
+        restored = restore_superseded_delivery_feedback_revision(
+            run.get("research_v3_chapter_ledger"), chapter_ids=targets
+        )
+        finalized = finalize_draft_checkpoint(
+            restored["ledger"],
+            writing_contract=run.get("research_writing_contract"),
+            evidence_status=str(run.get("research_v3_evidence_status") or "unassessed"),
+        )
+        canonical = assemble_canonical_from_ledger(restored["ledger"])
+    except (ChapterLedgerError, ResearchV3RuntimeError) as exc:
+        raise ExpertTeamStateConflict(getattr(exc, "code", "research_v3_restore_invalid"), str(exc), run) from exc
+    artifact = next(
+        (
+            item for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict)
+            and item.get("stage_id") == "draft"
+            and item.get("validation_status") == "valid"
+            and str((item.get("payload") or {}).get("canonical_body_sha256") or "")
+            == str(canonical.get("body_sha256") or "")
+        ),
+        None,
+    )
+    if not isinstance(artifact, dict):
+        raise ExpertTeamStateConflict(
+            "research_v3_restore_artifact_missing",
+            "restored delivery-feedback draft has no immutable approved artifact",
+            run,
+        )
+    approved = deepcopy(run.get("approved_stage_artifact_refs") or {})
+    approved["draft"] = {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]}
+    return {
+        **_clear_execution_patch(),
+        "current_stage_index": 5,
+        "current_stage_attempt_reservation": None,
+        "research_v3_chapter_ledger": restored["ledger"],
+        "research_v3_active_unit": None,
+        "research_v3_canonical_document": finalized["canonical"],
+        "research_v3_body_count": finalized["body_count"],
+        "research_v3_result_grade_before_review": finalized["result_grade_before_review"],
+        "research_v3_result_grade": "quality_review_required",
+        "research_v3_review_ledger": None,
+        "research_v3_active_review_unit": None,
+        "research_v3_review_material": None,
+        "research_v3_provenance_sidecar": None,
+        "research_v3_mechanical_binding": None,
+        "research_v3_independent_review": None,
+        "research_v3_chapter_quality": None,
+        "research_v3_structure_check": None,
+        "research_v3_review_revisions": None,
+        "approved_stage_artifact_refs": approved,
+        "research_v3_delivery_feedback_consumptions": _research_v3_delivery_feedback_consumption_patch(
+            run, entry, {"research_v3_review_revisions": {"chapter_ids": targets, "revision_round": restored["revision_round"]}}
+        ),
+    }
+
+
+def _complete_research_v3_review_stage(
+    workspace: Path,
+    run: dict,
+    *,
+    delivery_id: str,
+    delivery_content_sha256: str,
+    raw_content: str,
+) -> dict:
+    """Bind a review-only model result to the full current ledger body."""
+    from .research_chapters import (
+        ChapterLedgerError,
+        assemble_canonical_from_ledger,
+        begin_quality_revision,
+    )
+    from .research_contract import determine_research_result_grade
+    from .research_v3_runtime import (
+        ResearchV3RuntimeError,
+        build_independent_review_context,
+        validate_independent_review_packet,
+    )
+
+    ledger = run.get("research_v3_chapter_ledger")
+    stored_canonical = run.get("research_v3_canonical_document")
+    try:
+        canonical = assemble_canonical_from_ledger(ledger)
+    except ChapterLedgerError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+    if (
+        not isinstance(stored_canonical, dict)
+        or stored_canonical.get("body_sha256") != canonical.get("body_sha256")
+        or stored_canonical.get("body") != canonical.get("body")
+    ):
+        raise ExpertTeamStateConflict(
+            "research_v3_canonical_binding_mismatch",
+            "review must bind the current full draft ledger body",
+            run,
+        )
+    evidence = _research_v3_verified_approved_artifact(
+        run,
+        stage_id="evidence",
+        artifact_type="evidence_matrix",
+    )
+    claims = (evidence.get("payload") or {}).get("claims")
+    try:
+        source_context = verify_source_context_snapshot(workspace, run)
+        review_context = build_independent_review_context(
+            canonical,
+            source_context,
+            ledger=ledger,
+            run_id=str(run.get("run_id") or ""),
+            approved_claims=claims,
+            user_background_context=_research_v3_user_background_context(run),
+        )
+        validated = validate_independent_review_packet(
+            ledger,
+            canonical,
+            review_context["sidecar"],
+            raw_content,
+        )
+    except ResearchV3RuntimeError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+
+    review = validated["review"]
+    review_patch = {
+        **_clear_execution_patch(),
+        "research_v3_chapter_ledger": validated["ledger"],
+        "research_v3_provenance_sidecar": review_context["sidecar"],
+        "research_v3_mechanical_binding": review_context["mechanical_binding"],
+        "research_v3_independent_review": review,
+        "research_v3_review_sha256": validated["review_sha256"],
+        "last_execution_error": "",
+        "last_execution_error_code": "",
+        "last_execution_incident_id": "",
+    }
+    revision_targets = review["revision_target_chapter_ids"]
+    if revision_targets:
+        try:
+            revised = begin_quality_revision(
+                validated["ledger"],
+                canonical_body_sha256=canonical["body_sha256"],
+                chapter_ids=revision_targets,
+            )
+        except ChapterLedgerError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        review_patch.update(
+            {
+                **_stage_reservation_status_patch(run, "reviewed"),
+                "research_v3_chapter_ledger": revised["ledger"],
+                "research_v3_active_unit": None,
+                "current_stage_index": max(0, int(run.get("current_stage_index") or 0) - 1),
+                "research_v3_review_revisions": {
+                    "reviewed_canonical_body_sha256": canonical["body_sha256"],
+                    "chapter_ids": deepcopy(revision_targets),
+                    "revision_round": revised["ledger"]["quality_revision_round"],
+                },
+            }
+        )
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate",
+            "research_v3_review_requested_targeted_revision",
+            review_patch,
+        )
+
+    factual_blockers = [
+        "evidence_contested_or_blocked"
+        for claim in review_context["sidecar"].get("claims") or []
+        if claim.get("status") in {"contested", "blocked"}
+        or any(
+            item.get("relationship") == "contradicts"
+            for item in claim.get("evidence_refs") or []
+        )
+    ]
+    factual_blockers.extend(
+        "review_blocked_finding"
+        for finding in review.get("findings") or []
+        if isinstance(finding, dict) and finding.get("verdict") == "blocked"
+    )
+    body_count = run.get("research_v3_body_count") if isinstance(run.get("research_v3_body_count"), dict) else {}
+    result_grade = determine_research_result_grade(
+        evidence_status=str(run.get("research_v3_evidence_status") or "unassessed"),
+        factual_blockers=factual_blockers,
+        word_count_passed=body_count.get("formal_word_count_passed") is True,
+        structure_quality_passed=True,
+        human_or_model_review_passed=review.get("review_status") == "reviewer_assessed_passed",
+    )
+    review_patch["research_v3_result_grade"] = result_grade
+    review_patch.update(_stage_reservation_status_patch(run, "generated_invalid"))
+    return _transition(
+        workspace,
+        run,
+        "generated_invalid",
+        "research_v3_review_completed_gate_pending",
+        review_patch,
+    )
+
+
+def _complete_research_v3_review_unit(
+    workspace: Path,
+    run: dict,
+    *,
+    delivery_id: str,
+    stage_id: str,
+    execution_attempt: int,
+    raw_content: str,
+) -> dict:
+    from .research_chapters import ChapterLedgerError, begin_quality_revision, record_quality_review_binding
+    from .research_contract import determine_research_result_grade
+    from .research_review import ReviewLedgerError, aggregate_review_ledger, complete_review_unit
+
+    active = run.get("research_v3_active_review_unit")
+    if not isinstance(active, dict) or active.get("execution_start_id") != run.get("execution_start_id"):
+        raise ExpertTeamStateConflict("research_v3_review_unit_missing", "research v3 review has no active chapter unit", run)
+    material = _research_v3_review_material(workspace, run)
+    try:
+        completed = complete_review_unit(
+            run.get("research_v3_review_ledger"), canonical=material["canonical"], sidecar=material["sidecar"],
+            unit_id=str(active.get("unit_id") or ""), execution_start_id=str(run.get("execution_start_id") or ""),
+            stream_id=str(run.get("execution_stream_id") or ""), delivery_id=delivery_id,
+            stage_id=stage_id, execution_attempt=execution_attempt, content=raw_content,
+        )
+    except ReviewLedgerError as exc:
+        raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+    if any(unit.get("status") != "completed" for unit in completed["ledger"].get("units") or []):
+        return _transition(workspace, run, "ready_to_generate", "research_v3_review_unit_completed", {**_clear_execution_patch(), **_stage_reservation_status_patch(run, "checkpointed"), "research_v3_review_ledger": completed["ledger"], "research_v3_active_review_unit": None, "research_v3_provenance_sidecar": material["sidecar"], "research_v3_mechanical_binding": material["mechanical_binding"]})
+    try:
+        aggregate = aggregate_review_ledger(completed["ledger"], canonical=material["canonical"], sidecar=material["sidecar"])
+        bound = record_quality_review_binding(run.get("research_v3_chapter_ledger"), canonical_body_sha256=material["canonical"]["body_sha256"], sidecar_sha256=material["sidecar"]["sidecar_sha256"])
+    except (ReviewLedgerError, ChapterLedgerError) as exc:
+        raise ExpertTeamStateConflict(getattr(exc, "code", "research_v3_review_invalid"), str(exc), run) from exc
+    review = aggregate["review"]
+    patch = {**_clear_execution_patch(), **_stage_reservation_status_patch(run, "generated_invalid"), "research_v3_review_ledger": completed["ledger"], "research_v3_chapter_ledger": bound["ledger"], "research_v3_active_review_unit": None, "research_v3_provenance_sidecar": material["sidecar"], "research_v3_mechanical_binding": material["mechanical_binding"], "research_v3_independent_review": review, "research_v3_chapter_quality": aggregate["chapter_quality"], "research_v3_structure_check": aggregate["structure"]}
+    try:
+        revision_patch = _research_v3_begin_quality_revision(
+            {**run, "research_v3_chapter_ledger": bound["ledger"]},
+            chapter_quality=aggregate["chapter_quality"],
+            review=review,
+        )
+    except ExpertTeamStateConflict as exc:
+        if exc.code != "quality_revision_limit":
+            raise
+        # Preserve the complete independent-review receipt while keeping the
+        # two-round automatic revision limit intact. User feedback can reopen
+        # only named chapters through the existing directed-revision path.
+        patch.update(
+            {
+                "research_v3_result_grade": "quality_review_required",
+                "last_execution_error": (
+                    "独立审核发现需要定向修改的问题，但自动质量修订已达两轮上限。"
+                    "请提交具体修改意见后仅修订受影响章节。"
+                ),
+                "last_execution_error_code": "quality_revision_limit",
+            }
+        )
+        return _transition(
+            workspace,
+            run,
+            "generated_invalid",
+            "research_v3_review_quality_revision_limit",
+            patch,
+        )
+    if revision_patch is not None:
+        patch.update(revision_patch)
+        return _transition(workspace, run, "ready_to_generate", "research_v3_review_requested_targeted_revision", patch)
+    blockers = ["evidence_contested_or_blocked" for claim in material["sidecar"].get("claims") or [] if claim.get("status") in {"contested", "blocked"} or any(ref.get("relationship") == "contradicts" for ref in claim.get("evidence_refs") or [])]
+    blockers.extend(
+        "review_blocked_finding"
+        for finding in review.get("findings") or []
+        if isinstance(finding, dict) and finding.get("verdict") == "blocked"
+    )
+    count = run.get("research_v3_body_count") or {}
+    grade = determine_research_result_grade(evidence_status=str(run.get("research_v3_evidence_status") or "unassessed"), factual_blockers=blockers, word_count_passed=count.get("formal_word_count_passed") is True, structure_quality_passed=aggregate["structure"]["passed"] and aggregate["reviewer_quality_passed"], human_or_model_review_passed=review.get("review_status") == "reviewer_assessed_passed")
+    patch["research_v3_result_grade"] = grade
+    if (
+        (run.get("research_writing_contract") or {}).get("execution_policy") != "bounded_report_v1"
+        and grade != "formal_research_report"
+    ):
+        return _transition(
+            workspace, run, "generated_invalid", "research_v3_review_completed", patch
+        )
+    # The independent chapter reviews are the v3 review stage.  Materialize a
+    # canonical reviewed-document artifact from their exact ledger result so
+    # the existing system delivery path can bind and render it.
+    from .stage_artifacts import build_stage_artifact
+    outline = _research_v3_verified_approved_artifact(
+        run, stage_id="outline", artifact_type="research_outline"
+    )
+    sections = (outline.get("payload") or {}).get("sections") or []
+    claims = (_research_v3_verified_approved_artifact(
+        run, stage_id="evidence", artifact_type="evidence_matrix"
+    ).get("payload") or {}).get("claims") or []
+    section_map = [
+        {"section_id": str(item.get("section_id") or ""), "heading": str(item.get("heading") or "")}
+        for item in sections if isinstance(item, dict)
+    ]
+    known_headings = {item["heading"] for item in section_map}
+    section_map.extend(
+        {
+            "section_id": f"required-{index}",
+            "heading": heading,
+        }
+        for index, heading in enumerate(required_sections_for_brief(run.get("document_brief") or {}), start=1)
+        if heading not in known_headings
+    )
+    first_section = section_map[0]["section_id"] if section_map else "body"
+    open_review_issues = [
+        {
+            "issue_id": str(item.get("finding_id") or f"review-{index}"),
+            "severity": "blocking" if item.get("verdict") == "blocked" else "warning",
+            "category": "evidence" if item.get("verdict") == "blocked" else "structure",
+            "section_id": item.get("chapter_id"),
+            "description": str(item.get("rationale") or "审阅意见待处理"),
+            "resolution": None,
+            "status": "open",
+        }
+        for index, item in enumerate(review.get("findings") or [], start=1)
+        if isinstance(item, dict) and item.get("verdict") != "supported"
+    ]
+    reviewed = build_stage_artifact(
+        {
+            "artifact_type": "reviewed_research_document",
+            "summary": (
+                "独立分章审核已完成，正文满足正式研究报告交付门槛。"
+                if grade == "formal_research_report"
+                else "独立分章审核已完成，已保存可查看和导出的工作草稿；未通过的门槛保留在审阅意见中。"
+            ),
+            "payload": {
+                "title": (run.get("document_brief") or {}).get("exact_title"),
+                "section_map": section_map,
+                "claim_usage": [
+                    {"claim_id": str(item.get("claim_id") or ""), "section_id": first_section, "citation_marker": "资料依据"}
+                    for item in claims if isinstance(item, dict) and str(item.get("claim_id") or "")
+                ],
+                "open_issues": deepcopy(open_review_issues),
+                "review_report": {
+                    "schema_version": "research-review-report/v1",
+                    "checks": {
+                        "brief_alignment": "passed",
+                        "citation_completeness": "passed" if review.get("review_status") == "reviewer_assessed_passed" else "failed",
+                        "unsupported_claims": "failed" if blockers else "passed",
+                        "unresolved_contradictions": "failed" if any(claim.get("status") == "contested" or any(ref.get("relationship") == "contradicts" for ref in claim.get("evidence_refs") or []) for claim in material["sidecar"].get("claims") or []) else "passed",
+                        "as_of_date_compliance": "not_applicable",
+                        "document_purity": "passed",
+                        "confidentiality": "not_applicable",
+                    },
+                    "issues": deepcopy(open_review_issues), "unsupported_claim_ids": [], "unresolved_contradiction_ids": [],
+                    "change_summary": ["已完成独立分章审核并汇总当前正文。"],
+                    "unresolved_issue_ids": [item["issue_id"] for item in open_review_issues],
+                },
+            },
+            "blocking_issues": [],
+            "deliverable_markdown": "# " + str((run.get("document_brief") or {}).get("exact_title") or "") + "\n\n" + str(material["canonical"]["body"]),
+        },
+        stage_id="review",
+        stage_attempt=int((run.get("current_stage_attempt_reservation") or {}).get("stage_attempt") or 1),
+        brief=run.get("document_brief") or {},
+        input_refs=deepcopy((run.get("current_stage_attempt_reservation") or {}).get("input_refs") or []),
+        now=_now(),
+    )
+    run.setdefault("stage_artifacts", []).append(deepcopy(reviewed))
+    run.setdefault("stage_outputs", []).append(
+        {
+            "task_id": "review",
+            "stage_id": "review",
+            "stage_attempt": reviewed["stage_attempt"],
+            "status": "generated",
+            "artifact": deepcopy(reviewed),
+            "delivery_id": delivery_id,
+            "delivery_content_sha256": hashlib.sha256(str(raw_content).encode("utf-8")).hexdigest(),
+        }
+    )
+    run.update(patch)
+    return _auto_approve_research_v2_stage(
+        workspace, run, reviewed, delivery_id=delivery_id,
+        delivery_content_sha256=hashlib.sha256(str(raw_content).encode("utf-8")).hexdigest(),
+    )
+
+
+def _research_v3_active_unit(run: dict) -> dict:
+    active = run.get("research_v3_active_unit")
+    if not isinstance(active, dict):
+        raise ExpertTeamStateConflict(
+            "research_v3_unit_missing",
+            "research v3 draft has no active chapter unit",
+            run,
+        )
+    return active
+
+
+_RESEARCH_V3_NETWORK_RETRY_CODES = frozenset(
+    {
+        "backend_unavailable",
+        "gateway_unavailable",
+        "provider_network_unavailable",
+        "provider_rate_limited",
+        "provider_service_unavailable",
+        "provider_timeout",
+    }
+)
+
+
+def _research_v3_network_retry_allowed(error_code: object) -> bool:
+    """Only known transient transport failures may return straight to ready."""
+    return str(error_code or "").strip().lower() in _RESEARCH_V3_NETWORK_RETRY_CODES
+
+
+def _research_v3_unit_replay(
+    run: dict,
+    *,
+    delivery_id: str,
+    stream_id: str,
+    content: str,
+) -> bool:
+    """Recognize a durable unit receipt before stale stream/state checks."""
+    from .research_v3_runtime import ResearchV3RuntimeError, parse_draft_unit_packet
+
+    ledger = run.get("research_v3_chapter_ledger")
+    if not isinstance(ledger, dict):
+        return False
+    has_matching_delivery = any(
+        isinstance(unit, dict)
+        and isinstance(unit.get("receipt"), dict)
+        and str(unit["receipt"].get("delivery_id") or "") == delivery_id
+        for unit in ledger.get("units") or []
+    )
+    if not has_matching_delivery:
+        return False
+    try:
+        packet = parse_draft_unit_packet(content)
+    except ResearchV3RuntimeError as exc:
+        raise ExpertTeamStateConflict(
+            "research_v3_unit_receipt_conflict",
+            "research v3 chapter receipt was replayed with an invalid packet",
+            run,
+        ) from exc
+    body_sha256 = hashlib.sha256(packet["body"].encode("utf-8")).hexdigest()
+    packet_sha256 = hashlib.sha256(
+        json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    for unit in ledger.get("units") or []:
+        if not isinstance(unit, dict) or not isinstance(unit.get("receipt"), dict):
+            continue
+        receipt = unit["receipt"]
+        if str(receipt.get("delivery_id") or "") != delivery_id:
+            continue
+        same = (
+            str(receipt.get("stream_id") or "") == stream_id
+            and str(receipt.get("delivery_content_sha256") or "") == body_sha256
+            and str(receipt.get("delivery_result_sha256") or "") == packet_sha256
+            and unit.get("result", {}).get("packet") == packet
+        )
+        if same:
+            return True
+        raise ExpertTeamStateConflict(
+            "research_v3_unit_receipt_conflict",
+            "research v3 chapter receipt was replayed with different content",
+            run,
+        )
+    return False
+
+
+def _research_v3_review_unit_replay(
+    run: dict,
+    *,
+    delivery_id: str,
+    stream_id: str,
+    stage_id: str,
+    execution_attempt: int,
+    content: str,
+) -> bool:
+    """Return a completed review receipt only when its persisted binding still matches."""
+    from .research_v3_runtime import ResearchV3RuntimeError, parse_independent_review_packet
+
+    ledger = run.get("research_v3_review_ledger")
+    if not isinstance(ledger, dict):
+        return False
+    units = ledger.get("units") if isinstance(ledger.get("units"), list) else []
+    matching = [
+        unit
+        for unit in units
+        if isinstance(unit, dict)
+        and isinstance(unit.get("receipt"), dict)
+        and str(unit["receipt"].get("delivery_id") or "") == delivery_id
+    ]
+    if not matching:
+        return False
+    try:
+        packet = parse_independent_review_packet(content)
+    except ResearchV3RuntimeError as exc:
+        raise ExpertTeamStateConflict(
+            "research_v3_review_receipt_conflict",
+            "research v3 review receipt was replayed with an invalid packet",
+            run,
+        ) from exc
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    packet_sha256 = hashlib.sha256(
+        json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    for unit in matching:
+        receipt = unit["receipt"]
+        same = (
+            unit.get("status") == "completed"
+            and unit.get("result") == packet
+            and str(receipt.get("stream_id") or "") == stream_id
+            and str(receipt.get("stage_id") or "") == stage_id
+            and receipt.get("execution_attempt") == execution_attempt
+            and str(receipt.get("content_sha256") or "") == content_sha256
+            and str(receipt.get("packet_sha256") or "") == packet_sha256
+            and str(receipt.get("execution_start_id") or "")
+            and packet.get("chapter_id") == unit.get("chapter_id")
+            and packet.get("canonical_body_sha256") == ledger.get("canonical_body_sha256")
+            and packet.get("sidecar_sha256") == ledger.get("sidecar_sha256")
+        )
+        if same:
+            return True
+    raise ExpertTeamStateConflict(
+        "research_v3_review_receipt_conflict",
+        "research v3 review receipt was replayed with different content or binding",
+        run,
+    )
+
+
+def _research_v3_release_active_unit(
+    run: dict,
+    *,
+    message: str,
+    stream_id: str | None,
+) -> dict:
+    """Close one identified v3 checkpoint call, preserving completed siblings and its parent."""
+    if _research_v3_draft_run(run):
+        from .research_v3_runtime import ResearchV3RuntimeError, mark_draft_unit_retryable
+
+        active = _research_v3_active_unit(run)
+        start_id = str(active.get("execution_start_id") or "")
+        try:
+            released = mark_draft_unit_retryable(
+                run.get("research_v3_chapter_ledger"),
+                unit_id=str(active.get("unit_id") or ""),
+                execution_start_id=start_id,
+                stream_id=stream_id,
+                reason=message,
+            )
+        except ResearchV3RuntimeError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        return {
+            "research_v3_chapter_ledger": released["ledger"],
+            "research_v3_active_unit": None,
+        }
+    if _research_v3_review_run(run):
+        from .research_review import ReviewLedgerError, mark_review_unit_retryable
+
+        active = run.get("research_v3_active_review_unit")
+        if not isinstance(active, dict):
+            raise ExpertTeamStateConflict(
+                "research_v3_review_unit_missing", "research v3 review has no active chapter unit", run
+            )
+        try:
+            released = mark_review_unit_retryable(
+                run.get("research_v3_review_ledger"),
+                unit_id=str(active.get("unit_id") or ""),
+                execution_start_id=str(active.get("execution_start_id") or ""),
+                stream_id=stream_id,
+                reason=message,
+            )
+        except ReviewLedgerError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        return {
+            "research_v3_review_ledger": released["ledger"],
+            "research_v3_active_review_unit": None,
+        }
+    return {}
+
+
+def _research_v3_active_unit_stream_id(run: dict) -> str | None:
+    """Read the persisted stream only for the active unit's exact start identity."""
+    active_key = (
+        "research_v3_active_unit"
+        if _research_v3_draft_run(run)
+        else "research_v3_active_review_unit"
+        if _research_v3_review_run(run)
+        else ""
+    )
+    ledger_key = (
+        "research_v3_chapter_ledger"
+        if active_key == "research_v3_active_unit"
+        else "research_v3_review_ledger"
+    )
+    active = run.get(active_key) if active_key else None
+    ledger = run.get(ledger_key)
+    if not isinstance(active, dict) or not isinstance(ledger, dict):
+        return None
+    for unit in ledger.get("units") or []:
+        execution = unit.get("execution") if isinstance(unit, dict) else None
+        if (
+            isinstance(execution, dict)
+            and unit.get("unit_id") == active.get("unit_id")
+            and execution.get("execution_start_id") == active.get("execution_start_id")
+        ):
+            return execution.get("stream_id")
+    return None
+
+
 def _supersede_current_stage_attempt_for_input(run: dict) -> dict:
     current = (
         deepcopy(run.get("current_stage_attempt_reservation"))
@@ -2187,10 +3394,63 @@ def _supersede_current_stage_attempt_for_input(run: dict) -> dict:
             current["status"] = "superseded_by_input"
             current["superseded_at"] = _now()
             reservations.append(current)
-    return {
+    patch = {
         "stage_attempt_reservations": reservations,
         "current_stage_attempt_reservation": None,
     }
+    # A new authoritative input changes the entire v3 request envelope.  It
+    # may arrive while review is active, but review cannot continue a draft
+    # whose evidence and canonical body were bound to the old input.
+    if is_research_v3_run(run):
+        refs = {
+            key: deepcopy(value)
+            for key, value in (run.get("approved_stage_artifact_refs") or {}).items()
+            if key != "draft"
+        }
+        outputs = []
+        for output in run.get("stage_outputs") or []:
+            if not isinstance(output, dict):
+                continue
+            row = deepcopy(output)
+            if str(row.get("stage_id") or row.get("task_id") or "") == "draft":
+                row["status"] = "superseded_by_input"
+                row["superseded_at"] = _now()
+            outputs.append(row)
+        draft_index = next(
+            (
+                index
+                for index, stage in enumerate(run.get("_tasks_template") or [])
+                if isinstance(stage, dict) and str(stage.get("id") or "") == "draft"
+            ),
+            int(run.get("current_stage_index") or 0),
+        )
+        patch.update(
+            {
+                "current_stage_index": draft_index,
+                "approved_stage_artifact_refs": refs,
+                "stage_outputs": outputs,
+                "current_stage_artifact_ref": None,
+                "research_v3_chapter_ledger": None,
+                "research_v3_active_unit": None,
+                "research_v3_canonical_document": None,
+                "research_v3_body_count": None,
+                "research_v3_result_grade_before_review": None,
+                "research_v3_result_grade": None,
+                "research_v3_review_ledger": None,
+                "research_v3_active_review_unit": None,
+                "research_v3_review_material": None,
+                "research_v3_provenance_sidecar": None,
+                "research_v3_mechanical_binding": None,
+                "research_v3_independent_review": None,
+                "research_v3_review_sha256": None,
+                "research_v3_chapter_quality": None,
+                "research_v3_structure_check": None,
+                "research_v3_review_revisions": None,
+                "research_v3_checkpoint_progress": None,
+                "research_v3_input_invalidated_at": _now(),
+            }
+        )
+    return patch
 
 
 def research_retrieval_fingerprint(run: dict) -> str:
@@ -3291,32 +4551,116 @@ def fail_system_stage_attempt(
         )
 
 
-def _stage_reservation_status_patch(run: dict, status: str) -> dict:
+def _stage_reservation_status_patch(
+    run: dict,
+    status: str,
+    *,
+    reservation_id: str | None = None,
+) -> dict:
     current = run.get("current_stage_attempt_reservation")
-    if not isinstance(current, dict) or not current.get("reservation_id"):
+    target_id = str(
+        reservation_id
+        or (current.get("reservation_id") if isinstance(current, dict) else "")
+        or ""
+    )
+    if not target_id:
         return {}
-    updated = deepcopy(current)
-    updated["status"] = str(status)
-    updated["updated_at"] = _now()
     reservations = [
         deepcopy(item) for item in run.get("stage_attempt_reservations") or [] if isinstance(item, dict)
     ]
-    matched = False
-    for index, item in enumerate(reservations):
-        if item.get("reservation_id") == updated["reservation_id"]:
-            reservations[index] = deepcopy(updated)
-            matched = True
-            break
-    if not matched:
+    target = next(
+        (item for item in reservations if item.get("reservation_id") == target_id),
+        None,
+    )
+    if target is None:
         raise ExpertTeamStateConflict(
             "stage_attempt_reservation_missing",
             "current stage attempt reservation is not in the durable ledger",
             run,
         )
-    return {
-        "stage_attempt_reservations": reservations,
-        "current_stage_attempt_reservation": updated,
-    }
+    updated = deepcopy(target)
+    updated["status"] = str(status)
+    updated["updated_at"] = _now()
+    for index, item in enumerate(reservations):
+        if item.get("reservation_id") == updated["reservation_id"]:
+            reservations[index] = deepcopy(updated)
+            break
+    patch = {"stage_attempt_reservations": reservations}
+    if isinstance(current, dict) and current.get("reservation_id") == target_id:
+        patch["current_stage_attempt_reservation"] = updated
+    return patch
+
+
+def _completed_quality_revision_review_reservation_id(run: dict) -> str | None:
+    """Identify one abandoned pre-revision review reservation, if proven safe."""
+    if (
+        str(run.get("workflow_state") or "") != "ready_to_generate"
+        or str((run.get("current_stage") or {}).get("task_id") or "") != "review"
+        or isinstance(run.get("research_v3_review_ledger"), dict)
+        or isinstance(run.get("research_v3_active_review_unit"), dict)
+        or str(run.get("execution_status") or "") != "idle"
+    ):
+        return None
+    if any(
+        str(run.get(field) or "").strip()
+        for field in (
+            "execution_start_id",
+            "execution_stream_id",
+            "execution_runtime_run_id",
+            "orphan_runtime_run_id",
+        )
+    ):
+        return None
+    revisions = run.get("research_v3_review_revisions")
+    ledger = run.get("research_v3_chapter_ledger")
+    canonical = run.get("research_v3_canonical_document")
+    approved = run.get("approved_stage_artifact_refs")
+    if not (
+        isinstance(revisions, dict)
+        and isinstance(ledger, dict)
+        and int(ledger.get("quality_revision_round") or 0) > 0
+        and isinstance(canonical, dict)
+        and isinstance(approved, dict)
+        and isinstance(approved.get("draft"), dict)
+    ):
+        return None
+    reviewed_body_sha256 = str(revisions.get("reviewed_canonical_body_sha256") or "")
+    current_body_sha256 = str(canonical.get("body_sha256") or "")
+    current_draft = approved["draft"]
+    current_draft_id = str(current_draft.get("artifact_id") or "")
+    current_draft_sha256 = str(current_draft.get("sha256") or "")
+    if (
+        not reviewed_body_sha256
+        or not current_body_sha256
+        or reviewed_body_sha256 == current_body_sha256
+        or not current_draft_id.startswith("research-v3-draft:")
+        or not current_draft_sha256
+    ):
+        return None
+    for reservation in reversed(run.get("stage_attempt_reservations") or []):
+        if not (
+            isinstance(reservation, dict)
+            and str(reservation.get("stage_id") or "") == "review"
+            and str(reservation.get("status") or "") == "generating"
+            and str(reservation.get("reservation_id") or "")
+        ):
+            continue
+        old_draft = next(
+            (
+                ref
+                for ref in reservation.get("input_refs") or []
+                if isinstance(ref, dict)
+                and str(ref.get("artifact_id") or "") == current_draft_id
+            ),
+            None,
+        )
+        if (
+            isinstance(old_draft, dict)
+            and str(old_draft.get("sha256") or "")
+            and str(old_draft.get("sha256") or "") != current_draft_sha256
+        ):
+            return str(reservation["reservation_id"])
+    return None
 
 
 def _execution_start_reservation_patch(runtime_adapter: str) -> dict:
@@ -3343,6 +4687,7 @@ def _execution_start_patch_for_run(
     run: dict,
     runtime_adapter: str,
     *,
+    workspace: Path,
     input_refs: list[dict] | None = None,
 ) -> dict:
     patch = _execution_start_reservation_patch(runtime_adapter)
@@ -3351,6 +4696,87 @@ def _execution_start_patch_for_run(
     stage = _authoritative_stage_for_mutation(run)
     staged = deepcopy(run)
     staged.update(patch)
+    if _research_v3_draft_run(run):
+        from .research_v3_runtime import (
+            ResearchV3RuntimeError,
+            ensure_draft_ledger,
+            reserve_next_draft_unit,
+        )
+
+        try:
+            existing_ledger = staged.get("research_v3_chapter_ledger")
+            if isinstance(existing_ledger, dict):
+                parent = existing_ledger.get("parent") if isinstance(existing_ledger.get("parent"), dict) else {}
+                reservation = staged.get("current_stage_attempt_reservation")
+                if (
+                    not isinstance(reservation, dict)
+                    or parent.get("reservation_id") != reservation.get("reservation_id")
+                    or parent.get("input_binding_sha256")
+                    != _stage_input_binding_sha256(staged, stage, deepcopy(input_refs or []))
+                ):
+                    raise ResearchV3RuntimeError("research_v3_parent_binding_mismatch")
+            else:
+                staged, _reservation, _created = _reserve_stage_attempt_in_run(
+                    staged,
+                    stage=stage,
+                    executor=str(stage.get("executor") or ""),
+                    input_refs=deepcopy(input_refs or []),
+                    idempotency_key=str(patch["execution_start_id"]),
+                )
+            parent = staged.get("current_stage_attempt_reservation")
+            ledger = ensure_draft_ledger(staged, parent)
+            transition = reserve_next_draft_unit(
+                ledger,
+                execution_start_id=str(patch["execution_start_id"]),
+            )
+        except ResearchV3RuntimeError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        unit = transition["unit"]
+        return {
+            **patch,
+            "stage_attempt_counters": staged["stage_attempt_counters"],
+            "stage_attempt_reservations": staged["stage_attempt_reservations"],
+            "current_stage_attempt_reservation": staged["current_stage_attempt_reservation"],
+            "research_v3_chapter_ledger": transition["ledger"],
+            "research_v3_active_unit": {
+                "unit_id": unit["unit_id"],
+                "chapter_id": unit["chapter_id"],
+                "unit_attempt": unit["unit_attempt"],
+                "unit_input_sha256": unit["unit_input_sha256"],
+                "execution_start_id": str(patch["execution_start_id"]),
+            },
+        }
+    if _research_v3_review_run(run):
+        from .research_review import (
+            ReviewLedgerError,
+            begin_review_unit,
+            create_review_ledger,
+        )
+
+        try:
+            existing = staged.get("research_v3_review_ledger")
+            if isinstance(existing, dict):
+                parent = existing.get("parent") if isinstance(existing.get("parent"), dict) else {}
+                reservation = staged.get("current_stage_attempt_reservation")
+                if not isinstance(reservation, dict) or parent.get("reservation_id") != reservation.get("reservation_id"):
+                    existing = None
+            if existing is None:
+                staged, _reservation, _created = _reserve_stage_attempt_in_run(
+                    staged, stage=stage, executor=str(stage.get("executor") or ""),
+                    input_refs=deepcopy(input_refs or []), idempotency_key=str(patch["execution_start_id"]),
+                )
+                material = _research_v3_review_material(workspace, staged)
+                parent = staged["current_stage_attempt_reservation"]
+                existing = create_review_ledger(
+                    {key: parent.get(key) for key in ("stage_id", "stage_attempt", "reservation_id", "input_binding_sha256")},
+                    material["canonical"], material["sidecar"],
+                )
+            transition = begin_review_unit(existing, execution_start_id=str(patch["execution_start_id"]))
+        except (ReviewLedgerError, ExpertTeamStateConflict) as exc:
+            code = getattr(exc, "code", "research_v3_review_invalid")
+            raise ExpertTeamStateConflict(code, str(exc), run) from exc
+        unit = transition["unit"]
+        return {**patch, "stage_attempt_counters": staged["stage_attempt_counters"], "stage_attempt_reservations": staged["stage_attempt_reservations"], "current_stage_attempt_reservation": staged["current_stage_attempt_reservation"], "research_v3_review_ledger": transition["ledger"], "research_v3_review_material": material if 'material' in locals() else run.get("research_v3_review_material"), "research_v3_active_review_unit": {"unit_id": unit["unit_id"], "chapter_id": unit["chapter_id"], "unit_attempt": unit["unit_attempt"], "unit_input_sha256": unit["unit_input_sha256"], "execution_start_id": str(patch["execution_start_id"])}}
     staged, _reservation, _created = _reserve_stage_attempt_in_run(
         staged,
         stage=stage,
@@ -3530,7 +4956,7 @@ def answer_and_reserve_expert_team_execution_start(
                 duplicate,
                 "starting",
                 "generation_start_reserved",
-                _execution_start_patch_for_run(duplicate, adapter_name),
+                _execution_start_patch_for_run(duplicate, adapter_name, workspace=workspace),
             )
             return reserved, True
         return duplicate, False
@@ -3553,7 +4979,7 @@ def answer_and_reserve_expert_team_execution_start(
         run,
         "starting",
         "generation_start_reserved",
-        _execution_start_patch_for_run(run, adapter_name),
+        _execution_start_patch_for_run(run, adapter_name, workspace=workspace),
     )
     return reserved, True
 
@@ -3585,7 +5011,7 @@ def reserve_expert_team_execution_start(
             run,
             "starting",
             "generation_start_reserved",
-            _execution_start_patch_for_run(run, runtime_adapter, input_refs=input_refs),
+            _execution_start_patch_for_run(run, runtime_adapter, workspace=workspace, input_refs=input_refs),
         )
 
 
@@ -3747,6 +5173,40 @@ def mark_expert_team_execution_started(workspace: Path, run_id: str, stream_resp
             "pending_user_message": str(response.get("pending_user_message") or ""),
             "last_execution_error": "",
         }
+        if _research_v3_draft_run(run):
+            from .research_v3_runtime import (
+                ResearchV3RuntimeError,
+                bind_draft_unit_stream,
+            )
+
+            active = _research_v3_active_unit(run)
+            if str(active.get("execution_start_id") or "") != expected_start_id:
+                raise ExpertTeamStateConflict(
+                    "research_v3_unit_start_mismatch",
+                    "research v3 chapter start identity changed",
+                    run,
+                )
+            try:
+                bound = bind_draft_unit_stream(
+                    run.get("research_v3_chapter_ledger"),
+                    unit_id=str(active.get("unit_id") or ""),
+                    execution_start_id=expected_start_id,
+                    stream_id=stream_id,
+                )
+            except ResearchV3RuntimeError as exc:
+                raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+            patch["research_v3_chapter_ledger"] = bound["ledger"]
+        if _research_v3_review_run(run):
+            from .research_review import ReviewLedgerError, bind_review_unit_stream
+
+            active = run.get("research_v3_active_review_unit")
+            if not isinstance(active, dict) or active.get("execution_start_id") != expected_start_id:
+                raise ExpertTeamStateConflict("research_v3_review_unit_missing", "research v3 review has no active chapter unit", run)
+            try:
+                bound = bind_review_unit_stream(run.get("research_v3_review_ledger"), unit_id=str(active.get("unit_id") or ""), execution_start_id=expected_start_id, stream_id=stream_id)
+            except ReviewLedgerError as exc:
+                raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+            patch["research_v3_review_ledger"] = bound["ledger"]
         return _transition(workspace, run, "generating", "generation_started", patch)
 
 
@@ -3782,6 +5242,11 @@ def mark_expert_team_execution_start_failed(
             )
         has_orphan = bool(str(orphan_runtime_run_id or "").strip())
         cleanup_deadline = time.time() + _CONTROL_RETRY_DEADLINE_SECONDS if has_orphan else 0
+        release_patch = _research_v3_release_active_unit(
+            run,
+            message=str(message or "当前阶段启动失败，请重新尝试。"),
+            stream_id=None,
+        )
         return _transition(
             workspace,
             run,
@@ -3790,6 +5255,7 @@ def mark_expert_team_execution_start_failed(
             {
                 **_clear_execution_patch(),
                 **_stage_reservation_status_patch(run, "failed"),
+                **release_patch,
                 "orphan_runtime_run_id": str(orphan_runtime_run_id or ""),
                 "orphan_runtime_adapter": str(orphan_runtime_adapter or ""),
                 "execution_cleanup_status": str(execution_cleanup_status or ""),
@@ -4403,6 +5869,7 @@ def _complete_enterprise_stage_artifact(
             input_refs=deepcopy(reservation.get("input_refs") or []),
             source_snapshot=source_snapshot,
             now=_now(),
+            research_v3=is_research_v3_run(run),
         )
     except (StageArtifactError, ValueError) as exc:
         output["status"] = "invalid"
@@ -4464,7 +5931,12 @@ def _complete_enterprise_stage_artifact(
         "message": validation_message,
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
-    if not blocking_count and _research_v2_run(run):
+    current_stage_id = str(stage.get("task_id") or stage.get("id") or task_id)
+    auto_approve_research_stage = _research_v2_run(run) or (
+        is_research_v3_run(run)
+        and current_stage_id in {"direction", "research", "evidence", "outline"}
+    )
+    if not blocking_count and auto_approve_research_stage:
         delivery_id = str(
             output.get("delivery_id")
             or output.get("id")
@@ -4540,6 +6012,13 @@ def _auto_approve_research_v2_stage(
             "sha256": artifact["sha256"],
         },
     }
+    if is_research_v3_run(run) and stage_id == "evidence":
+        claims = (artifact.get("payload") or {}).get("claims") or []
+        run["research_v3_evidence_status"] = (
+            "sufficient"
+            if claims and all(isinstance(item, dict) and item.get("status") not in {"contested", "blocked"} for item in claims)
+            else "insufficient_after_authorized_retrieval"
+        )
     final_review = artifact.get("artifact_type") == "reviewed_research_document"
     if final_review:
         brief = run.get("document_brief") or {}
@@ -4608,6 +6087,21 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
     delivered_content_sha256 = hashlib.sha256(
         str((delivery or {}).get("content") or "").encode("utf-8")
     ).hexdigest()
+    if is_research_v3_run(run):
+        unit_replay_args = {
+            "delivery_id": delivered_id,
+            "stream_id": delivered_stream_id,
+            "content": str((delivery or {}).get("content") or ""),
+        }
+        review_replay_args = {
+            **unit_replay_args,
+            "stage_id": delivered_stage_id,
+            "execution_attempt": delivered_attempt,
+        }
+        if _research_v3_unit_replay(run, **unit_replay_args) or _research_v3_review_unit_replay(
+            run, **review_replay_args
+        ):
+            return _sync_derived(run)
     if _research_v2_run(run):
         replay_approval = next(
             (
@@ -4655,6 +6149,226 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
             "stale_attempt" if delivered_attempt >= 0 else "missing_attempt",
             "expert team result does not belong to the active attempt",
             run,
+        )
+    if _research_v3_draft_run(run):
+        from .research_v3_runtime import (
+            ResearchV3RuntimeError,
+            complete_draft_unit,
+            mark_draft_unit_retryable,
+        )
+
+        active = _research_v3_active_unit(run)
+        if str(active.get("execution_start_id") or "") != str(run.get("execution_start_id") or ""):
+            raise ExpertTeamStateConflict(
+                "research_v3_unit_start_mismatch",
+                "research v3 chapter completion start identity changed",
+                run,
+            )
+        try:
+            completed = complete_draft_unit(
+                run.get("research_v3_chapter_ledger"),
+                unit_id=str(active.get("unit_id") or ""),
+                execution_start_id=str(run.get("execution_start_id") or ""),
+                stream_id=delivered_stream_id,
+                delivery_id=delivered_id,
+                content=str((delivery or {}).get("content") or ""),
+            )
+        except ResearchV3RuntimeError as exc:
+            # A chapter's visible claim excerpt is part of its immutable
+            # provenance contract.  Reject it while this exact draft unit is
+            # still active, instead of deferring the same failure until the
+            # later review reservation has no unit to repair.
+            if exc.code in {
+                "research_v3_unit_excerpt_not_in_body",
+                "research_v3_unit_usage_chapter_mismatch",
+            }:
+                try:
+                    retryable = mark_draft_unit_retryable(
+                        run.get("research_v3_chapter_ledger"),
+                        unit_id=str(active.get("unit_id") or ""),
+                        execution_start_id=str(run.get("execution_start_id") or ""),
+                        stream_id=delivered_stream_id,
+                        reason=(
+                            "本章节的 claim_usages 必须只标注当前章节，且 "
+                            "rendered_excerpt 必须逐字出现在正文中；请修正引用片段或删除未使用引用后重试。"
+                        ),
+                    )
+                except ResearchV3RuntimeError as retry_error:
+                    raise ExpertTeamStateConflict(retry_error.code, str(retry_error), run) from retry_error
+                return _transition(
+                    workspace,
+                    run,
+                    "generation_failed",
+                    "research_v3_unit_provenance_retryable",
+                    {
+                        **_clear_execution_patch(),
+                        **_stage_reservation_status_patch(run, "failed"),
+                        "research_v3_chapter_ledger": retryable["ledger"],
+                        "research_v3_active_unit": None,
+                        "last_execution_error": (
+                            "本章节的 claim_usages 必须只标注当前章节，且 "
+                            "rendered_excerpt 必须逐字出现在正文中；请修正引用片段或删除未使用引用后重试。"
+                        ),
+                        "last_execution_error_code": exc.code,
+                    },
+                )
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        unit = completed["unit"]
+        if all(
+            item.get("status") == "completed"
+            for item in completed["ledger"].get("units") or []
+        ):
+            from .research_v3_runtime import finalize_draft_checkpoint
+            from .stage_artifacts import artifact_digest
+
+            evidence_status = str(
+                run.get("research_v3_evidence_status")
+                or "unassessed"
+            )
+            try:
+                finalized = finalize_draft_checkpoint(
+                    completed["ledger"],
+                    writing_contract=run.get("research_writing_contract"),
+                    evidence_status=evidence_status,
+                )
+            except ResearchV3RuntimeError as exc:
+                raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+            body_count = finalized["body_count"]
+            contract = run.get("research_writing_contract") or {}
+            supplement_used = any(
+                isinstance(item, dict)
+                and item.get("revision_kind") == "length_supplement"
+                for item in completed["ledger"].get("quality_revision_history") or []
+            )
+            if (
+                contract.get("execution_policy") == "bounded_report_v1"
+                and body_count.get("formal_word_count_passed") is False
+                and body_count.get("actual_body_count", 0)
+                < (contract.get("word_budget") or {}).get("minimum", 0)
+                and evidence_status == "sufficient"
+                and not supplement_used
+            ):
+                plan_chapters = (completed["ledger"].get("plan") or {}).get("chapters") or []
+                targets = [
+                    str(item.get("chapter_id") or "")
+                    for item in plan_chapters
+                    if isinstance(item, dict)
+                    and item.get("kind") in {"analysis", "comparison", "recommendation"}
+                ]
+                if targets:
+                    shortage = max(
+                        0,
+                        int((contract.get("word_budget") or {}).get("minimum") or 0)
+                        - int(body_count.get("actual_body_count") or 0),
+                    )
+                    supplement_patch = _research_v3_begin_quality_revision(
+                        {**run, "research_v3_chapter_ledger": completed["ledger"]},
+                        chapter_ids=targets,
+                        feedback_by_chapter={
+                            chapter_id: [
+                                f"当前正文距最低篇幅约差 {shortage} 字；仅补充本章的问题分析、适用条件、实施步骤和风险边界，不得编造数字、政策或案例。"
+                            ]
+                            for chapter_id in targets
+                        },
+                        revision_kind="length_supplement",
+                    )
+                    if supplement_patch is not None:
+                        supplement_patch["current_stage_index"] = int(
+                            run.get("current_stage_index") or 0
+                        )
+                        return _transition(
+                            workspace,
+                            run,
+                            "ready_to_generate",
+                            "research_v3_length_supplement_requested",
+                            supplement_patch,
+                        )
+            parent = completed["ledger"]["parent"]
+            artifact = {
+                "artifact_id": f"research-v3-draft:{parent['stage_attempt']}",
+                "stage_id": "draft",
+                "artifact_type": "research_document_draft",
+                "stage_attempt": parent["stage_attempt"],
+                "input_refs": deepcopy(
+                    run.get("current_stage_attempt_reservation", {}).get("input_refs")
+                    or []
+                ),
+                "payload": {
+                    "schema_version": "research-v3/draft-canonical/v1",
+                    "canonical_body_sha256": finalized["canonical"]["body_sha256"],
+                    "canonical_sha256": finalized["canonical_sha256"],
+                    "result_grade_before_review": finalized["result_grade_before_review"],
+                    "body_count": deepcopy(finalized["body_count"]),
+                },
+                "deliverable_markdown": finalized["canonical"]["body"],
+                "blocking_issues": [],
+                "validation_status": "valid",
+            }
+            artifact["sha256"] = artifact_digest(artifact)
+            run.setdefault("stage_artifacts", []).append(artifact)
+            run.setdefault("stage_outputs", []).append(
+                {
+                    "task_id": "draft",
+                    "stage_id": "draft",
+                    "stage_attempt": parent["stage_attempt"],
+                    "status": "generated",
+                    "artifact": deepcopy(artifact),
+                    "delivery_id": delivered_id,
+                    "delivery_content_sha256": delivered_content_sha256,
+                }
+            )
+            run["research_v3_chapter_ledger"] = completed["ledger"]
+            run["research_v3_active_unit"] = None
+            run["research_v3_canonical_document"] = finalized["canonical"]
+            run["research_v3_body_count"] = finalized["body_count"]
+            run["research_v3_result_grade_before_review"] = finalized[
+                "result_grade_before_review"
+            ]
+            run["research_v3_checkpoint_progress"] = {
+                "completed_units": sum(
+                    item.get("status") == "completed"
+                    for item in completed["ledger"].get("units") or []
+                ),
+                "total_units": len(completed["ledger"].get("units") or []),
+                "last_unit_id": unit["unit_id"],
+                "last_chapter_id": unit["chapter_id"],
+            }
+            return _auto_approve_research_v2_stage(
+                workspace,
+                run,
+                artifact,
+                delivery_id=delivered_id,
+                delivery_content_sha256=delivered_content_sha256,
+            )
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate",
+            "research_v3_draft_unit_completed",
+            {
+                **_clear_execution_patch(),
+                **_stage_reservation_status_patch(run, "checkpointed"),
+                "research_v3_chapter_ledger": completed["ledger"],
+                "research_v3_active_unit": None,
+                "research_v3_checkpoint_progress": {
+                    "completed_units": sum(
+                        item.get("status") == "completed"
+                        for item in completed["ledger"].get("units") or []
+                    ),
+                    "total_units": len(completed["ledger"].get("units") or []),
+                    "last_unit_id": unit["unit_id"],
+                    "last_chapter_id": unit["chapter_id"],
+                },
+            },
+        )
+    if _research_v3_review_run(run):
+        return _complete_research_v3_review_unit(
+            workspace,
+            run,
+            delivery_id=delivered_id,
+            stage_id=delivered_stage_id,
+            execution_attempt=delivered_attempt,
+            raw_content=str((delivery or {}).get("content") or ""),
         )
     business_context = business_context_for_run(run)
     output = structured_output_from_delivery(delivery or {}, business_context)
@@ -6279,6 +7993,41 @@ def request_standalone_expert_team_delivery_revision(workspace: Path, body: dict
     feedback = str(body.get("feedback") or "").strip()
     if not feedback:
         raise ValueError("standalone delivery revision feedback is required")
+    if draft := _quality_revision_limit_feedback_context(run, body):
+        # This is a user-directed correction after the automatic quality cap,
+        # not a third automatic review revision and not a delivery rewrite.
+        revision_patch = _research_v3_delivery_feedback_revision_patch(
+            run,
+            feedback=feedback,
+            delivery_target_index=int(run.get("current_stage_index") or 0),
+        )
+        entry = {
+            "stage_id": "review",
+            "feedback": feedback,
+            "at": _now(),
+            "quality_revision_limit": True,
+            "artifact_id": str(draft.get("artifact_id") or ""),
+            "artifact_sha256": str(draft.get("sha256") or ""),
+        }
+        _record_action(run, body, "revise_delivery")
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate",
+            "research_v3_quality_limit_feedback_revision_requested",
+            {
+                **_clear_execution_patch(),
+                "revision_feedback": [
+                    *deepcopy(run.get("revision_feedback") or []),
+                    deepcopy(entry),
+                ],
+                "delivery_revision_feedback": [
+                    *deepcopy(run.get("delivery_revision_feedback") or []),
+                    deepcopy(entry),
+                ],
+                **revision_patch,
+            },
+        )
     semantic_return = (
         str(run.get("workflow_state") or "") == "generated_invalid"
         and str(run.get("last_execution_error_code") or "") == "delivery_semantic_blocked"
@@ -6403,6 +8152,47 @@ def request_standalone_expert_team_delivery_revision(workspace: Path, body: dict
     )
     approved.pop(target_stage_id, None)
     _record_action(run, body, "revise_delivery")
+    if is_research_v3_run(run):
+        revision_patch = _research_v3_delivery_feedback_revision_patch(
+            run,
+            feedback=feedback,
+            delivery_target_index=target_index,
+        )
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate",
+            "research_v3_delivery_feedback_revision_requested",
+            {
+                **_clear_execution_patch(),
+                "current_stage_index": target_index,
+                "stage_outputs": outputs,
+                "revision_feedback": revision_feedback,
+                "delivery_revision_feedback": delivery_feedback,
+                "approved_stage_artifact_refs": approved,
+                "canonical_document_ref": None,
+                "current_stage_artifact_ref": None,
+                "current_stage_attempt_reservation": None,
+                "current_delivery_manifest_ref": None,
+                "current_delivery_attempt_reservation": None,
+                "delivery_attempt_reservations": invalidated_reservations,
+                "delivery_gate": {
+                    "schema_version": "standalone-delivery-gate/v1",
+                    "status": "invalidated",
+                    "invalidated_at": at,
+                    "delivery_attempt": int(context.get("delivery_attempt") or 0),
+                    "delivery_binding_sha256": str(context.get("delivery_binding_sha256") or ""),
+                    "document_sha256": str(context.get("document_sha256") or ""),
+                },
+                "local_delivery_confirmation": None,
+                "pending_system_stage": None,
+                "pending_system_stage_result": "invalidated",
+                "research_v3_delivery_feedback_consumptions": _research_v3_delivery_feedback_consumption_patch(
+                    run, entry, revision_patch
+                ),
+                **revision_patch,
+            },
+        )
     return _transition(
         workspace,
         run,
@@ -7055,6 +8845,27 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     ) != "confirmed":
         raise ExpertTeamStateConflict("brief_not_confirmed", "document brief must be confirmed before generation", run)
     state = str(run.get("workflow_state") or "")
+    delivery_feedback = [
+        item
+        for item in run.get("delivery_revision_feedback") or []
+        if isinstance(item, dict)
+        and str(item.get("stage_id") or "") == "review"
+        and str(item.get("artifact_id") or "").startswith("delivery:")
+        and str(item.get("feedback") or "").strip()
+    ]
+    if state == "cancelled" and delivery_feedback:
+        restore_patch = _research_v3_duplicate_delivery_feedback_restore_patch(
+            run, delivery_feedback[-1]
+        )
+        if restore_patch is not None:
+            _record_action(run, body, "resume")
+            return _transition(
+                workspace,
+                run,
+                "ready_to_generate",
+                "research_v3_duplicate_delivery_feedback_restored",
+                restore_patch,
+            )
     if state in TERMINAL_STATES:
         raise ExpertTeamStateConflict("terminal_state", "terminal expert team runs cannot resume", run)
     if str(run.get("orphan_runtime_run_id") or "").strip() and str(
@@ -7072,9 +8883,151 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
         "result_unverified",
         "generated_invalid",
         "delivery_validation_required",
-    }:
+    } and not (
+        state == "awaiting_review"
+        and is_research_v3_run(run)
+        and str((run.get("current_stage") or {}).get("task_id") or "")
+        in {"direction", "research", "evidence", "outline"}
+    ):
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
+    reconciliation_patch = {}
+    if (
+        state == "ready_to_generate"
+        and _research_v3_review_run(run)
+        and str((run.get("delivery_gate") or {}).get("status") or "") == "invalidated"
+    ):
+        if delivery_feedback:
+            entry = delivery_feedback[-1]
+            if not _research_v3_delivery_feedback_consumed(run, entry):
+                revision_patch = _research_v3_delivery_feedback_revision_patch(
+                    run,
+                    feedback=str(entry["feedback"]),
+                    delivery_target_index=int(run.get("current_stage_index") or 0),
+                )
+                _record_action(run, body, "resume")
+                return _transition(
+                    workspace,
+                    run,
+                    "ready_to_generate",
+                    "research_v3_delivery_feedback_revision_recovered",
+                    {
+                        **revision_patch,
+                        "research_v3_delivery_feedback_consumptions": _research_v3_delivery_feedback_consumption_patch(
+                            run, entry, revision_patch
+                        ),
+                    },
+                )
+    if (
+        state in {"start_failed", "generation_failed", "result_unverified"}
+        and not str(run.get("orphan_runtime_run_id") or "").strip()
+        and (
+            (
+                _research_v3_draft_run(run)
+                and bool((run.get("research_v3_active_unit") or {}).get("unit_id"))
+            )
+            or (
+                _research_v3_review_run(run)
+                and bool((run.get("research_v3_active_review_unit") or {}).get("unit_id"))
+            )
+        )
+    ):
+        reconciliation_patch = _research_v3_release_active_unit(
+            run,
+            message=str(run.get("last_execution_error") or "先前执行已结束，请重新尝试。"),
+            stream_id=_research_v3_active_unit_stream_id(run),
+        )
+    if (
+        state == "ready_to_generate"
+        and _research_v3_review_run(run)
+        and not isinstance(run.get("research_v3_review_ledger"), dict)
+    ):
+        from .research_v3_runtime import (
+            ResearchV3RuntimeError,
+            invalid_draft_unit_claim_usage,
+        )
+
+        try:
+            invalid_usage = invalid_draft_unit_claim_usage(
+                run.get("research_v3_chapter_ledger")
+            )
+        except ResearchV3RuntimeError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        if isinstance(invalid_usage, dict):
+            chapter_id = str(invalid_usage.get("chapter_id") or "")
+            revision_patch = _research_v3_begin_quality_revision(
+                run,
+                chapter_ids=[chapter_id],
+                unit_ids=[str(invalid_usage.get("unit_id") or "")],
+                feedback_by_chapter={
+                    chapter_id: [
+                        "本章有 claim_usages 未能在本章节正文中逐字定位；"
+                        "请保留事实边界，修正可见引用片段或删除未使用引用后重试。"
+                    ]
+                },
+            )
+            if revision_patch is not None:
+                _record_action(run, body, "resume")
+                return _transition(
+                    workspace,
+                    run,
+                    "ready_to_generate",
+                    "research_v3_draft_provenance_revision_requested",
+                    revision_patch,
+                )
+    stale_reservation_patch = {}
+    if reservation_id := _completed_quality_revision_review_reservation_id(run):
+        stale_reservation_patch = _stage_reservation_status_patch(
+            run,
+            "failed",
+            reservation_id=reservation_id,
+        )
+    if (
+        state == "generated_invalid"
+        and is_research_v3_run(run)
+        and str(run.get("research_v3_result_grade") or "") == "quality_review_required"
+    ):
+        revision_patch = _research_v3_begin_quality_revision(run)
+        if revision_patch is not None:
+            _record_action(run, body, "resume")
+            return _transition(
+                workspace,
+                run,
+                "ready_to_generate",
+                "research_v3_review_requested_targeted_revision",
+                revision_patch,
+            )
     _record_action(run, body, "resume")
+    if state == "awaiting_review":
+        artifact = _standalone_bound_stage_artifact(run, body)
+        outputs = [
+            item
+            for item in run.get("stage_outputs") or []
+            if isinstance(item, dict)
+            and str(item.get("task_id") or item.get("stage_id") or "")
+            == str(artifact.get("stage_id") or "")
+            and int(item.get("stage_attempt") or 0) == int(artifact.get("stage_attempt") or 0)
+            and isinstance(item.get("artifact"), dict)
+            and str(item["artifact"].get("artifact_id") or "")
+            == str(artifact.get("artifact_id") or "")
+            and str(item["artifact"].get("sha256") or "") == str(artifact.get("sha256") or "")
+        ]
+        if len(outputs) != 1:
+            raise ExpertTeamStateConflict(
+                "stage_output_identity_mismatch",
+                "current stage output is missing or ambiguous",
+                run,
+            )
+        output = outputs[0]
+        return _auto_approve_research_v2_stage(
+            workspace,
+            run,
+            artifact,
+            delivery_id=str(output.get("delivery_id") or output.get("id") or "expert-team-chat-delivery"),
+            delivery_content_sha256=str(
+                output.get("delivery_content_sha256")
+                or hashlib.sha256(str(output.get("content") or "").encode("utf-8")).hexdigest()
+            ),
+        )
     if recovery_patch := _warning_only_review_recovery_patch(run):
         return _transition(
             workspace,
@@ -7114,19 +9067,20 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
             _clear_execution_patch(),
         )
     current_reservation = run.get("current_stage_attempt_reservation")
-    stale_reservation_patch = {}
     if (
         isinstance(current_reservation, dict)
         and str(current_reservation.get("status") or "")
         in {"reserved", "dispatching", "generating"}
     ):
-        stale_reservation_patch = _stage_reservation_status_patch(run, "failed")
+        staged_run = deepcopy(run)
+        staged_run.update(stale_reservation_patch)
+        stale_reservation_patch = _stage_reservation_status_patch(staged_run, "failed")
     return _transition(
         workspace,
         run,
         "ready_to_generate",
         "generation_resumed",
-        {**_clear_execution_patch(), **stale_reservation_patch},
+        {**_clear_execution_patch(), **stale_reservation_patch, **reconciliation_patch},
     )
 
 
@@ -7147,6 +9101,70 @@ def fail_expert_team_execution(
     expected_stream_id = str(run.get("execution_stream_id") or "")
     if not stream_id or str(stream_id) != expected_stream_id:
         raise ExpertTeamStateConflict("stale_stream", "expert team execution stream changed", run)
+    if _research_v3_draft_run(run):
+        from .research_v3_runtime import (
+            ResearchV3RuntimeError,
+            mark_draft_unit_retryable,
+        )
+
+        active = _research_v3_active_unit(run)
+        try:
+            retryable = mark_draft_unit_retryable(
+                run.get("research_v3_chapter_ledger"),
+                unit_id=str(active.get("unit_id") or ""),
+                execution_start_id=str(run.get("execution_start_id") or ""),
+                reason=str(message or "未检测到生成结果，请重新尝试。"),
+                stream_id=expected_stream_id,
+            )
+        except ResearchV3RuntimeError as exc:
+            raise ExpertTeamStateConflict(exc.code, str(exc), run) from exc
+        retryable_network_failure = _research_v3_network_retry_allowed(error_code)
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate" if retryable_network_failure else "generation_failed",
+            "research_v3_unit_retryable"
+            if retryable_network_failure
+            else "research_v3_unit_failure_blocked",
+            {
+                **_clear_execution_patch(),
+                **_stage_reservation_status_patch(
+                    run,
+                    "checkpointed" if retryable_network_failure else "failed",
+                ),
+                "research_v3_chapter_ledger": retryable["ledger"],
+                "research_v3_active_unit": None,
+                "last_execution_error": str(message or "未检测到生成结果，请重新尝试。"),
+                "last_execution_error_code": str(error_code or ""),
+                "last_execution_incident_id": str(incident_id or ""),
+            },
+        )
+    if _research_v3_review_run(run):
+        release_patch = _research_v3_release_active_unit(
+            run,
+            message=str(message or "未检测到生成结果，请重新尝试。"),
+            stream_id=expected_stream_id,
+        )
+        retryable_network_failure = _research_v3_network_retry_allowed(error_code)
+        return _transition(
+            workspace,
+            run,
+            "ready_to_generate" if retryable_network_failure else "generation_failed",
+            "research_v3_review_unit_retryable"
+            if retryable_network_failure
+            else "research_v3_review_unit_failure_blocked",
+            {
+                **_clear_execution_patch(),
+                **_stage_reservation_status_patch(
+                    run,
+                    "checkpointed" if retryable_network_failure else "failed",
+                ),
+                **release_patch,
+                "last_execution_error": str(message or "未检测到生成结果，请重新尝试。"),
+                "last_execution_error_code": str(error_code or ""),
+                "last_execution_incident_id": str(incident_id or ""),
+            },
+        )
     return _transition(
         workspace,
         run,

@@ -52,6 +52,10 @@ _IMMUTABLE_FIELDS = (
     "launch_profile_sha256",
     "prompt_sha256",
     "session_options",
+    "source_session_id",
+    "source_attachments",
+    "writing_style",
+    "depth",
     "session_id",
     "workspace",
     "initial_session_snapshot",
@@ -156,6 +160,11 @@ def _validate_receipt(receipt: object) -> dict:
         )
     if type(value.get("session_options")) is not dict:
         raise LaunchTransactionIntegrityError("launch receipt Session options are invalid")
+    if not isinstance(value.get("source_session_id", ""), str) or not isinstance(value.get("source_attachments", []), list):
+        raise LaunchTransactionIntegrityError("launch receipt source attachments are invalid")
+    for field in ("writing_style", "depth"):
+        if field in value and not isinstance(value[field], str):
+            raise LaunchTransactionIntegrityError("launch receipt research specification is invalid")
     initial_session_snapshot = value.get("initial_session_snapshot")
     initial_session_sha256 = str(value.get("initial_session_sha256") or "")
     if (
@@ -923,9 +932,13 @@ def new_reserved_receipt(
     session_id: str,
     workspace: str,
     initial_session_snapshot: dict,
+    source_session_id: str = "",
+    source_attachments: list[dict] | None = None,
+    writing_style: str | None = None,
+    depth: str | None = None,
 ) -> dict:
     now = time.time()
-    return {
+    receipt = {
         "schema_version": LAUNCH_TRANSACTION_SCHEMA_VERSION,
         "transaction_id": transaction_id,
         "state": "reserved",
@@ -938,6 +951,8 @@ def new_reserved_receipt(
         ),
         "prompt_sha256": hashlib.sha256(str(prompt).encode("utf-8")).hexdigest(),
         "session_options": copy.deepcopy(session_options),
+        "source_session_id": str(source_session_id or ""),
+        "source_attachments": copy.deepcopy(source_attachments or []),
         "session_id": session_id,
         "workspace": workspace,
         "initial_session_snapshot": copy.deepcopy(initial_session_snapshot),
@@ -949,3 +964,8 @@ def new_reserved_receipt(
         "created_at": now,
         "updated_at": now,
     }
+    if writing_style is not None:
+        receipt["writing_style"] = str(writing_style)
+    if depth is not None:
+        receipt["depth"] = str(depth)
+    return receipt

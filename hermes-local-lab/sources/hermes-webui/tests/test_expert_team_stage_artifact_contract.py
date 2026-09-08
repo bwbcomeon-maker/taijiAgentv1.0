@@ -423,6 +423,120 @@ def test_source_register_and_evidence_matrix_are_enriched_from_snapshot():
     assert evidence["segment_sha256"] == _snapshot()["sources"][0]["segments"][0]["text_sha256"]
 
 
+def test_research_v3_source_register_uses_one_confirmed_user_background_source():
+    from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
+
+    brief = _research_brief()
+    brief["original_request"] = "E01-P01：用户提供的冻结材料。\nE02-P01：第二项材料。"
+    snapshot = {"schema_version": "expert-source-context/v1", "snapshot_id": "source-context:1", "sha256": "c" * 64, "sources": []}
+    refs = [{"ref_type": "source_context", "snapshot_id": "source-context:1", "sha256": "c" * 64}]
+    register = {
+        "source_assessments": [{"source_id": "brief-confirmed", "evidence_grade": "B", "applicability": "E01-P01 与 E02-P01 是可读定位。", "status": "included", "exclusion_reason": None}],
+        "search_gaps": [{"gap_id": "GAP-1", "question": "是否需要补充材料", "required": False, "blocks_final": False, "reason": "E01-P01 已覆盖当前判断。", "resolution_status": "covered_by_provided_sources", "source_ids": ["brief-confirmed"]}],
+    }
+    parsed = parse_stage_response(_raw("source_register", register), artifact_type="source_register", requires_document=False)
+    artifact = build_stage_artifact(parsed, stage_id="research", stage_attempt=1, brief=brief, input_refs=refs, source_snapshot=snapshot, now="2026-07-15T10:00:00+08:00", research_v3=True)
+
+    assert artifact["payload"]["sources"][0]["source_id"] == "brief-confirmed"
+    assert artifact["payload"]["source_assessments"][0]["source_id"] == "brief-confirmed"
+    assert "E01-P01" in artifact["payload"]["source_assessments"][0]["applicability"]
+
+    from api.expert_teams.prompts import approved_inputs_for_stage
+    run = {
+        "team_id": "deep-research-team",
+        "product_mode": "standalone",
+        "launch_profile_id": "research-report",
+        "launch_profile_snapshot": {"id": "research-report", "research_contract_version": "research-report/v3"},
+        "review_policy": {"kind": "local_confirmation"},
+        "stage_outputs": [{"task_id": "research", "status": "approved", "approval_kind": "automatic_contract_validation", "artifact": artifact}],
+        "approved_stage_artifact_refs": {"research": {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]}},
+        "automatic_stage_approvals": [{"schema_version": "automatic-stage-approval/v1", "stage_id": "research", "stage_attempt": 1, "artifact_id": artifact["artifact_id"], "artifact_sha256": artifact["sha256"]}],
+    }
+    assert approved_inputs_for_stage(run, "evidence")[0]["payload"]["sources"][0]["source_id"] == "brief-confirmed"
+
+    register["source_assessments"][0]["source_id"] = "E01"
+    parsed = parse_stage_response(_raw("source_register", register), artifact_type="source_register", requires_document=False)
+    with pytest.raises(StageArtifactError, match="unknown_source_id"):
+        build_stage_artifact(parsed, stage_id="research", stage_attempt=1, brief=brief, input_refs=refs, source_snapshot=snapshot, now="2026-07-15T10:00:00+08:00", research_v3=True)
+
+
+def test_research_v3_attachment_evidence_is_canonicalized_without_v2_time_basis():
+    from api.expert_teams.stage_artifacts import build_stage_artifact, parse_stage_response
+
+    source_id = "ATT-82966b60b0a236858c5002ab"
+    source_text = "附件中的业务记录支持这一事实。"
+    source_snapshot = {
+        "schema_version": "expert-source-context/v1",
+        "snapshot_id": "source-context:attachment",
+        "snapshot_sha256": "c" * 64,
+        "sources": [
+            {
+                "source_id": source_id,
+                "kind": "attachment",
+                "label": "调研参考资料.txt",
+                "locator": "source:attachment",
+                "content_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+                "content_text": source_text,
+                "segments": [
+                    {
+                        "segment_id": f"{source_id}:S0001",
+                        "locator": "chars:0-13",
+                        "char_start": 0,
+                        "char_end": len(source_text),
+                        "text": source_text,
+                        "text_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+                    }
+                ],
+            }
+        ],
+    }
+    brief = _research_brief()
+    brief["source_policy"] = {"mode": "automatic_fallback", "as_of_date": "2026-09-07", "citation_style": "source_id"}
+    parsed = parse_stage_response(
+        _raw(
+            "evidence_matrix",
+            {
+                "claims": [
+                    {
+                        "claim_id": "C01",
+                        "statement": "附件中已记录该项业务事实。",
+                        "claim_type": "fact",
+                        "evidence": [{"source_id": source_id, "segment_id": f"{source_id}:S0001", "relationship": "supports"}],
+                        "status": "verified",
+                        "confidence": "high",
+                        "notes": "仅按附件记录表述。",
+                        "origin_tier": "user_background",
+                    }
+                ],
+                "contradictions": [],
+                "gaps": [],
+            },
+        ),
+        artifact_type="evidence_matrix",
+        requires_document=False,
+    )
+    artifact = build_stage_artifact(
+        parsed,
+        stage_id="evidence",
+        stage_attempt=1,
+        brief=brief,
+        input_refs=[{"ref_type": "source_context", "snapshot_id": source_snapshot["snapshot_id"], "sha256": source_snapshot["snapshot_sha256"]}],
+        source_snapshot=source_snapshot,
+        now="2026-09-07T19:30:00+08:00",
+        research_v3=True,
+    )
+
+    evidence = artifact["payload"]["claims"][0]["evidence"][0]
+    assert evidence == {
+        "source_id": source_id,
+        "segment_id": f"{source_id}:S0001",
+        "segment_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+        "locator": "chars:0-13",
+        "relationship": "supports",
+    }
+    assert "model_knowledge_time_basis" not in artifact["payload"]
+
+
 def test_review_report_requires_exact_check_keys_and_open_issue_ids():
     from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
 

@@ -1,6 +1,25 @@
 from copy import deepcopy
 
 
+def _frozen_v2_profile():
+    """Historical profile fixture; do not derive it from the public v3 profile."""
+    return {
+        "id": "research-report", "research_contract_version": "research-report/v2",
+        "research_query_egress_policy": {"policy_id": "research-public-query/v1", "version": 1, "authorization_basis": "user_initiated_standalone_research", "trust_zone": "public_web", "projection_version": "research-public-topic/v1"},
+        "capability_id": "research-report", "team_id": "deep-research-team", "document_type": "research_report", "intake_example_id": "research_report", "task_mode": "create", "render_template_id": "standalone-research-report",
+        "stages": [
+            {"id": "direction", "title": "确定研究方向", "phase": "研究方向", "worker_id": "director", "worker_name": "研究总导演", "executor": "model", "artifact_type": "research_charter", "depends_on": []},
+            {"id": "research", "title": "补充案例素材", "phase": "资料调研", "worker_id": "researcher", "worker_name": "资料研究员", "executor": "model", "artifact_type": "source_register", "depends_on": ["direction"]},
+            {"id": "evidence", "title": "事实核验", "phase": "事实核验", "worker_id": "evidence", "worker_name": "事实核验专家", "executor": "model", "artifact_type": "evidence_matrix", "depends_on": ["research"]},
+            {"id": "outline", "title": "结构提纲", "phase": "结构提纲", "worker_id": "architect", "worker_name": "结构架构师", "executor": "model", "artifact_type": "research_outline", "depends_on": ["evidence"]},
+            {"id": "draft", "title": "研究富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "材料起草专家", "executor": "model", "artifact_type": "research_document_draft", "depends_on": ["outline", "evidence"]},
+            {"id": "review", "title": "复核交付", "phase": "复核交付", "worker_id": "reviewer", "worker_name": "复核专家", "executor": "model", "artifact_type": "reviewed_research_document", "depends_on": ["evidence", "outline", "draft"]},
+        ],
+        "post_approval_system_steps": [{"id": "delivery", "executor": "system", "artifact_type": "delivery_manifest", "depends_on": ["review"], "trigger": "canonical_approved", "visible_progress": False}],
+        "review_policy": {"kind": "local_confirmation"},
+    }
+
+
 def _start_payload(**overrides):
     payload = {
         "session_id": "research-v2-session",
@@ -12,11 +31,12 @@ def _start_payload(**overrides):
     return payload
 
 
-def test_research_v2_profile_keeps_public_id_and_catalog_has_no_fixed_questions():
+def test_research_v2_fixture_keeps_public_id_and_public_v3_catalog_questions():
     from api.expert_teams.catalog import expert_team_catalog
     from api.expert_teams.launch_profiles import get_launch_profile
 
-    profile = get_launch_profile("research-report")
+    profile = _frozen_v2_profile()
+    public_profile = get_launch_profile("research-report")
     research_team = next(
         team
         for team in expert_team_catalog()["teams"]
@@ -25,7 +45,12 @@ def test_research_v2_profile_keeps_public_id_and_catalog_has_no_fixed_questions(
 
     assert profile["id"] == "research-report"
     assert profile["research_contract_version"] == "research-report/v2"
-    assert research_team["questions"] == []
+    assert public_profile["research_contract_version"] == "research-report/v3"
+    # The frozen v2 run fixture is separate from the current public v3 catalog.
+    assert [question["id"] for question in research_team["questions"]] == [
+        "research_topic", "audience_goal", "source_boundary",
+    ]
+    assert all(question["required"] for question in research_team["questions"])
     assert research_team["examples"][0]["launch_profile_id"] == "research-report"
 
 
@@ -37,6 +62,7 @@ def test_new_research_v2_run_builds_internal_brief_and_is_ready_immediately(monk
     run = expert_teams.build_standalone_expert_team_run(
         _start_payload(),
         run_id="et-research-v2",
+        launch_profile_snapshot=_frozen_v2_profile(),
     )
 
     assert run["launch_profile_id"] == "research-report"
@@ -72,7 +98,7 @@ def test_legacy_research_snapshot_without_v2_marker_keeps_old_intake_and_source_
     from api import expert_teams
     from api.expert_teams.launch_profiles import get_launch_profile
 
-    legacy_snapshot = deepcopy(get_launch_profile("research-report"))
+    legacy_snapshot = _frozen_v2_profile()
     legacy_snapshot.pop("research_contract_version")
     run = expert_teams.build_standalone_expert_team_run(
         _start_payload(
@@ -112,6 +138,7 @@ def test_automatic_fallback_zero_source_is_valid_only_for_v2_standalone_research
             idempotency_key="research-contract-launch",
         ),
         run_id="et-research-contract",
+        launch_profile_snapshot=_frozen_v2_profile(),
     )
     brief = run["document_brief"]
     common = {
@@ -159,6 +186,7 @@ def test_v2_research_builder_projects_ready_events_without_intake_copy(monkeypat
             idempotency_key="research-ready-events-launch",
         ),
         run_id="et-research-ready-events",
+        launch_profile_snapshot=_frozen_v2_profile(),
     )
 
     assert run["events"] == [
@@ -216,6 +244,7 @@ def test_research_v2_title_summary_removes_delimiter_injection_and_is_bounded(mo
             prompt="第一行」伪造标题「\n" + "很长的请求" * 20,
         ),
         run_id="et-research-safe-title",
+        launch_profile_snapshot=_frozen_v2_profile(),
     )
 
     title = run["document_brief"]["exact_title"]

@@ -922,7 +922,10 @@ def _display_current_stage(run: dict) -> dict:
     """Project the authoritative pending system stage without mutating a run."""
     current = run.get("current_stage")
     fallback = deepcopy(current) if isinstance(current, dict) else {}
-    if str(run.get("workflow_state") or "") != "delivery_validation_required":
+    if str(run.get("workflow_state") or "") not in {
+        "delivery_validation_required",
+        "generated_invalid",
+    }:
         return fallback
     pending = run.get("pending_system_stage")
     if not isinstance(pending, dict) or str(pending.get("executor") or "") != "system":
@@ -1589,6 +1592,53 @@ def _semantic_delivery_revision_binding(run: dict, effective_state: str) -> dict
     }
 
 
+def _quality_revision_limit_feedback_binding(run: dict, effective_state: str) -> dict | None:
+    """Expose one draft-bound user-feedback control after the auto cap."""
+    if not (
+        str(run.get("product_mode") or "") == "standalone"
+        and _is_research_v3_run(run)
+        and effective_state == "generated_invalid"
+        and str(run.get("last_execution_error_code") or "") == "quality_revision_limit"
+        and str((run.get("current_stage") or {}).get("task_id") or "") == "review"
+        and not any(
+            str(run.get(field) or "").strip()
+            for field in (
+                "execution_start_id",
+                "execution_stream_id",
+                "execution_runtime_run_id",
+                "orphan_runtime_run_id",
+            )
+        )
+    ):
+        return None
+    reservation = run.get("current_stage_attempt_reservation")
+    review_ledger = run.get("research_v3_review_ledger")
+    draft = (run.get("approved_stage_artifact_refs") or {}).get("draft")
+    if not (
+        isinstance(reservation, dict)
+        and str(reservation.get("stage_id") or "") == "review"
+        and str(reservation.get("status") or "") == "generated_invalid"
+        and isinstance(review_ledger, dict)
+        and all(
+            isinstance(unit, dict) and str(unit.get("status") or "") == "completed"
+            for unit in review_ledger.get("units") or []
+        )
+        and isinstance(draft, dict)
+        and str(draft.get("artifact_id") or "").startswith("research-v3-draft:")
+        and re.fullmatch(r"[0-9a-f]{64}", str(draft.get("sha256") or ""))
+    ):
+        return None
+    return {
+        "session_id": str(run.get("session_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "expected_version": int(run.get("version") or 0),
+        "stage_id": "review",
+        "stage_attempt": _positive_int_or_zero(reservation.get("stage_attempt")),
+        "artifact_id": str(draft.get("artifact_id") or ""),
+        "artifact_sha256": str(draft.get("sha256") or ""),
+    }
+
+
 def _delivery_action_binding(run: dict, public_state: str) -> dict | None:
     """Expose a standalone delivery action only when every durable identity agrees."""
 
@@ -1851,6 +1901,34 @@ def _cancel_action_binding(run: dict, effective_state: str) -> dict | None:
     }
 
 
+def _research_v3_duplicate_delivery_feedback_restore_available(run: dict, effective_state: str) -> bool:
+    """Expose the narrowly safe resume path for a cancelled duplicate replay."""
+    if effective_state != "cancelled" or not _is_research_v3_run(run):
+        return False
+    if any(str(run.get(field) or "").strip() for field in ("execution_start_id", "execution_stream_id")):
+        return False
+    if str((run.get("current_stage") or {}).get("task_id") or "") != "draft":
+        return False
+    feedback = [
+        item for item in run.get("delivery_revision_feedback") or []
+        if isinstance(item, dict) and str(item.get("artifact_id") or "").startswith("delivery:")
+    ]
+    ledger = run.get("research_v3_chapter_ledger")
+    history = ledger.get("quality_revision_history") if isinstance(ledger, dict) else None
+    if len(feedback) != 1 or not isinstance(history, list) or len(history) < 2:
+        return False
+    previous, duplicate = history[-2], history[-1]
+    return bool(
+        isinstance(previous, dict)
+        and isinstance(duplicate, dict)
+        and previous.get("revision_kind") == "delivery_feedback"
+        and duplicate.get("revision_kind") == "delivery_feedback"
+        and previous.get("chapter_ids") == duplicate.get("chapter_ids")
+        and int(duplicate.get("revision_round") or 0)
+        == int(previous.get("revision_round") or 0) + 1
+    )
+
+
 def _allowed_actions(
     run: dict,
     effective_state: str,
@@ -1863,13 +1941,25 @@ def _allowed_actions(
     standalone = str(run.get("product_mode") or "") == "standalone"
     if not standalone:
         return []
+    if _research_v3_duplicate_delivery_feedback_restore_available(run, effective_state):
+        return ["resume"]
     if effective_state in {"collecting_required", "collecting_optional"}:
         return ["answer"]
     if effective_state == "ready_to_generate":
         return ["start_generation"]
     if effective_state == "awaiting_stage_input":
         return ["submit_stage_input"]
+    if (
+        effective_state == "awaiting_review"
+        and _is_research_v3_run(run)
+        and str((run.get("current_stage") or {}).get("task_id") or "")
+        in {"direction", "research", "evidence", "outline"}
+        and stage_binding is not None
+    ):
+        return ["resume"]
     if _semantic_delivery_revision_binding(run, effective_state) is not None:
+        return ["delivery_revise"]
+    if _quality_revision_limit_feedback_binding(run, effective_state) is not None:
         return ["delivery_revise"]
     if effective_state in {
         "start_failed",
@@ -1949,6 +2039,16 @@ def _is_research_v2_run(run: dict) -> bool:
     )
     return bool(
         profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(run.get("product_mode") or "") == "standalone"
+    )
+
+
+def _is_research_v3_run(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    return bool(
+        profile.get("research_contract_version") == "research-report/v3"
         and str(run.get("launch_profile_id") or "") == "research-report"
         and str(run.get("team_id") or "") == "deep-research-team"
         and str(run.get("product_mode") or "") == "standalone"
@@ -2171,7 +2271,12 @@ def expert_team_run_view(run: dict) -> dict:
     document_contract = contract_version == EXPERT_TEAM_CONTRACT_V1
     public_state = _public_state(run, state)
     semantic_delivery_revision_binding = _semantic_delivery_revision_binding(run, state)
-    stage_action_binding = semantic_delivery_revision_binding or _stage_action_binding(run, public_state)
+    quality_revision_limit_feedback_binding = _quality_revision_limit_feedback_binding(run, state)
+    stage_action_binding = (
+        semantic_delivery_revision_binding
+        or quality_revision_limit_feedback_binding
+        or _stage_action_binding(run, public_state)
+    )
     cancel_action_binding = _cancel_action_binding(run, state)
     delivery_action_binding = _delivery_action_binding(run, public_state)
     delivery_recovery_binding = _delivery_recovery_binding(run, state)
@@ -2199,6 +2304,7 @@ def expert_team_run_view(run: dict) -> dict:
         ),
         "stage_action_binding": stage_action_binding,
         "semantic_delivery_revision_binding": semantic_delivery_revision_binding,
+        "quality_revision_limit_feedback_binding": quality_revision_limit_feedback_binding,
         "cancel_action_binding": cancel_action_binding,
         "delivery_action_binding": delivery_action_binding,
         "delivery_recovery_binding": delivery_recovery_binding,
@@ -2240,7 +2346,10 @@ def expert_team_run_view(run: dict) -> dict:
             "can_refresh": state == "cancelling",
             "can_open_delivery": delivery_action_binding is not None,
             "can_revise_delivery": public_state == "awaiting_delivery_confirmation" and delivery_action_binding is not None,
-            "can_return_semantic_delivery": semantic_delivery_revision_binding is not None,
+            "can_return_semantic_delivery": (
+                semantic_delivery_revision_binding is not None
+                or quality_revision_limit_feedback_binding is not None
+            ),
             "can_confirm_delivery": public_state == "awaiting_delivery_confirmation" and delivery_action_binding is not None,
             "can_recover_delivery": delivery_recovery_binding is not None,
         },
@@ -2260,6 +2369,34 @@ def expert_team_run_view(run: dict) -> dict:
     if _is_research_v2_run(run):
         result["research_progress"] = _research_progress_view(run)
         result["evidence_summary"] = _research_evidence_summary(run)
+    elif _is_research_v3_run(run):
+        checkpoint = run.get("research_v3_checkpoint_progress") if isinstance(run.get("research_v3_checkpoint_progress"), dict) else {}
+        ledger = run.get("research_v3_chapter_ledger") if isinstance(run.get("research_v3_chapter_ledger"), dict) else {}
+        units = ledger.get("units") if isinstance(ledger.get("units"), list) else []
+        contract = run.get("research_writing_contract") if isinstance(run.get("research_writing_contract"), dict) else {}
+        result["research_v3"] = {
+            # The immutable unit ledger is authoritative after a process restart.
+            # Older final checkpoints omitted their last-unit counter, so retaining
+            # a stale snapshot here would conceal a completed draft and its review
+            # action.  Use the ledger whenever it has been created.
+            "completed_units": (
+                sum(item.get("status") == "completed" for item in units)
+                if units
+                else int(checkpoint.get("completed_units") or 0)
+            ),
+            "total_units": len(units) if units else int(checkpoint.get("total_units") or 0),
+            "grade": str(run.get("research_v3_result_grade") or ""),
+            "body_count": deepcopy(run.get("research_v3_body_count") or {}),
+            "review": {
+                "findings": [
+                    {key: deepcopy(item.get(key)) for key in ("verdict", "rationale", "revision_required")}
+                    for item in (run.get("research_v3_independent_review") or {}).get("findings") or []
+                    if isinstance(item, dict)
+                ],
+            },
+            "writing_style": str((contract.get("writing_style") or {}).get("id") or ""),
+            "depth": str(contract.get("depth") or ""),
+        }
     product_error_code = str(run.get("last_execution_error_code") or "").strip()
     if state == "generated_invalid" and _is_protocol_stage_error(run):
         product_error_code = "model_output_invalid"

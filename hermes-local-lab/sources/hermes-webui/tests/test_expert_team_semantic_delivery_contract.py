@@ -327,6 +327,59 @@ def test_research_semantic_gate_binds_claim_markers_to_real_source_ids_and_body(
     assert "claim_usage_unknown" in {item["code"] for item in unknown["issues"]}
 
 
+def test_research_v3_semantic_gate_delivers_reviewed_working_draft_but_blocks_blocked_grade():
+    from api.expert_teams.documents import _research_citation_result
+
+    brief = _brief(task_mode="create", research=True)
+    body = "## 研究问题\n\n已审核的工作稿正文。"
+    delivery = {
+        "result_grade": "quality_review_required",
+        "execution_policy": "bounded_report_v1",
+        "canonical": {"body": body, "body_sha256": "a" * 64},
+        "sidecar": {
+            "canonical_body_sha256": "a" * 64,
+            "sidecar_sha256": "b" * 64,
+            "claims": [{"claim_id": "CLAIM-001", "status": "supported"}],
+        },
+        "review": {"review_status": "reviewer_assessed_passed"},
+    }
+
+    result, issues = _research_citation_result(
+        brief=brief,
+        payload={},
+        approved_artifacts=_research_inputs(),
+        source_context=_source_context(),
+        markdown=f"# {brief['exact_title']}\n\n{body}",
+        product_mode="standalone",
+        research_v3_delivery=delivery,
+    )
+    assert result["status"] == "passed"
+    assert issues == []
+
+    legacy_delivery = {key: value for key, value in delivery.items() if key != "execution_policy"}
+    legacy_result, legacy_issues = _research_citation_result(
+        brief=brief, payload={}, approved_artifacts=_research_inputs(),
+        source_context=_source_context(),
+        markdown=f"# {brief['exact_title']}\n\n{body}",
+        product_mode="standalone", research_v3_delivery=legacy_delivery,
+    )
+    assert legacy_result["status"] == "failed"
+    assert {item["code"] for item in legacy_issues} == {"research_v3_grade_blocked"}
+
+    delivery["result_grade"] = "blocked"
+    result, issues = _research_citation_result(
+        brief=brief,
+        payload={},
+        approved_artifacts=_research_inputs(),
+        source_context=_source_context(),
+        markdown=f"# {brief['exact_title']}\n\n{body}",
+        product_mode="standalone",
+        research_v3_delivery=delivery,
+    )
+    assert result["status"] == "failed"
+    assert {item["code"] for item in issues} == {"research_v3_grade_blocked"}
+
+
 def test_zero_source_standalone_brief_placeholders_do_not_become_delivery_blockers():
     from api.expert_teams.documents import evaluate_semantic_gates
 

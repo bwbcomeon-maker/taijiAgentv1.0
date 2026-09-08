@@ -1061,8 +1061,40 @@ async function _expertTeamLaunchRequest(payload){
   const prompt=String(source.prompt||'').trim();
   if(!launchProfileId)throw new Error('当前文档任务尚未开放，请重新选择。');
   if(!prompt)throw new Error('请先填写本次任务诉求。');
+  const rawAttachments=source.source_attachments;
+  const sourceSessionId=String(source.source_session_id||'').trim();
+  const researchSpec={};
+  for(const field of ['writing_style','depth']){
+    if(source[field]===undefined)continue;
+    if(typeof source[field]!=='string'||!source[field].trim()){
+      throw new Error('研究报告写作规格无效，请重新选择后发起。');
+    }
+    researchSpec[field]=source[field].trim();
+  }
+  let sourceAttachments=[];
+  if(rawAttachments!==undefined){
+    if(!Array.isArray(rawAttachments)||!rawAttachments.length||!sourceSessionId){
+      throw new Error('参考资料上传结果无效，请重新选择后发起。');
+    }
+    sourceAttachments=rawAttachments.map((item,index)=>{
+      if(!item||typeof item!=='object'||Array.isArray(item)){
+        throw new Error(`第 ${index+1} 份参考资料上传结果无效，请重新选择后发起。`);
+      }
+      const name=String(item.name||'').trim();
+      const ref=String(item.ref||'').trim();
+      const mime=String(item.mime||'').trim();
+      const size=item.size;
+      if(!name||!ref||!Number.isInteger(size)||size<=0){
+        throw new Error(`第 ${index+1} 份参考资料上传结果无效，请重新选择后发起。`);
+      }
+      return {name,ref,mime,size};
+    });
+  }else if(sourceSessionId){
+    throw new Error('参考资料上传结果无效，请重新选择后发起。');
+  }
   const sessionOptions=_expertTeamLaunchSessionOptions();
-  const fingerprint=await _expertTeamLaunchFingerprint(JSON.stringify({launch_profile_id:launchProfileId,prompt,session_options:sessionOptions}));
+  const attachmentBinding=sourceAttachments.length?{source_session_id:sourceSessionId,source_attachments:sourceAttachments}:{};
+  const fingerprint=await _expertTeamLaunchFingerprint(JSON.stringify({launch_profile_id:launchProfileId,prompt,session_options:sessionOptions,...researchSpec,...attachmentBinding}));
   const providedKey=String(source.idempotency_key||'').trim();
   let idempotencyKey=providedKey;
   const pending=_readExpertTeamPendingLaunch();
@@ -1083,6 +1115,8 @@ async function _expertTeamLaunchRequest(payload){
       prompt,
       idempotency_key:idempotencyKey,
       session_options:sessionOptions,
+      ...researchSpec,
+      ...attachmentBinding,
     },
   };
 }
