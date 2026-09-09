@@ -99,6 +99,6 @@ Windows 路线不运行 Kylin `99/00/01`。只读 doctor 的授权不能延伸�
 
 ### Windows 授权资源写入检查
 
-`payload-import-menu-policy` 在编译前执行 `Test-LicensePayload.ps1`，使用负载私有 Python 和冻结源码 helper，在负载外的临时目录验证设备身份创建、安全读取、新进程机器码稳定，以及授权/状态资源的首次写入和原子替换。临时 profile 根单独设置可信 ACL；不修改真实用户 profile 或负载。检查失败必须阻断编译，成功标记为 `WINDOWS_PAYLOAD_LICENSE_OK`；不能替代普通用户/管理员两种令牌的真机验证或安装态 UI 验收。
+`payload-import-menu-policy` 在编译前执行 `Test-LicensePayload.ps1`，使用负载私有 Python 和冻结源码 helper，在负载外的临时目录验证设备身份创建、安全读取、新进程机器码稳定，以及授权/状态资源的首次写入和原子替换。Windows 指纹必须通过无 shell 的 PowerShell CIM 查询取得有效的 `Win32_ComputerSystemProduct.UUID` 或 `Win32_BaseBoard.SerialNumber`，形成强指纹且不含 `no_stable_hardware`；否则该检查阻断编译。临时 profile 根单独设置可信 ACL；不修改真实用户 profile 或负载。检查成功标记为 `WINDOWS_PAYLOAD_LICENSE_OK`；不能替代普通用户/管理员两种令牌的真机验证或安装态 UI 验收。
 
 Windows 新建授权资源显式指定当前进程用户为所有者及受保护 DACL，不依赖管理员令牌的默认所有者。读取仍拒绝非当前用户所有者、非受信任写权限和重解析资源。本次开发修复不提供旧安装权限迁移。

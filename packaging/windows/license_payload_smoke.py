@@ -25,6 +25,8 @@ def check_resources(agent: Path, root: Path, *, create: bool) -> dict:
     if not create:
         assert device_path.is_file()
     request = license_module.build_machine_request()
+    assert request['fingerprint_quality'] == 'strong'
+    assert 'no_stable_hardware' not in request['risk_flags']
     raw = license_module._secure_read_runtime_resource(
         path=device_path, profile_root=root, required=True)
     device = license_module._parse_license_device(raw)

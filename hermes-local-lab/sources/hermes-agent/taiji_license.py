@@ -1331,6 +1331,94 @@ def _collect_uuid_node_mac() -> list[str]:
     return [mac] if mac else []
 
 
+def _clean_windows_product_uuid(value: Any) -> Optional[str]:
+    text = _clean_machine_signal(value)
+    if not text:
+        return None
+    try:
+        identifier = uuid.UUID(text)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if identifier.int in {0, (1 << 128) - 1}:
+        return None
+    return str(identifier)
+
+
+def _clean_windows_board_serial(value: Any) -> Optional[str]:
+    text = _clean_machine_signal(value)
+    if not text:
+        return None
+    if text in {
+        "default",
+        "n/a",
+        "not applicable",
+        "not available",
+        "no serial number",
+        "serial number",
+        "base board serial number",
+        "unavailable",
+    } or text.startswith("to be filled by"):
+        return None
+    compact = re.sub(r"[^0-9a-z]", "", text)
+    if len(compact) < 4 or (compact and set(compact) in ({"0"}, {"f"})):
+        return None
+    return text
+
+
+def _collect_windows_hardware_identifiers() -> dict[str, Optional[str]]:
+    if sys.platform != "win32":
+        return {}
+    script = """
+$productUuid = try {
+    Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty UUID
+} catch { $null }
+$boardSerial = try {
+    Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty SerialNumber
+} catch { $null }
+[PSCustomObject]@{
+    dmi_product_uuid = [string]$productUuid
+    dmi_board_serial = [string]$boardSerial
+} | ConvertTo-Json -Compress
+""".strip()
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        payload = json.loads((result.stdout or "").strip().lstrip("\ufeff"))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    return {
+        "dmi_product_uuid": _clean_windows_product_uuid(
+            payload.get("dmi_product_uuid")
+        ),
+        "dmi_board_serial": _clean_windows_board_serial(
+            payload.get("dmi_board_serial")
+        ),
+    }
+
+
 def _collect_virtualization_risk_flags() -> list[str]:
     dmi_paths = [
         Path("/sys/class/dmi/id/sys_vendor"),
@@ -1422,10 +1510,22 @@ def _collect_machine_components() -> tuple[list[tuple[str, str]], list[dict[str,
         if value:
             components.append((name, value))
 
-    add_file_signal("dmi_product_uuid", Path("/sys/class/dmi/id/product_uuid"))
-    add_file_signal("dmi_board_serial", Path("/sys/class/dmi/id/board_serial"))
+    if sys.platform == "win32":
+        windows_identifiers = _collect_windows_hardware_identifiers()
+        for name in ("dmi_product_uuid", "dmi_board_serial"):
+            value = windows_identifiers.get(name)
+            signals.append({"name": name, "available": bool(value)})
+            if value:
+                components.append((name, value))
+    else:
+        add_file_signal("dmi_product_uuid", Path("/sys/class/dmi/id/product_uuid"))
+        add_file_signal("dmi_board_serial", Path("/sys/class/dmi/id/board_serial"))
 
-    machine_id = _read_machine_file(Path("/etc/machine-id")) or _read_machine_file(Path("/var/lib/dbus/machine-id"))
+    machine_id = None
+    if sys.platform != "win32":
+        machine_id = _read_machine_file(Path("/etc/machine-id")) or _read_machine_file(
+            Path("/var/lib/dbus/machine-id")
+        )
     signals.append({"name": "machine_id", "available": bool(machine_id)})
     if machine_id:
         components.append(("machine_id", machine_id))

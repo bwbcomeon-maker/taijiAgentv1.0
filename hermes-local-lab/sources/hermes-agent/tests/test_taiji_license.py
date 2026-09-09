@@ -3,6 +3,7 @@ import json
 import inspect
 import os
 import stat
+import subprocess
 import sys
 import types
 import time
@@ -2014,6 +2015,149 @@ def test_macos_machine_fingerprint_uses_stable_platform_uuid(monkeypatch):
     assert any(
         signal["name"] == "macos_platform_uuid" and signal["available"]
         for signal in first["signals"]
+    )
+
+
+def test_windows_machine_fingerprint_uses_cim_hardware_identifiers(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "dmi_product_uuid": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                    "dmi_board_serial": "BOARD-SERIAL-1",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        taiji_license,
+        "sys",
+        types.SimpleNamespace(platform="win32"),
+        raising=False,
+    )
+    monkeypatch.setattr(taiji_license.subprocess, "run", fake_run)
+    monkeypatch.setattr(taiji_license, "_read_machine_file", lambda path: None)
+    monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: [])
+    monkeypatch.setattr(
+        taiji_license,
+        "_collect_uuid_node_mac",
+        lambda: ["00:11:22:33:44:55"],
+    )
+
+    fingerprint = taiji_license.get_machine_fingerprint(
+        use_cache=False,
+        now=1_000_000,
+        environ={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert calls
+    assert calls[0][0][0].lower().endswith("powershell.exe")
+    assert calls[0][1]["shell"] is False
+    assert fingerprint["fingerprint_quality"] == "strong"
+    assert "no_stable_hardware" not in fingerprint["risk_flags"]
+    assert {
+        signal["name"]: signal["available"]
+        for signal in fingerprint["signals"]
+        if signal["name"] in {"dmi_product_uuid", "dmi_board_serial"}
+    } == {"dmi_product_uuid": True, "dmi_board_serial": True}
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "failure"),
+    [
+        ("", 0, None),
+        (
+            json.dumps(
+                {
+                    "dmi_product_uuid": "00000000-0000-0000-0000-000000000000",
+                    "dmi_board_serial": "00000000",
+                }
+            ),
+            0,
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "dmi_product_uuid": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+                    "dmi_board_serial": "FFFFFFFF",
+                }
+            ),
+            0,
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "dmi_product_uuid": "not-a-uuid",
+                    "dmi_board_serial": "To be filled by O.E.M.",
+                }
+            ),
+            0,
+            None,
+        ),
+        (json.dumps({"dmi_product_uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}), 1, None),
+        ("", 0, "timeout"),
+    ],
+)
+def test_windows_machine_fingerprint_rejects_unstable_cim_results(
+    monkeypatch,
+    tmp_path,
+    stdout,
+    returncode,
+    failure,
+):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(
+        taiji_license,
+        "sys",
+        types.SimpleNamespace(platform="win32"),
+        raising=False,
+    )
+    monkeypatch.setattr(taiji_license.subprocess, "run", fake_run)
+    monkeypatch.setattr(taiji_license, "_read_machine_file", lambda path: None)
+    monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: [])
+    monkeypatch.setattr(
+        taiji_license,
+        "_collect_uuid_node_mac",
+        lambda: ["00:11:22:33:44:55"],
+    )
+
+    fingerprint = taiji_license.get_machine_fingerprint(
+        use_cache=False,
+        now=1_000_000,
+        environ={"XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+
+    assert calls
+    command, kwargs = calls[0]
+    assert command[:5] == [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+    ]
+    assert kwargs["timeout"] == 5
+    assert kwargs["shell"] is False
+    assert fingerprint["fingerprint_quality"] == "weak"
+    assert "no_stable_hardware" in fingerprint["risk_flags"]
+    assert all(
+        not signal["available"]
+        for signal in fingerprint["signals"]
+        if signal["name"] in {"dmi_product_uuid", "dmi_board_serial"}
     )
 
 
