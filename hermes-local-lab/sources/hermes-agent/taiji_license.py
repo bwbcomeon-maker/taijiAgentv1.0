@@ -369,6 +369,13 @@ def runtime_license_device_path() -> Path:
     return PRODUCTION_LICENSE_DEVICE_PATH
 
 
+def _uses_installed_license_materials() -> bool:
+    return taiji_runtime_profile.installation_profile() in {
+        taiji_runtime_profile.INSTALLED_PRODUCTION_PROFILE,
+        taiji_runtime_profile.WINDOWS_CANDIDATE_PROFILE,
+    }
+
+
 def _hash_id(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -3167,7 +3174,7 @@ def load_license_status(
                 message=MESSAGE_DEVICE_UNTRUSTED,
             )
         try:
-            if taiji_runtime_profile.is_installed_production():
+            if _uses_installed_license_materials():
                 resolved_public_key = _load_production_public_key(policy)
             else:
                 resolved_public_key = _load_source_public_key(policy)
@@ -3178,7 +3185,7 @@ def load_license_status(
                 message=MESSAGE_PUBLIC_KEY_UNTRUSTED,
             )
         try:
-            if taiji_runtime_profile.is_installed_production():
+            if _uses_installed_license_materials():
                 product_version = _load_production_version()
             else:
                 product_version = _load_source_version()
@@ -3261,7 +3268,7 @@ def _validate_license_token_for_import(
             message=MESSAGE_DEVICE_UNTRUSTED,
         )
     try:
-        if taiji_runtime_profile.is_installed_production():
+        if _uses_installed_license_materials():
             public_key = _load_production_public_key(policy)
         else:
             public_key = _load_source_public_key(policy)
@@ -3272,7 +3279,7 @@ def _validate_license_token_for_import(
             message=MESSAGE_PUBLIC_KEY_UNTRUSTED,
         )
     try:
-        if taiji_runtime_profile.is_installed_production():
+        if _uses_installed_license_materials():
             product_version = _load_production_version()
         else:
             product_version = _load_source_version()

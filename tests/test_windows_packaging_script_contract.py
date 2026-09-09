@@ -219,6 +219,9 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("SystemDrive", smoke)
         self.assertIn("PROTECTED_DACL_SECURITY_INFORMATION", smoke)
         self.assertIn("verify_disposable_install_tree", smoke)
+        self.assertIn("WINDOWS_CANDIDATE_PROFILE", smoke)
+        self.assertIn("child_env['TAIJI_WINDOWS_CANDIDATE'] = '1'", smoke)
+        self.assertIn("taiji-runtime-profile.json", smoke)
         check_resources = smoke.split("def check_resources", 1)[1].split(
             "def check_payload_verification_material", 1
         )[0]

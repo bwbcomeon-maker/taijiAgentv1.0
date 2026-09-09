@@ -146,6 +146,8 @@ def check_disposable_install_tree(root: Path, expected_version: str) -> None:
     import taiji_license as license_module
 
     assert Path(license_module.__file__).resolve() == (agent / 'taiji_license.py').resolve()
+    assert license_module.taiji_runtime_profile.installation_profile() == (
+        license_module.taiji_runtime_profile.WINDOWS_CANDIDATE_PROFILE)
     assert license_module.PRODUCTION_INSTALL_ROOT == root
     assert license_module.PRODUCTION_INSTALL_TRUST_ROOT == Path(root.anchor)
     public_key = license_module._load_production_public_key(
@@ -177,12 +179,15 @@ def _run_install_tree_loader(probe_root: Path, expected_version: str) -> None:
         str(probe_root),
         expected_version,
     ]
+    child_env = dict(os.environ)
+    child_env['TAIJI_WINDOWS_CANDIDATE'] = '1'
     try:
         child = subprocess.run(
             command,
             capture_output=True,
             text=True,
             timeout=_INSTALL_TREE_LOADER_TIMEOUT_SECONDS,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         detail = _process_detail(exc.stdout, exc.stderr)
@@ -237,6 +242,9 @@ def verify_disposable_install_tree(payload: Path, expected_version: str) -> None
         shutil.copyfile(source_agent / 'taiji_license.py', agent / 'taiji_license.py')
         shutil.copyfile(
             source_agent / 'taiji_runtime_profile.py', agent / 'taiji_runtime_profile.py')
+        shutil.copyfile(
+            source_agent / 'taiji-runtime-profile.json',
+            agent / 'taiji-runtime-profile.json')
         shutil.copyfile(
             payload / 'resources/license/signing-public.pem',
             resources / 'signing-public.pem',

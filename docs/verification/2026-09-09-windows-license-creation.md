@@ -32,6 +32,8 @@ Windows 安全创建显式提供当前用户 owner 和受保护 DACL；不放宽
 - Windows 验签材料定向回归：授权模块 148 项通过，其中 Windows production loader 验证固定安装根、公钥路径、版本路径和 NTFS 安全校验调用；Windows 制包合同 32 项及 102 个子断言通过。目标机只读 ACL 诊断确认标准 Program Files 目录由受信任系统主体所有，Builtin Users 与应用包只有读取权限。安装材料使用独立的 LocalSystem、Builtin Administrators、Windows Modules Installer 固定信任集，明确拒绝当前普通用户写入；用户授权资源仍不信任 TrustedInstaller。检查范围延伸到卷根，并有安装根父目录可替换的拒绝回归；目标机现有 Program Files 文件从文件到卷根的完整 ACL 链实时通过。临时解压目录因继承可写 ACL 被正确拒绝，未被当作安装态证据。
 - 第二轮候选制包首次失败：run `20260909T122008Z-67b2369c990e-72459dcc` 绑定 `72459dcc2257f35da883c5f63b03b73caace4f53`，负载阶段及前三项正式检查通过，`payload-import-menu-policy` 阻断。精确重放显示 `_load_production_public_key` 拒绝 builder 可写的 `D:\tw\taiji-builds\...\payload` ACL。负载中公钥与 `VERSION` 字节均存在；失败原因是制包探针错把 staging 当成受保护安装根，不是放宽 production loader 的理由。修复后暂存目录仅校验文件形状、字节和指纹；真实 loader 改在系统盘下受保护、生产形状一致的一次性树中验证，从文件一直检查到卷根。
 - 制包探针修正实时验证：Windows 目标机复用上述失败 run 的同一 payload，替换且仅替换探针 helper 后返回 `WINDOWS_PAYLOAD_LICENSE_OK`；系统盘临时安装树已由 helper 清理。Sol 首审发现子进程无超时、清理可能覆盖原始错误，修正为 30 秒失败闭合、成功标记明确诊断及原始/清理组合错误后，Windows 真实成功路径再次通过。本地 Windows 制包合同 35 项通过，完整 `scripts/verify.sh --full` 退出码为 0 并输出 `verification: PASS`；主 Python 1338 项、桌面 79 项、DOCX 279 项、授权与安全 234 项、WebUI 961 项及其余注册门禁全部通过。
+- 候选运行态分流 RED：提交 `7e77d163fe13000a7c9a47c02248d9cdc4dd2f64` 的候选 run `20260909T131511Z-bc0379c30bd2-7e77d163` 完成 7/7 制包、静默安装及安装目录验签材料检查，但真实界面导入同一已校验授权仍提示“产品授权验签材料不可信”。安装私有 Python 在应用同值环境 `TAIJI_WINDOWS_CANDIDATE=1` 下实时返回 `profile=windows-candidate`、`installed=False`；production loader 通过，source loader 抛出 `_LicensePublicKeyError`。根因是授权状态读取和导入校验仅以 `is_installed_production()` 选择安装材料，错误地把候选安装送入要求受信任 Git checkout 的源码加载器。两个回归测试分别在状态读取与导入校验位置先失败；修复后候选和正式安装都使用固定安装根材料，源码开发运行态不变。
+- 候选运行态分流 GREEN：授权模块 150 项与运行态模块 3 项通过，Windows 制包合同 35 项通过。使用 Node `v24.19.0` 执行完整 `scripts/verify.sh --full`，最终退出码为 0 并输出 `verification: PASS`；主 Python 1338 项、桌面 79 项、DOCX 279 项、授权与安全 236 项、WebUI 961 项及其余注册门禁均无失败。首次完整入口在测试前因当前默认 Node `v26.8.1` 不符合项目 22/24 门禁而停止；绑定工作区现有 Node 24 后同一入口通过，未安装或修改系统工具链。
 - 第二轮完整源码验证：使用 Node `v24.19.0` 在允许本机临时 socket 的环境执行 `scripts/verify.sh --full`，安全审核修正后的最终运行退出码为 0 并输出 `verification: PASS`。主要分组包括 Python 主套件 1335 项、桌面 79 项、DOCX 279 项、授权与安全套件 234 项、WebUI 961 项及其余门禁，均无失败。此前沙箱内运行的 23 项 socket `PermissionError` 属于执行环境限制；同一完整入口在允许 socket 后全部通过。
 - 测试启动失败与恢复：最初 SSH 跨用户继承的桌面上下文出现扩展 DLL 初始化失败；独立用户环境块未解决，任务调度器路径返回未执行 0x41303 后停止。仅切换到专用私有测试桌面的 launcher 后模块加载及探针成功，没有修改或放宽产品校验。
 - Windows 候选制包：已生成。run `20260909T034850Z-e90c008006f6-1d5fd0ad` 绑定 `main@1d5fd0adcecfc071fdcfacc0592a39cedde9f04b` 与 tree `0b8980feab3fe24935f3e275efc66b7b864a851b`，输入、传输、远端输入复核、远端构建、review 取回和本地交叉校验均通过。
@@ -43,10 +45,10 @@ Windows 安全创建显式提供当前用户 owner 和受保护 DACL；不放宽
 
 状态：进行中。按项目 frontend-ux-qa 技能界定受影响路径：设置 → 模型配置 → 机器码导出 → 导入授权 → 刷新授权状态。普通用户可见入口已有，前端布局与公共 API 未改动。
 
-提交 `1336bf58` 对应安装态已通过真实界面完成机器码导出，文件为强质量且风险标记为空；签发工具已生成并本机校验授权。真实界面导入动作已执行，但因该候选缺少可信验签资源而显示明确失败提示，因此授权有效状态、重启后授权读取仍未验证。截图、键盘、可访问性自动化、视觉层级、长时间使用及其余状态仍未验证。
+提交 `1336bf58` 对应安装态已通过真实界面完成机器码导出，文件为强质量且风险标记为空；签发工具已生成并本机校验授权。提交 `7e77d163` 的新候选已携带验签资源并完成真实界面导入动作，但候选运行态误走源码材料加载器，仍显示相同失败提示。授权有效状态、重启后授权读取仍未验证；截图、键盘、可访问性自动化、视觉层级、长时间使用及其余状态仍未验证。
 
-后续：完成第二轮源码验证、审核与提交后重新制包安装；使用已校验且绑定同一设备身份的授权文件再次执行真实界面导入，刷新并重启确认授权状态。当前源码测试和旧候选失败诊断都不能替代新候选安装态验收。
+后续：完成候选运行态分流修复的审核与提交后重新制包安装；使用已校验且绑定同一设备身份的授权文件再次执行真实界面导入，刷新并重启确认授权状态。当前源码测试和旧候选失败诊断都不能替代新候选安装态验收。
 
 ## 开发收尾状态
 
-唯一写入者：当前任务主 Agent。Windows 安全创建（ACL）修复为 `1d5fd0adcecfc071fdcfacc0592a39cedde9f04b`，初版 CIM 硬件采集为 `749b4f2812288611478e1cf02c0e3bcacf5281e4`，安装态 PATH 与绝对 PowerShell 修复为 `1336bf58b976cd65b4560169376cf1041622a900`，Windows 验签材料固定路径与信任链修复为 `72459dcc2257f35da883c5f63b03b73caace4f53`，均已推送。`72459dcc` 的首次候选制包暴露 staging 与安装态 ACL 混用；探针修正已完成本地全量验证和 Windows 实时验证，正等待最终审核与提交。新候选的制包、安装和 UI 授权导入仍未验收；签名与发布均未完成。
+唯一写入者：当前任务主 Agent。Windows 安全创建（ACL）修复为 `1d5fd0adcecfc071fdcfacc0592a39cedde9f04b`，初版 CIM 硬件采集为 `749b4f2812288611478e1cf02c0e3bcacf5281e4`，安装态 PATH 与绝对 PowerShell 修复为 `1336bf58b976cd65b4560169376cf1041622a900`，Windows 验签材料固定路径与信任链修复为 `72459dcc2257f35da883c5f63b03b73caace4f53`，安装树探针修复为 `7e77d163fe13000a7c9a47c02248d9cdc4dd2f64`，均已推送。候选运行态分流修复已完成本地全量验证，正等待最终审核与提交。修复后候选的制包、安装和 UI 授权导入仍未验收；签名与发布均未完成。

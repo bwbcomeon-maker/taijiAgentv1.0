@@ -92,6 +92,20 @@ def installed_production_profile(monkeypatch):
     )
 
 
+@pytest.fixture()
+def windows_candidate_profile(monkeypatch):
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "installation_profile",
+        lambda: taiji_license.taiji_runtime_profile.WINDOWS_CANDIDATE_PROFILE,
+    )
+
+
 def _write_token(path, private_pem, **overrides):
     now = int(time.time())
     payload = {
@@ -1731,6 +1745,90 @@ def test_installed_candidate_validation_uses_runtime_policy(
     assert captured["check_state"] is False
     assert captured["environ"]["TAIJI_LICENSE_REQUIRED"] == "1"
     assert captured["environ"]["TAIJI_LICENSE_MACHINE_BINDING_REQUIRED"] == "1"
+    assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
+
+
+def test_windows_candidate_status_uses_installed_verification_materials(
+    monkeypatch, tmp_path, windows_candidate_profile
+):
+    canonical = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("signed-token\n", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", canonical)
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_production_user_file",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_production_public_key",
+        lambda _policy: "trusted-key",
+    )
+    monkeypatch.setattr(taiji_license, "_load_production_version", lambda: "9.9.9")
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_source_public_key",
+        lambda _policy: (_ for _ in ()).throw(AssertionError("source key loader used")),
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_source_version",
+        lambda: (_ for _ in ()).throw(AssertionError("source version loader used")),
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_license_status_impl",
+        lambda **kwargs: captured.update(kwargs)
+        or taiji_license.LicenseStatus(status="valid", required=True),
+    )
+
+    status = taiji_license.load_license_status()
+
+    assert status.status == "valid"
+    assert captured["public_key"] == "trusted-key"
+    assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
+
+
+def test_windows_candidate_import_uses_installed_verification_materials(
+    monkeypatch, tmp_path, windows_candidate_profile
+):
+    candidate = tmp_path / "candidate.jwt"
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_production_user_file",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_production_public_key",
+        lambda _policy: "trusted-key",
+    )
+    monkeypatch.setattr(taiji_license, "_load_production_version", lambda: "9.9.9")
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_source_public_key",
+        lambda _policy: (_ for _ in ()).throw(AssertionError("source key loader used")),
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_source_version",
+        lambda: (_ for _ in ()).throw(AssertionError("source version loader used")),
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_load_license_status_impl",
+        lambda **kwargs: captured.update(kwargs)
+        or taiji_license.LicenseStatus(status="valid", required=True),
+    )
+
+    status = taiji_license.validate_license_candidate(candidate)
+
+    assert status.status == "valid"
+    assert captured["public_key"] == "trusted-key"
     assert captured["environ"]["TAIJI_AGENT_VERSION"] == "9.9.9"
 
 
