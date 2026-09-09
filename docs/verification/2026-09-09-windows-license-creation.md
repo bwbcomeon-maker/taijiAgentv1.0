@@ -23,7 +23,10 @@ Windows 安全创建显式提供当前用户 owner 和受保护 DACL；不放宽
 - 修改后真实 Windows 管理员令牌（TokenElevation=1）及安装私有 pywin32 311：增强探针通过，包括 canonical 机器码创建、新进程稳定性、真实相对目录的授权资源替换和正式状态写入、protected DACL、hardlink/Everyone-write/junction 拒绝。
 - 普通令牌隔离源码验证：通过。经授权的临时标准账号在随机私有 station/desktop 中 TokenElevation=0，安装私有 Python/pywin32 311 正常加载，增强探针全部通过。私有桌面仅授权 QA/管理员/SYSTEM，未修改或切换现有交互桌面；测试账号、profile、一次性任务已清理。此证据不代表普通用户桌面安装态。
 - 测试启动失败与恢复：最初 SSH 跨用户继承的桌面上下文出现扩展 DLL 初始化失败；独立用户环境块未解决，任务调度器路径返回未执行 0x41303 后停止。仅切换到专用私有测试桌面的 launcher 后模块加载及探针成功，没有修改或放宽产品校验。
-- 新候选制包、全新安装、授权导入：未验证。
+- Windows 候选制包：已生成。run `20260909T034850Z-e90c008006f6-1d5fd0ad` 绑定 `main@1d5fd0adcecfc071fdcfacc0592a39cedde9f04b` 与 tree `0b8980feab3fe24935f3e275efc66b7b864a851b`，输入、传输、远端输入复核、远端构建、review 取回和本地交叉校验均通过。
+- 候选 EXE：`TaijiAgent-Setup-1.0.2-win-x64.exe`，280522225 字节，SHA-256 `3d934ab1c3537a39cd288a8f134dc50197ea6a1f229d9d36e962d259a96c46ad`；产品与文件版本均为 `1.0.2.0`，Authenticode 为 `NotSigned`。
+- 正式制包检查：7/7 通过，包括 source-session-identity、offline-npm-ci、electron-win32-x64、payload-import-menu-policy、payload-hygiene-closure、inno-compile、installer-pe-version-authenticode。冻结输入归档包含 `Test-LicensePayload.ps1` 与 `license_payload_smoke.py`；其调用位于第 04 项检查内。
+- 全新安装、授权导入及桌面交互验收：未验证。
 
 ## 前端 UX QA 报告
 
@@ -31,8 +34,8 @@ Windows 安全创建显式提供当前用户 owner 和受保护 DACL；不放宽
 
 机器码导出、文件下载、重启后重复导出、有效授权导入及成功反馈的真实界面操作均未验证。截图、键盘、可访问性自动化、视觉层级、长时间使用、空/加载/错误/禁用状态均未验证。旧包导出主路径已有阻塞；本地源码测试不能证明其安装态消除。
 
-后续：通过本地全量及 Sol 最终审核后提交推送，绑定新提交运行候选计划并保留 BUILD 确认，再明确测试状态清理范围、安装及 UI 验收。普通令牌与管理员令牌的隔离源码证据均不能替代新包桌面验收。
+后续：候选制品已生成。安装前须明确测试状态清理范围、绑定该 SHA-256 的制品和目标机动作；完成后再验收机器码导出、重启稳定性、授权导入及 UI 路径。普通令牌与管理员令牌的隔离源码证据均不能替代新包桌面验收。
 
 ## 开发收尾状态
 
-唯一写入者：当前任务主 Agent。修改均属于本次修复；未触碰原安装模块，其摘要复核仍与诊断时一致。源码已完成本地全量与 Windows 双令牌隔离验证，进入精确暂存及 Sol 最终审核；提交与推送结果以 Git 提交记录为准。候选制包、安装态 UI、签名与发布均未完成。
+唯一写入者：当前任务主 Agent。修复源码已作为 `1d5fd0adcecfc071fdcfacc0592a39cedde9f04b` 推送到 `main`；未触碰原安装模块，其诊断时摘要保持不变。当前交付口径为“候选 EXE 已生成并经本地交叉校验”；安装态 UI、签名与发布均未完成。
