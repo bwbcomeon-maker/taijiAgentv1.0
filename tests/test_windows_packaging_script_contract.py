@@ -1,7 +1,10 @@
 """Static contracts for the parameterized Windows candidate scripts."""
 
+import importlib.util
 import re
+import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -48,6 +51,16 @@ def parameter_names(text):
     if match is None:
         raise AssertionError("script has no parameter block")
     return set(re.findall(r"\[string\]\$([A-Za-z][A-Za-z0-9_]*)", match.group(1)))
+
+
+def load_license_smoke_module():
+    path = WINDOWS_ROOT / "license_payload_smoke.py"
+    spec = importlib.util.spec_from_file_location("license_payload_smoke_test", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("cannot load Windows license smoke helper")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class WindowsPackagingScriptContractTests(unittest.TestCase):
@@ -202,6 +215,46 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("resources\\license\\VERSION", stage)
         self.assertIn("_load_production_public_key", smoke)
         self.assertIn("_load_production_version", smoke)
+        self.assertIn("--verify-install-tree", smoke)
+        self.assertIn("SystemDrive", smoke)
+        self.assertIn("PROTECTED_DACL_SECURITY_INFORMATION", smoke)
+        self.assertIn("verify_disposable_install_tree", smoke)
+        check_resources = smoke.split("def check_resources", 1)[1].split(
+            "def check_payload_verification_material", 1
+        )[0]
+        self.assertNotIn("_load_production_public_key", check_resources)
+        self.assertNotIn("_load_production_version", check_resources)
+
+    def test_license_install_tree_loader_times_out_with_diagnostics(self):
+        smoke = load_license_smoke_module()
+        timeout = subprocess.TimeoutExpired(
+            cmd=["python"], timeout=30, output="partial", stderr="blocked")
+        with mock.patch.object(smoke.subprocess, "run", side_effect=timeout):
+            with self.assertRaisesRegex(
+                RuntimeError, r"timed out after 30s: blocked \| partial"
+            ):
+                smoke._run_install_tree_loader(Path("C:/probe"), "1.0.2")
+
+    def test_license_install_tree_loader_rejects_missing_success_marker(self):
+        smoke = load_license_smoke_module()
+        completed = subprocess.CompletedProcess(
+            args=["python"], returncode=0, stdout="unexpected", stderr="")
+        with mock.patch.object(smoke.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "no success marker: unexpected"):
+                smoke._run_install_tree_loader(Path("C:/probe"), "1.0.2")
+
+    def test_license_probe_cleanup_keeps_primary_failure(self):
+        smoke = load_license_smoke_module()
+        primary = RuntimeError("loader failed")
+        with mock.patch.object(
+            smoke.shutil, "rmtree", side_effect=OSError("directory locked")
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"loader failed; probe cleanup also failed: OSError: directory locked",
+            ) as raised:
+                smoke._finish_probe_cleanup(Path("C:/probe"), primary)
+        self.assertIs(raised.exception.__cause__, primary)
 
     def test_inno_payload_hygiene_uses_extended_path_enumeration(self):
         text = read_script(BUILD)

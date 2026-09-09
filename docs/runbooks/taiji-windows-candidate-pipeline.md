@@ -99,7 +99,7 @@ Windows 路线不运行 Kylin `99/00/01`。只读 doctor 的授权不能延伸�
 
 ### Windows 授权资源写入检查
 
-`payload-import-menu-policy` 在编译前执行 `Test-LicensePayload.ps1`，使用负载私有 Python 和冻结源码 helper，并把 `PATH` 收紧为与安装态 Electron 相同的私有 Node、私有 Python 和 `System32`。负载必须在 `resources\license` 中携带固定签发公钥和产品 `VERSION`；探针先通过真实 production loader 校验路径、Windows 所有者/DACL、公钥指纹及语义版本，再在负载外的临时目录验证设备身份创建、安全读取、新进程机器码稳定，以及授权/状态资源的首次写入和原子替换。Windows 指纹必须通过 `SystemRoot` 下的绝对 PowerShell 路径执行无 shell CIM 查询，取得有效的 `Win32_ComputerSystemProduct.UUID` 或 `Win32_BaseBoard.SerialNumber`，形成强指纹且不含 `no_stable_hardware`；否则该检查阻断编译。临时 profile 根单独设置可信 ACL；不修改真实用户 profile 或负载。检查成功标记为 `WINDOWS_PAYLOAD_LICENSE_OK`；不能替代普通用户/管理员两种令牌的真机验证或安装态 UI 验收。
+`payload-import-menu-policy` 在编译前执行 `Test-LicensePayload.ps1`，使用负载私有 Python 和冻结源码 helper，并把 `PATH` 收紧为与安装态 Electron 相同的私有 Node、私有 Python 和 `System32`。负载必须在 `resources\license` 中携带固定签发公钥和产品 `VERSION`；探针先对可写的构建暂存目录校验路径、普通文件形状、唯一硬链接、公钥指纹和语义版本，再把同一字节复制到 `SystemDrive` 下一次性、受保护且与安装根形状一致的树中，通过真实 production loader 从卷根开始校验 Windows 所有者/DACL、公钥指纹及产品版本。不得把 builder 可写的 staging ACL 冒充安装态安全证据。随后在负载外的临时目录验证设备身份创建、安全读取、新进程机器码稳定，以及授权/状态资源的首次写入和原子替换。Windows 指纹必须通过 `SystemRoot` 下的绝对 PowerShell 路径执行无 shell CIM 查询，取得有效的 `Win32_ComputerSystemProduct.UUID` 或 `Win32_BaseBoard.SerialNumber`，形成强指纹且不含 `no_stable_hardware`；否则该检查阻断编译。临时安装树和 profile 根在检查后清理；不修改真实用户 profile 或负载。检查成功标记为 `WINDOWS_PAYLOAD_LICENSE_OK`；不能替代普通用户/管理员两种令牌的真机验证或安装态 UI 验收。
 
 Windows 新建授权资源显式指定当前进程用户为所有者及受保护 DACL，不依赖管理员令牌的默认所有者。读取仍拒绝非当前用户所有者、非受信任写权限和重解析资源。本次开发修复不提供旧安装权限迁移。
 

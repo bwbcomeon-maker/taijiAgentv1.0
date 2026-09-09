@@ -4,9 +4,15 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+
+
+_INSTALL_TREE_LOADER_TIMEOUT_SECONDS = 30
 
 
 def check_resources(agent: Path, root: Path, *, create: bool) -> dict:
@@ -22,12 +28,6 @@ def check_resources(agent: Path, root: Path, *, create: bool) -> dict:
     assert license_module.PRODUCTION_INSTALL_TRUST_ROOT == Path(payload.anchor)
     assert license_module.PRODUCTION_PUBLIC_KEY_PATH == expected_key_path
     assert license_module.PRODUCTION_VERSION_PATH == expected_version_path
-    public_key = license_module._load_production_public_key(
-        license_module.runtime_license_policy())
-    assert license_module._public_key_fingerprint(public_key) == (
-        license_module.PRODUCTION_PUBLIC_KEY_FINGERPRINT)
-    expected_version = expected_version_path.read_text(encoding='utf-8').strip()
-    assert license_module._load_production_version() == expected_version
     device_path = root / '.config/taiji-agent/license-device.json'
     # Redirect only canonical paths in this disposable process; keep the real
     # request, device creation and secure reader/writer implementations intact.
@@ -69,6 +69,188 @@ def check_resources(agent: Path, root: Path, *, create: bool) -> dict:
         path=state_path, profile_root=root, required=True))
     assert state['last_successful_validation_at'] == 1700010000
     return {'machine_code': request['machine_code']}
+
+
+def check_payload_verification_material(agent: Path) -> str:
+    """Check immutable bytes and layout without treating staging as installed."""
+    sys.path.insert(0, str(agent))
+    import taiji_license as license_module
+
+    payload = agent.parents[2]
+    expected = {
+        payload / 'resources/license/signing-public.pem',
+        payload / 'resources/license/VERSION',
+    }
+    for path in expected:
+        file_stat = path.lstat()
+        assert stat.S_ISREG(file_stat.st_mode)
+        assert not stat.S_ISLNK(file_stat.st_mode)
+        assert file_stat.st_nlink == 1
+        assert not (
+            getattr(file_stat, 'st_file_attributes', 0)
+            & license_module._WINDOWS_REPARSE_POINT_ATTRIBUTE
+        )
+    public_key = license_module.PRODUCTION_PUBLIC_KEY_PATH.read_text(
+        encoding='utf-8').strip()
+    assert license_module._public_key_fingerprint(public_key) == (
+        license_module.PRODUCTION_PUBLIC_KEY_FINGERPRINT)
+    version = license_module.PRODUCTION_VERSION_PATH.read_text(
+        encoding='utf-8').strip()
+    assert re.fullmatch(
+        r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)',
+        version,
+    )
+    return version
+
+
+def _set_protected_install_acl(path: Path) -> None:
+    """Give a disposable production-shaped path an installed-style ACL."""
+    import ntsecuritycon
+    import win32con
+    import win32security
+
+    administrators = win32security.ConvertStringSidToSid('S-1-5-32-544')
+    system = win32security.ConvertStringSidToSid('S-1-5-18')
+    ace_flags = 0
+    if path.is_dir():
+        ace_flags = win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE
+    acl = win32security.ACL()
+    for principal in (administrators, system):
+        acl.AddAccessAllowedAceEx(
+            win32security.ACL_REVISION,
+            ace_flags,
+            ntsecuritycon.FILE_ALL_ACCESS,
+            principal,
+        )
+    descriptor = win32security.SECURITY_DESCRIPTOR()
+    descriptor.SetSecurityDescriptorOwner(administrators, False)
+    descriptor.SetSecurityDescriptorDacl(True, acl, False)
+    descriptor.SetSecurityDescriptorControl(
+        win32security.SE_DACL_PROTECTED,
+        win32security.SE_DACL_PROTECTED,
+    )
+    win32security.SetFileSecurity(
+        str(path),
+        win32security.OWNER_SECURITY_INFORMATION
+        | win32security.DACL_SECURITY_INFORMATION
+        | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        descriptor,
+    )
+
+
+def check_disposable_install_tree(root: Path, expected_version: str) -> None:
+    """Load verification materials through the actual production validators."""
+    root = root.resolve(strict=True)
+    agent = root / 'hermes-local-lab/sources/hermes-agent'
+    sys.path.insert(0, str(agent))
+    import taiji_license as license_module
+
+    assert Path(license_module.__file__).resolve() == (agent / 'taiji_license.py').resolve()
+    assert license_module.PRODUCTION_INSTALL_ROOT == root
+    assert license_module.PRODUCTION_INSTALL_TRUST_ROOT == Path(root.anchor)
+    public_key = license_module._load_production_public_key(
+        license_module.runtime_license_policy())
+    assert license_module._public_key_fingerprint(public_key) == (
+        license_module.PRODUCTION_PUBLIC_KEY_FINGERPRINT)
+    assert license_module._load_production_version() == expected_version
+    print('WINDOWS_LICENSE_INSTALL_TREE_OK')
+
+
+def _process_detail(stdout: object, stderr: object) -> str:
+    parts = []
+    for value in (stderr, stdout):
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', 'replace')
+        text = str(value or '').strip()
+        if text:
+            parts.append(text)
+    return ' | '.join(parts) or 'no diagnostic'
+
+
+def _run_install_tree_loader(probe_root: Path, expected_version: str) -> None:
+    command = [
+        sys.executable,
+        '-I',
+        '-B',
+        str(Path(__file__).resolve()),
+        '--verify-install-tree',
+        str(probe_root),
+        expected_version,
+    ]
+    try:
+        child = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=_INSTALL_TREE_LOADER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = _process_detail(exc.stdout, exc.stderr)
+        raise RuntimeError(
+            f'Installed verification-material loader timed out after '
+            f'{_INSTALL_TREE_LOADER_TIMEOUT_SECONDS}s: {detail}'
+        ) from exc
+    detail = _process_detail(child.stdout, child.stderr)
+    if child.returncode != 0:
+        raise RuntimeError(
+            f'Installed verification-material loader failed '
+            f'(exit={child.returncode}): {detail}'
+        )
+    if child.stdout.strip() != 'WINDOWS_LICENSE_INSTALL_TREE_OK':
+        raise RuntimeError(
+            f'Installed verification-material loader returned no success marker: '
+            f'{detail}'
+        )
+
+
+def _finish_probe_cleanup(probe_root: Path, primary_error: BaseException | None) -> None:
+    try:
+        shutil.rmtree(probe_root)
+    except Exception as cleanup_error:
+        cleanup_detail = f'{type(cleanup_error).__name__}: {cleanup_error}'
+        if primary_error is not None:
+            raise RuntimeError(
+                f'{primary_error}; probe cleanup also failed: {cleanup_detail}'
+            ) from primary_error
+        raise RuntimeError(
+            f'Protected install probe cleanup failed: {cleanup_detail}'
+        ) from cleanup_error
+    if primary_error is not None:
+        raise primary_error
+
+
+def verify_disposable_install_tree(payload: Path, expected_version: str) -> None:
+    """Build a protected probe on the system volume, invoke a fresh loader, clean it."""
+    system_drive = os.environ.get('SystemDrive', '').strip()
+    if len(system_drive) != 2 or system_drive[1] != ':':
+        raise RuntimeError('SystemDrive is unavailable')
+    system_root = Path(system_drive + '\\')
+    probe_root = Path(tempfile.mkdtemp(
+        prefix='taiji-license-install-probe-', dir=system_root))
+    primary_error: BaseException | None = None
+    try:
+        agent = probe_root / 'hermes-local-lab/sources/hermes-agent'
+        resources = probe_root / 'resources/license'
+        agent.mkdir(parents=True)
+        resources.mkdir(parents=True)
+        source_agent = payload / 'hermes-local-lab/sources/hermes-agent'
+        shutil.copyfile(source_agent / 'taiji_license.py', agent / 'taiji_license.py')
+        shutil.copyfile(
+            source_agent / 'taiji_runtime_profile.py', agent / 'taiji_runtime_profile.py')
+        shutil.copyfile(
+            payload / 'resources/license/signing-public.pem',
+            resources / 'signing-public.pem',
+        )
+        shutil.copyfile(
+            payload / 'resources/license/VERSION', resources / 'VERSION')
+        paths = [probe_root, *sorted(
+            probe_root.rglob('*'), key=lambda item: (len(item.parts), str(item)))]
+        for path in paths:
+            _set_protected_install_acl(path)
+        _run_install_tree_loader(probe_root, expected_version)
+    except BaseException as exc:
+        primary_error = exc
+    _finish_probe_cleanup(probe_root, primary_error)
 
 
 def check_rejections(root: Path) -> None:
@@ -116,6 +298,8 @@ def main(payload: Path, scratch: Path) -> None:
     if scratch == payload or scratch.is_relative_to(payload):
         raise ValueError('License scratch must be outside payload')
     agent = payload / 'hermes-local-lab/sources/hermes-agent'
+    expected_version = check_payload_verification_material(agent)
+    verify_disposable_install_tree(payload, expected_version)
     with tempfile.TemporaryDirectory(prefix='license-smoke-', dir=scratch) as temporary:
         root = Path(temporary)
         # The build scratch can inherit broad ACLs. Establish only this disposable
@@ -140,7 +324,9 @@ def main(payload: Path, scratch: Path) -> None:
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--read':
+    if sys.argv[1] == '--verify-install-tree':
+        check_disposable_install_tree(Path(sys.argv[2]), sys.argv[3])
+    elif sys.argv[1] == '--read':
         print(json.dumps(check_resources(Path(sys.argv[2]), Path(sys.argv[3]), create=False)))
     else:
         main(Path(sys.argv[1]), Path(sys.argv[2]))
