@@ -18,7 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping, Optional
 
 import jwt
@@ -1365,8 +1365,27 @@ def _clean_windows_board_serial(value: Any) -> Optional[str]:
     return text
 
 
+def _windows_powershell_executable() -> Optional[str]:
+    system_root = str(os.environ.get("SystemRoot") or "").strip()
+    if not system_root:
+        return None
+    root = PureWindowsPath(system_root)
+    if not root.is_absolute() or any(part in {".", ".."} for part in root.parts):
+        return None
+    return str(
+        root
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+
+
 def _collect_windows_hardware_identifiers() -> dict[str, Optional[str]]:
     if sys.platform != "win32":
+        return {}
+    powershell = _windows_powershell_executable()
+    if not powershell:
         return {}
     script = """
 $productUuid = try {
@@ -1385,7 +1404,7 @@ $boardSerial = try {
     try:
         result = subprocess.run(
             [
-                "powershell.exe",
+                powershell,
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",

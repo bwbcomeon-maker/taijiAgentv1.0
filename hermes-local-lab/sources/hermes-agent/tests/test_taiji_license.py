@@ -2040,6 +2040,7 @@ def test_windows_machine_fingerprint_uses_cim_hardware_identifiers(monkeypatch, 
         types.SimpleNamespace(platform="win32"),
         raising=False,
     )
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
     monkeypatch.setattr(taiji_license.subprocess, "run", fake_run)
     monkeypatch.setattr(taiji_license, "_read_machine_file", lambda path: None)
     monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: [])
@@ -2056,7 +2057,9 @@ def test_windows_machine_fingerprint_uses_cim_hardware_identifiers(monkeypatch, 
     )
 
     assert calls
-    assert calls[0][0][0].lower().endswith("powershell.exe")
+    assert calls[0][0][0] == (
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    )
     assert calls[0][1]["shell"] is False
     assert fingerprint["fingerprint_quality"] == "strong"
     assert "no_stable_hardware" not in fingerprint["risk_flags"]
@@ -2065,6 +2068,33 @@ def test_windows_machine_fingerprint_uses_cim_hardware_identifiers(monkeypatch, 
         for signal in fingerprint["signals"]
         if signal["name"] in {"dmi_product_uuid", "dmi_board_serial"}
     } == {"dmi_product_uuid": True, "dmi_board_serial": True}
+
+
+@pytest.mark.parametrize("system_root", [None, "relative\\windows"])
+def test_windows_hardware_collection_requires_absolute_system_root(
+    monkeypatch,
+    system_root,
+):
+    calls = []
+
+    monkeypatch.setattr(
+        taiji_license,
+        "sys",
+        types.SimpleNamespace(platform="win32"),
+        raising=False,
+    )
+    if system_root is None:
+        monkeypatch.delenv("SystemRoot", raising=False)
+    else:
+        monkeypatch.setenv("SystemRoot", system_root)
+    monkeypatch.setattr(
+        taiji_license.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert taiji_license._collect_windows_hardware_identifiers() == {}
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -2126,6 +2156,7 @@ def test_windows_machine_fingerprint_rejects_unstable_cim_results(
         types.SimpleNamespace(platform="win32"),
         raising=False,
     )
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
     monkeypatch.setattr(taiji_license.subprocess, "run", fake_run)
     monkeypatch.setattr(taiji_license, "_read_machine_file", lambda path: None)
     monkeypatch.setattr(taiji_license, "_collect_linux_physical_macs", lambda: [])
@@ -2144,7 +2175,7 @@ def test_windows_machine_fingerprint_rejects_unstable_cim_results(
     assert calls
     command, kwargs = calls[0]
     assert command[:5] == [
-        "powershell.exe",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
