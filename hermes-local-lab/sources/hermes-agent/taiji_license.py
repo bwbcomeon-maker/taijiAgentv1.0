@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import logging
 import os
 import re
 import secrets
@@ -531,7 +532,7 @@ def _open_windows_directory_shape(path: Path) -> Any:
         None,
         win32con.OPEN_EXISTING,
         win32con.FILE_FLAG_BACKUP_SEMANTICS
-        | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+        | _WINDOWS_OPEN_REPARSE_POINT,
         None,
     )
     try:
@@ -594,7 +595,7 @@ def _read_windows_resource_handle(
                 win32con.FILE_SHARE_READ,
                 None,
                 win32con.OPEN_EXISTING,
-                win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+                _WINDOWS_OPEN_REPARSE_POINT,
                 None,
             )
         except Exception as exc:
@@ -900,6 +901,42 @@ def _rename_windows_handle(handle: Any, final_path: Path) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+# Win32 CreateFile flag; pywin32 exposes it in win32file, not win32con.
+_WINDOWS_OPEN_REPARSE_POINT = 0x00200000
+
+
+def _windows_runtime_security_attributes():
+    """Assign the process user at creation, including elevated admin tokens."""
+    import win32api
+    import win32con
+    import win32security
+    import ntsecuritycon
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        token.Close()
+    descriptor = win32security.SECURITY_DESCRIPTOR()
+    descriptor.SetSecurityDescriptorOwner(user, False)
+    acl = win32security.ACL()
+    principals = {win32security.ConvertSidToStringSid(user), *_WINDOWS_TRUSTED_SYSTEM_SIDS}
+    for sid in sorted(principals):
+        acl.AddAccessAllowedAceEx(
+            win32security.ACL_REVISION,
+            win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE,
+            ntsecuritycon.FILE_ALL_ACCESS,
+            win32security.ConvertStringSidToSid(sid),
+        )
+    descriptor.SetSecurityDescriptorDacl(True, acl, False)
+    descriptor.SetSecurityDescriptorControl(
+        win32security.SE_DACL_PROTECTED, win32security.SE_DACL_PROTECTED)
+    attributes = win32security.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = descriptor
+    attributes.bInheritHandle = False
+    return attributes
+
+
 def _open_trusted_windows_directory(path: Path) -> Any:
     import win32con
     import win32file
@@ -911,7 +948,7 @@ def _open_trusted_windows_directory(path: Path) -> Any:
         None,
         win32con.OPEN_EXISTING,
         win32con.FILE_FLAG_BACKUP_SEMANTICS
-        | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+        | _WINDOWS_OPEN_REPARSE_POINT,
         None,
     )
     try:
@@ -945,10 +982,13 @@ def _secure_windows_atomic_write_runtime_resource(
     tmp_path: Path | None = None
     file_handle: Any = None
     verification_handle: Any = None
+    stage = "security_attributes"
     try:
         import win32con
         import win32file
 
+        security_attributes = _windows_runtime_security_attributes()
+        stage = "directory_validation"
         current = root
         directory_handles.append(_open_trusted_windows_directory(current))
         for part in parts[:-1]:
@@ -956,7 +996,7 @@ def _secure_windows_atomic_write_runtime_resource(
             try:
                 current.lstat()
             except FileNotFoundError:
-                win32file.CreateDirectory(str(current), None)
+                win32file.CreateDirectory(str(current), security_attributes)
             directory_handles.append(_open_trusted_windows_directory(current))
 
         final_path = current / parts[-1]
@@ -975,14 +1015,15 @@ def _secure_windows_atomic_write_runtime_resource(
         tmp_path = final_path.with_name(
             f".{final_path.name}.{secrets.token_hex(16)}.tmp"
         )
+        stage = "file_creation"
         file_handle = win32file.CreateFile(
             str(tmp_path),
             win32con.GENERIC_WRITE | win32con.DELETE,
             win32con.FILE_SHARE_READ,
-            None,
+            security_attributes,
             win32con.CREATE_NEW,
             win32con.FILE_ATTRIBUTE_NORMAL
-            | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+            | _WINDOWS_OPEN_REPARSE_POINT,
             None,
         )
         information = win32file.GetFileInformationByHandle(file_handle)
@@ -994,6 +1035,7 @@ def _secure_windows_atomic_write_runtime_resource(
         ):
             raise _LicenseUserResourceError
         original_identity = (int(information[4]), int(information[8]), int(information[9]))
+        stage = "file_write"
         payload = text.encode("utf-8")
         offset = 0
         while offset < len(payload):
@@ -1002,6 +1044,7 @@ def _secure_windows_atomic_write_runtime_resource(
                 raise _LicenseUserResourceError
             offset += int(written)
         win32file.FlushFileBuffers(file_handle)
+        stage = "rename"
         _rename_windows_handle(file_handle, final_path)
         tmp_path = None
         renamed_information = win32file.GetFileInformationByHandle(file_handle)
@@ -1012,6 +1055,7 @@ def _secure_windows_atomic_write_runtime_resource(
         )
         if renamed_identity != original_identity:
             raise _LicenseUserResourceError
+        stage = "readback"
         verification_handle = win32file.CreateFile(
             str(final_path),
             win32con.GENERIC_READ,
@@ -1020,7 +1064,7 @@ def _secure_windows_atomic_write_runtime_resource(
             | win32con.FILE_SHARE_DELETE,
             None,
             win32con.OPEN_EXISTING,
-            win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+            _WINDOWS_OPEN_REPARSE_POINT,
             None,
         )
         verification_information = win32file.GetFileInformationByHandle(
@@ -1039,15 +1083,17 @@ def _secure_windows_atomic_write_runtime_resource(
             or verification_identity != original_identity
         ):
             raise _LicenseUserResourceError
+        stage = "owner_validation"
         _validate_windows_path_security(
             final_path,
             required=True,
             require_current_user_owner=True,
             ancestor_stop=root,
         )
-    except _LicenseUserResourceError:
-        raise
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Windows license write failed stage=%s error=%s winerror=%s",
+            stage, type(exc).__name__, getattr(exc, "winerror", None))
         raise _LicenseUserResourceError from None
     finally:
         close_failed = False

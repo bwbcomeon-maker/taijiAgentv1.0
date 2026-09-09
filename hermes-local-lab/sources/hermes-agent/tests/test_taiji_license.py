@@ -1109,6 +1109,8 @@ def test_windows_path_security_rejects_reparse_and_hardlink(
 def test_secure_runtime_write_rejects_windows_reparse_missing_parent(
     monkeypatch, tmp_path
 ):
+    security = object()
+    monkeypatch.setattr(taiji_license, "_windows_runtime_security_attributes", lambda: security)
     profile = tmp_path / "profile"
     profile.mkdir()
     missing_parent = profile / "missing"
@@ -1152,7 +1154,6 @@ def test_secure_runtime_write_rejects_windows_reparse_missing_parent(
         FILE_ATTRIBUTE_DIRECTORY=0x0010,
         FILE_ATTRIBUTE_REPARSE_POINT=0x0400,
         FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
-        FILE_FLAG_OPEN_REPARSE_POINT=0x00200000,
         MOVEFILE_REPLACE_EXISTING=1,
         MOVEFILE_WRITE_THROUGH=8,
     )
@@ -1194,6 +1195,8 @@ def test_secure_runtime_write_rejects_windows_reparse_missing_parent(
 def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
     monkeypatch, tmp_path, final_identity_matches
 ):
+    security = object()
+    monkeypatch.setattr(taiji_license, "_windows_runtime_security_attributes", lambda: security)
     profile = tmp_path / "profile"
     profile.mkdir()
     target = profile / "license-device.json"
@@ -1212,6 +1215,8 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
             events.append(("close", self.path))
 
     def create_file(path, access, share, _security, creation, flags, _template):
+        if creation == 1:
+            assert _security is security
         handle = FakeHandle(path)
         create_calls.append((handle, access, share, creation, flags))
         events.append(("open", handle.path, access, share))
@@ -1249,7 +1254,6 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
         FILE_ATTRIBUTE_DIRECTORY=0x0010,
         FILE_ATTRIBUTE_REPARSE_POINT=0x0400,
         FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
-        FILE_FLAG_OPEN_REPARSE_POINT=0x00200000,
         MOVEFILE_REPLACE_EXISTING=1,
         MOVEFILE_WRITE_THROUGH=8,
     )
@@ -1875,7 +1879,6 @@ def test_windows_candidate_outside_profile_uses_single_safe_handle(
         FILE_ATTRIBUTE_DIRECTORY=0x0010,
         FILE_ATTRIBUTE_REPARSE_POINT=0x0400,
         FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
-        FILE_FLAG_OPEN_REPARSE_POINT=0x00200000,
     )
     monkeypatch.setattr(
         taiji_license,
@@ -2852,3 +2855,39 @@ def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_pat
         machine_fingerprint=LEGACY_V2_MACHINE_FINGERPRINT,
     )
     assert accepted.status == "valid"
+
+
+
+def test_windows_runtime_security_attributes_assign_process_user(monkeypatch):
+    class Descriptor:
+        def SetSecurityDescriptorOwner(self, owner, defaulted):
+            self.owner = owner
+        def SetSecurityDescriptorDacl(self, present, acl, defaulted):
+            self.acl = acl
+        def SetSecurityDescriptorControl(self, mask, value):
+            self.control = (mask, value)
+    class ACL:
+        def __init__(self):
+            self.entries = []
+        def AddAccessAllowedAceEx(self, revision, flags, access, sid):
+            self.entries.append((flags, access, sid))
+    closed = []
+    monkeypatch.setitem(sys.modules, 'win32api', types.SimpleNamespace(GetCurrentProcess=lambda: 1))
+    monkeypatch.setitem(sys.modules, 'win32con', types.SimpleNamespace(
+        TOKEN_QUERY=8, OBJECT_INHERIT_ACE=1, CONTAINER_INHERIT_ACE=2))
+    monkeypatch.setitem(sys.modules, 'ntsecuritycon', types.SimpleNamespace(FILE_ALL_ACCESS=0x1f01ff))
+    monkeypatch.setitem(sys.modules, 'win32security', types.SimpleNamespace(
+        OpenProcessToken=lambda *args: types.SimpleNamespace(Close=lambda: closed.append(True)),
+        GetTokenInformation=lambda *args: ('S-1-5-21-user',),
+        TokenUser=1, SECURITY_DESCRIPTOR=Descriptor, ACL=ACL,
+        ACL_REVISION=2, SE_DACL_PROTECTED=0x1000,
+        ConvertSidToStringSid=lambda sid: sid, ConvertStringSidToSid=lambda sid: sid,
+        SECURITY_ATTRIBUTES=types.SimpleNamespace))
+    attributes = taiji_license._windows_runtime_security_attributes()
+    descriptor = attributes.SECURITY_DESCRIPTOR
+    assert descriptor.owner == 'S-1-5-21-user'
+    assert descriptor.control == (0x1000, 0x1000)
+    assert set(descriptor.acl.entries) == {
+        (3, 0x1f01ff, sid) for sid in ('S-1-5-21-user', 'S-1-5-18', 'S-1-5-32-544')}
+    assert attributes.bInheritHandle is False
+    assert closed == [True]
