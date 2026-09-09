@@ -15,6 +15,19 @@ def check_resources(agent: Path, root: Path, *, create: bool) -> dict:
 
     if Path(license_module.__file__).resolve() != (agent / 'taiji_license.py').resolve():
         raise RuntimeError('License module outside payload')
+    payload = agent.parents[2]
+    expected_key_path = payload / 'resources/license/signing-public.pem'
+    expected_version_path = payload / 'resources/license/VERSION'
+    assert license_module.PRODUCTION_INSTALL_ROOT == payload
+    assert license_module.PRODUCTION_INSTALL_TRUST_ROOT == Path(payload.anchor)
+    assert license_module.PRODUCTION_PUBLIC_KEY_PATH == expected_key_path
+    assert license_module.PRODUCTION_VERSION_PATH == expected_version_path
+    public_key = license_module._load_production_public_key(
+        license_module.runtime_license_policy())
+    assert license_module._public_key_fingerprint(public_key) == (
+        license_module.PRODUCTION_PUBLIC_KEY_FINGERPRINT)
+    expected_version = expected_version_path.read_text(encoding='utf-8').strip()
+    assert license_module._load_production_version() == expected_version
     device_path = root / '.config/taiji-agent/license-device.json'
     # Redirect only canonical paths in this disposable process; keep the real
     # request, device creation and secure reader/writer implementations intact.

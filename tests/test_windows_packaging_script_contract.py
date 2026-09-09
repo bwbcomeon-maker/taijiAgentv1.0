@@ -194,6 +194,15 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         ):
             self.assertNotIn(obsolete, text)
 
+    def test_payload_stages_and_loads_pinned_license_verification_material(self):
+        stage = read_script(STAGE)
+        smoke = read_script(WINDOWS_ROOT / "license_payload_smoke.py")
+        self.assertIn("tools\\taiji-license-issuer\\private\\signing-public.pem", stage)
+        self.assertIn("resources\\license\\signing-public.pem", stage)
+        self.assertIn("resources\\license\\VERSION", stage)
+        self.assertIn("_load_production_public_key", smoke)
+        self.assertIn("_load_production_version", smoke)
+
     def test_inno_payload_hygiene_uses_extended_path_enumeration(self):
         text = read_script(BUILD)
         self.assertIn("function ConvertTo-ExtendedPath", text)

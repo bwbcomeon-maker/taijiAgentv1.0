@@ -91,9 +91,31 @@ LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV = "TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_B
 VERSION_ENV = "TAIJI_AGENT_VERSION"
 PRODUCTION_LICENSE_POLICY_VERSION = 1
 RUNTIME_LICENSE_POLICY_NAME = "unified-runtime"
-PRODUCTION_PUBLIC_KEY_PATH = Path("/opt/taiji-agent/resources/license/signing-public.pem")
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+PRODUCTION_INSTALL_ROOT = (
+    Path(__file__).resolve().parents[3]
+    if _is_windows_platform()
+    else Path("/opt/taiji-agent")
+)
+PRODUCTION_INSTALL_TRUST_ROOT = (
+    Path(PRODUCTION_INSTALL_ROOT.anchor)
+    if _is_windows_platform()
+    else PRODUCTION_INSTALL_ROOT
+)
+PRODUCTION_PUBLIC_KEY_PATH = (
+    PRODUCTION_INSTALL_ROOT / "resources/license/signing-public.pem"
+)
 PRODUCTION_PUBLIC_KEY_FINGERPRINT = "2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
-PRODUCTION_VERSION_PATH = Path("/opt/taiji-agent/VERSION")
+PRODUCTION_VERSION_PATH = (
+    PRODUCTION_INSTALL_ROOT / "resources/license/VERSION"
+    if _is_windows_platform()
+    else PRODUCTION_INSTALL_ROOT / "VERSION"
+)
 PRODUCTION_USER_HOME = _system_account_home()
 PRODUCTION_LICENSE_PATH = (
     PRODUCTION_USER_HOME / ".config/taiji-agent/licenses/active-license.jwt"
@@ -2305,6 +2327,12 @@ def _production_parent_untrusted_reason(
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x0400
 _WINDOWS_INHERIT_ONLY_ACE = 0x08
 _WINDOWS_TRUSTED_SYSTEM_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544"})
+_WINDOWS_TRUSTED_INSTALLER_SIDS = frozenset(
+    {
+        # Windows Modules Installer owns and services standard Program Files ACLs.
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }
+)
 _WINDOWS_WRITE_ACCESS_MASK = (
     0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
     | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
@@ -2389,11 +2417,18 @@ def _windows_acl_is_trusted(
     current_user_sid: str,
     require_current_user_owner: bool,
     dangerous_access_mask: int = _WINDOWS_WRITE_ACCESS_MASK,
+    additional_trusted_sids: frozenset[str] = frozenset(),
+    trust_current_user: bool = True,
 ) -> bool:
     """Reject ownership or effective write grants outside the trusted principals."""
     owner = owner_sid.upper()
     current = current_user_sid.upper()
-    trusted_sids = {current, *_WINDOWS_TRUSTED_SYSTEM_SIDS}
+    trusted_sids = {
+        *_WINDOWS_TRUSTED_SYSTEM_SIDS,
+        *(sid.upper() for sid in additional_trusted_sids),
+    }
+    if trust_current_user:
+        trusted_sids.add(current)
     if require_current_user_owner:
         if owner != current:
             return False
@@ -2437,6 +2472,8 @@ def _validate_windows_path_security(
     required: bool,
     require_current_user_owner: bool,
     ancestor_stop: Path | None = None,
+    additional_trusted_sids: frozenset[str] = frozenset(),
+    trust_current_user: bool = True,
 ) -> bool:
     """Validate Windows file identity, link shape, ownership, ACL, and ancestors."""
     file_stat: os.stat_result | None
@@ -2469,8 +2506,15 @@ def _validate_windows_path_security(
                 current_user_sid=parent_current,
                 require_current_user_owner=False,
                 dangerous_access_mask=_WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK,
+                additional_trusted_sids=additional_trusted_sids,
+                trust_current_user=trust_current_user,
             ):
-                trusted_owners = {parent_current.upper(), *_WINDOWS_TRUSTED_SYSTEM_SIDS}
+                trusted_owners = {
+                    *_WINDOWS_TRUSTED_SYSTEM_SIDS,
+                    *(sid.upper() for sid in additional_trusted_sids),
+                }
+                if trust_current_user:
+                    trusted_owners.add(parent_current.upper())
                 reason = "owner" if parent_owner.upper() not in trusted_owners else "acl"
                 raise _LicenseUserResourceError(reason)
 
@@ -2492,6 +2536,8 @@ def _validate_windows_path_security(
             entries=entries,
             current_user_sid=current_sid,
             require_current_user_owner=require_current_user_owner,
+            additional_trusted_sids=additional_trusted_sids,
+            trust_current_user=trust_current_user,
         ):
             reason = "owner" if require_current_user_owner and owner_sid.upper() != current_sid.upper() else "acl"
             raise _LicenseUserResourceError(reason)
@@ -2575,18 +2621,28 @@ def _load_production_public_key(policy: LicensePolicy) -> str:
     if path != PRODUCTION_PUBLIC_KEY_PATH or not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise _LicensePublicKeyError
     try:
-        file_stat = path.lstat()
-        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-            raise _LicensePublicKeyError
-        if file_stat.st_uid != 0 or stat.S_IMODE(file_stat.st_mode) != 0o644:
-            raise _LicensePublicKeyError
-        for parent in path.parents:
-            parent_stat = parent.lstat()
-            if not _trusted_production_parent(parent_stat, user_uid=None):
+        if _is_windows_platform():
+            _validate_windows_path_security(
+                path,
+                required=True,
+                require_current_user_owner=False,
+                ancestor_stop=PRODUCTION_INSTALL_TRUST_ROOT,
+                additional_trusted_sids=_WINDOWS_TRUSTED_INSTALLER_SIDS,
+                trust_current_user=False,
+            )
+        else:
+            file_stat = path.lstat()
+            if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
                 raise _LicensePublicKeyError
+            if file_stat.st_uid != 0 or stat.S_IMODE(file_stat.st_mode) != 0o644:
+                raise _LicensePublicKeyError
+            for parent in path.parents:
+                parent_stat = parent.lstat()
+                if not _trusted_production_parent(parent_stat, user_uid=None):
+                    raise _LicensePublicKeyError
         public_key_pem = path.read_text(encoding="utf-8").strip()
         actual = _public_key_fingerprint(public_key_pem)
-    except (OSError, ValueError, TypeError):
+    except (OSError, UnicodeError, ValueError, TypeError, _LicenseUserResourceError):
         raise _LicensePublicKeyError from None
     if not hmac.compare_digest(actual, expected):
         raise _LicensePublicKeyError
@@ -2596,17 +2652,27 @@ def _load_production_public_key(policy: LicensePolicy) -> str:
 def _load_production_version() -> str:
     path = PRODUCTION_VERSION_PATH
     try:
-        file_stat = path.lstat()
-        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-            raise _LicenseVersionError
-        if file_stat.st_uid != 0 or stat.S_IMODE(file_stat.st_mode) != 0o644:
-            raise _LicenseVersionError
-        for parent in path.parents:
-            parent_stat = parent.lstat()
-            if not _trusted_production_parent(parent_stat, user_uid=None):
+        if _is_windows_platform():
+            _validate_windows_path_security(
+                path,
+                required=True,
+                require_current_user_owner=False,
+                ancestor_stop=PRODUCTION_INSTALL_TRUST_ROOT,
+                additional_trusted_sids=_WINDOWS_TRUSTED_INSTALLER_SIDS,
+                trust_current_user=False,
+            )
+        else:
+            file_stat = path.lstat()
+            if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
                 raise _LicenseVersionError
+            if file_stat.st_uid != 0 or stat.S_IMODE(file_stat.st_mode) != 0o644:
+                raise _LicenseVersionError
+            for parent in path.parents:
+                parent_stat = parent.lstat()
+                if not _trusted_production_parent(parent_stat, user_uid=None):
+                    raise _LicenseVersionError
         version = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError, _LicenseUserResourceError):
         raise _LicenseVersionError from None
     if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is None:
         raise _LicenseVersionError

@@ -503,6 +503,15 @@ Copy-Item -LiteralPath $packageJson -Destination (Join-PathText $appRoot 'packag
 # resources\app\src is staged explicitly from the safe desktop source.
 Copy-Item -LiteralPath $desktopSrc -Destination (Join-PathText $appRoot 'src') -Recurse -Force
 
+$licensePublicKeySource = Join-PathText $sourceRoot 'tools\taiji-license-issuer\private\signing-public.pem'
+$productVersionSource = Join-PathText $sourceRoot 'VERSION'
+Assert-RegularFile $licensePublicKeySource 'license verification public key'
+Assert-RegularFile $productVersionSource 'product version'
+$licenseResourceRoot = Join-PathText $payloadRoot 'resources\license'
+New-Item -ItemType Directory -Path $licenseResourceRoot -Force | Out-Null
+Copy-Item -LiteralPath $licensePublicKeySource -Destination (Join-PathText $payloadRoot 'resources\license\signing-public.pem') -Force
+Copy-Item -LiteralPath $productVersionSource -Destination (Join-PathText $payloadRoot 'resources\license\VERSION') -Force
+
 $agentSource = Join-PathText $sourceRoot 'hermes-local-lab\sources\hermes-agent'
 $webuiSource = Join-PathText $sourceRoot 'hermes-local-lab\sources\hermes-webui'
 if (-not (Test-Path -LiteralPath $agentSource -PathType Container)) {

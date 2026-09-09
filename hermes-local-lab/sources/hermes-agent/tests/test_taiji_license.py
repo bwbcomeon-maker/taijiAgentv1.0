@@ -1040,6 +1040,69 @@ def test_windows_acl_trust_rejects_foreign_owner_or_writer(
     )
 
 
+def test_windows_install_acl_has_separate_trust_from_user_resources():
+    trusted_installer = next(iter(taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS))
+    installed_entries = [
+        (0, 0, 0x000D0040, trusted_installer),
+        (0, 0, 0x001200A9, "S-1-5-32-545"),
+    ]
+    assert taiji_license._windows_acl_is_trusted(
+        owner_sid="S-1-5-32-544",
+        entries=installed_entries,
+        current_user_sid="S-1-5-21-current",
+        require_current_user_owner=False,
+        additional_trusted_sids=taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS,
+        trust_current_user=False,
+    )
+    assert not taiji_license._windows_acl_is_trusted(
+        owner_sid="S-1-5-32-544",
+        entries=[(0, 0, 0x000D0040, "S-1-5-21-current")],
+        current_user_sid="S-1-5-21-current",
+        require_current_user_owner=False,
+        additional_trusted_sids=taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS,
+        trust_current_user=False,
+    )
+    assert not taiji_license._windows_acl_is_trusted(
+        owner_sid="S-1-5-21-current",
+        entries=[
+            (0, 0, 0x0002, "S-1-5-21-current"),
+            (0, 0, 0x0002, trusted_installer),
+        ],
+        current_user_sid="S-1-5-21-current",
+        require_current_user_owner=True,
+    )
+
+
+def test_windows_installed_resource_rejects_replaceable_install_parent(
+    monkeypatch, tmp_path
+):
+    volume_root = tmp_path / "volume"
+    program_files = volume_root / "Program Files"
+    install_root = program_files / "Taiji Agent"
+    candidate = install_root / "resources/license/VERSION"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("1.0.2\n", encoding="utf-8")
+
+    def security_snapshot(path):
+        entries = [(0, 0, 0x10000000, "S-1-5-18")]
+        if path == program_files:
+            entries.append((0, 0, 0x00000040, "S-1-5-21-other"))
+        return "S-1-5-32-544", "S-1-5-21-current", entries
+
+    monkeypatch.setattr(
+        taiji_license, "_windows_security_snapshot", security_snapshot
+    )
+    with pytest.raises(taiji_license._LicenseUserResourceError, match="acl"):
+        taiji_license._validate_windows_path_security(
+            candidate,
+            required=True,
+            require_current_user_owner=False,
+            ancestor_stop=volume_root,
+            additional_trusted_sids=taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS,
+            trust_current_user=False,
+        )
+
+
 @pytest.mark.parametrize(
     ("access_mask", "expected"),
     [
@@ -1421,6 +1484,84 @@ def test_production_version_accepts_root_group_writable_root_parent(
     monkeypatch.setattr(taiji_license, "PRODUCTION_VERSION_PATH", version_path)
 
     assert taiji_license._load_production_version() == "1.0.2"
+
+
+def test_windows_production_public_key_uses_windows_path_security(
+    monkeypatch, tmp_path, signing_keys
+):
+    _, public_key = signing_keys
+    install_root = tmp_path / "Taiji Agent"
+    key_path = install_root / "resources/license/signing-public.pem"
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text(public_key, encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(taiji_license, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_INSTALL_ROOT", install_root)
+    monkeypatch.setattr(
+        taiji_license, "PRODUCTION_INSTALL_TRUST_ROOT", install_root.parent
+    )
+    monkeypatch.setattr(taiji_license, "PRODUCTION_PUBLIC_KEY_PATH", key_path)
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_windows_path_security",
+        lambda path, **kwargs: calls.append((path, kwargs)) or True,
+    )
+    policy = taiji_license.replace(
+        taiji_license.runtime_license_policy(),
+        public_key_path=key_path,
+        public_key_fingerprint=taiji_license._public_key_fingerprint(public_key),
+    )
+
+    assert taiji_license._load_production_public_key(policy) == public_key.strip()
+    assert calls == [
+        (
+            key_path,
+            {
+                "required": True,
+                "require_current_user_owner": False,
+                "ancestor_stop": install_root.parent,
+                "additional_trusted_sids": (
+                    taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS
+                ),
+                "trust_current_user": False,
+            },
+        )
+    ]
+
+
+def test_windows_production_version_uses_windows_path_security(monkeypatch, tmp_path):
+    install_root = tmp_path / "Taiji Agent"
+    version_path = install_root / "resources/license/VERSION"
+    version_path.parent.mkdir(parents=True)
+    version_path.write_text("1.0.2\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(taiji_license, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_INSTALL_ROOT", install_root)
+    monkeypatch.setattr(
+        taiji_license, "PRODUCTION_INSTALL_TRUST_ROOT", install_root.parent
+    )
+    monkeypatch.setattr(taiji_license, "PRODUCTION_VERSION_PATH", version_path)
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_windows_path_security",
+        lambda path, **kwargs: calls.append((path, kwargs)) or True,
+    )
+
+    assert taiji_license._load_production_version() == "1.0.2"
+    assert calls == [
+        (
+            version_path,
+            {
+                "required": True,
+                "require_current_user_owner": False,
+                "ancestor_stop": install_root.parent,
+                "additional_trusted_sids": (
+                    taiji_license._WINDOWS_TRUSTED_INSTALLER_SIDS
+                ),
+                "trust_current_user": False,
+            },
+        )
+    ]
 
 
 def test_source_runtime_loaders_accept_pinned_repo_resources():
