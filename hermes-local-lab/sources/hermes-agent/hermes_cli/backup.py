@@ -70,6 +70,7 @@ _CREDENTIAL_TRANSACTION_ARTIFACT_NAMES = {
     ".taiji-credential-transaction.lock",
     ".taiji-credential-pair-intent.json",
     ".taiji-credential-pair-abort.json",
+    ".taiji-credential-windows-intent.json",
 }
 
 

@@ -10158,6 +10158,8 @@ def _configuration_mutation_error_response(handler, exc: RuntimeError):
     if error_code in {
         "managed_configuration",
         "configuration_conflict",
+        "credential_storage_error",
+        "credential_recovery_required",
     }:
         return j(
             handler,
@@ -12149,6 +12151,7 @@ from api.run_journal import (
     stale_interrupted_event,
 )
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
+from agent.provider_credentials import WindowsCredentialStorageError
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -16477,7 +16480,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         if api_key is not None:
             api_key = str(api_key).strip() or None
-        result = set_provider_key(provider_id, api_key)
+        try:
+            result = set_provider_key(provider_id, api_key)
+        except WindowsCredentialStorageError as exc:
+            return _configuration_mutation_error_response(handler, exc)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
@@ -16486,7 +16492,10 @@ def handle_post(handler, parsed) -> bool:
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
             return bad(handler, "provider is required")
-        result = remove_provider_key(provider_id)
+        try:
+            result = remove_provider_key(provider_id)
+        except WindowsCredentialStorageError as exc:
+            return _configuration_mutation_error_response(handler, exc)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)

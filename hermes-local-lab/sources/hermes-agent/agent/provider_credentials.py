@@ -116,6 +116,7 @@ _RUNTIME_ENV_PROJECTIONS: dict[str, object] = {}
 _CREDENTIAL_LOCK_NAME = ".taiji-credential-transaction.lock"
 _CREDENTIAL_JOURNAL_NAME = ".taiji-credential-pair-intent.json"
 _CREDENTIAL_ABORT_JOURNAL_NAME = ".taiji-credential-pair-abort.json"
+WINDOWS_CREDENTIAL_INTENT_NAME = ".taiji-credential-windows-intent.json"
 _CREDENTIAL_JOURNAL_SCHEMA = "taiji-credential-pair-intent/v1"
 _CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA = (
     "taiji-credential-pair-intent/v2"
@@ -158,6 +159,18 @@ class CredentialSnapshot:
 
 class CredentialRecoveryError(RuntimeError):
     """A pending credential transaction cannot be proven safe to recover."""
+
+
+class WindowsCredentialStorageError(CredentialRecoveryError):
+    """Sanitized, actionable Windows persistence failure for HTTP callers."""
+
+    code = "credential_storage_error"
+
+
+class WindowsCredentialRecoveryError(WindowsCredentialStorageError):
+    """Publication may be partial; retain evidence and recover before reads."""
+
+    code = "credential_recovery_required"
 
 
 class _CredentialCompareAndSwapError(CredentialRecoveryError):
@@ -444,6 +457,7 @@ def _validate_credential_config_name(path: Path) -> None:
         _CREDENTIAL_LOCK_NAME,
         _CREDENTIAL_JOURNAL_NAME,
         _CREDENTIAL_ABORT_JOURNAL_NAME,
+        WINDOWS_CREDENTIAL_INTENT_NAME,
     }
     if (
         path.name in reserved_names
@@ -3033,6 +3047,10 @@ def _recover_pending_transaction_unlocked(
     *,
     logical_config_path: Path | None = None,
 ) -> str:
+    if _credential_platform_name() == "win32":
+        from agent import windows_credential_store
+
+        return windows_credential_store.recover(sys.modules[__name__])
     _assert_active_resource_dirs_unchanged()
     pending = _read_pending_transaction_journal(lock_root)
     if pending is None:
@@ -3487,6 +3505,11 @@ def _commit_credential_targets(
     *,
     env_keys: list[str],
 ) -> None:
+    if _credential_platform_name() == "win32":
+        from agent import windows_credential_store
+
+        windows_credential_store.commit(sys.modules[__name__], target_specs, env_keys)
+        return
     _require_secure_pair_transaction_platform()
     active_spec = getattr(_CREDENTIAL_TRANSACTION_STATE, "spec", None)
     if not isinstance(active_spec, _CredentialTransactionSpec):

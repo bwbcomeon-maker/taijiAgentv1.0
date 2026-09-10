@@ -43,6 +43,7 @@ from api.config import (
     reload_config,
 )
 from api.provider_endpoints import public_endpoint
+from agent.provider_credentials import WindowsCredentialStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -2137,6 +2138,8 @@ def _set_provider_key_locked(
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    except WindowsCredentialStorageError:
+        raise
     except Exception as exc:
         logger.exception("Failed to write env file for provider %s", provider_id)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
@@ -2276,6 +2279,8 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
                 )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    except WindowsCredentialStorageError:
+        raise
     except Exception as exc:
         logger.exception("Failed to remove provider key for %s", provider_id)
         return {"ok": False, "error": f"Failed to remove API key: {exc}"}

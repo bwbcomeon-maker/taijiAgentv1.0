@@ -844,6 +844,8 @@ class TestImport:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         artifacts = (
             ".taiji-credential-pair-intent.json",
+            ".taiji-credential-windows-intent.json",
+            "profiles/coder/.taiji-credential-windows-intent.json",
             "profiles/coder/.taiji-credential-pair-abort.json",
             (
                 "profiles/coder/.taiji-credential-config.yaml-"
