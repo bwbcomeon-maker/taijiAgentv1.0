@@ -26,3 +26,17 @@ test("startRuntime keeps the selected WebUI port in scope through desktop naviga
   assert.ok(navigation > selection, "desktop navigation must reuse the selected WebUI port");
   assert.doesNotMatch(source, /const webuiPort\s*=/);
 });
+
+test("the Windows main window hides the native application menu bar", () => {
+  const start = mainSource.indexOf("async function createWindow() {");
+  const end = mainSource.indexOf("\nif (!gotSingleInstanceLock)", start);
+  assert.notEqual(start, -1, "createWindow must exist");
+  assert.notEqual(end, -1, "createWindow boundary must exist");
+
+  const source = mainSource.slice(start, end);
+  assert.match(
+    source,
+    /autoHideMenuBar:\s*process\.platform === "linux"\s*\|\|\s*process\.platform === "win32"/,
+    "Windows must hide Electron's native application menu bar by default",
+  );
+});

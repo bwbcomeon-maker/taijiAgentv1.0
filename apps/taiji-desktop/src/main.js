@@ -860,7 +860,7 @@ async function createWindow() {
     title: APP_NAME,
     icon: iconPath || undefined,
     backgroundColor: DESKTOP_CHROME_BACKGROUND,
-    autoHideMenuBar: process.platform === "linux",
+    autoHideMenuBar: process.platform === "linux" || process.platform === "win32",
     ...(process.platform === "darwin" ? {
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 16, y: 16 }
