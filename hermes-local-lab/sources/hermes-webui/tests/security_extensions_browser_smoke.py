@@ -77,12 +77,15 @@ def main():
                     page.route_web_socket("**/*", lambda ws: ws.close())
                     page.goto(origin, wait_until="load")
                     page.evaluate("() => openSecuritySettings()")
+                    profile = page.locator("#settingsSecurityProfileSelect")
                     script = page.locator("#settingsSecurityScripts")
                     delegate = page.locator("#settingsSecurityDelegate")
                     save = page.locator("#settingsSecurityProfileSave")
                     info = page.locator("#settingsSecurityStatus")
                     expect(script).to_be_visible()
+                    expect(profile).to_have_value("strict")
                     expect(script).not_to_be_checked()
+                    profile.select_option("local_controlled")
                     script.check()
                     page.evaluate("() => refreshSecurityStatus(true)")
                     expect(script).to_be_checked()
@@ -104,6 +107,7 @@ def main():
                     expect(save).to_be_disabled()
                     page.evaluate("() => saveSecurityProfile()")
                     assert len(writes) == 2
+                    assert all(write["profile"] == "local_controlled" for write in writes)
                     for route, data in held:
                         respond(route, data)
                     held.clear()
@@ -124,7 +128,13 @@ def main():
                     expect(save).to_be_disabled()
                     expect(delegate).to_be_disabled()
                     assert not errors, errors
-                    results.append({"width": width, "writes": len(writes), "passed": True})
+                    results.append({
+                        "width": width,
+                        "failed_writes": 1,
+                        "successful_writes": 1,
+                        "profile": "local_controlled",
+                        "passed": True,
+                    })
                     context.close()
             finally:
                 browser.close()

@@ -1,14 +1,206 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const test = require("node:test");
 const path = require("node:path");
 
 const {
+  applyPersistedWindowsSecuritySettings,
   buildWindowsRuntimeEnvironment,
   requiredWindowsRuntimeFiles,
   resolveWindowsRuntimeLayout,
   windowsRuntimeCommands,
 } = require("../src/windows-runtime");
+
+test("Windows restart loads only validated persisted security settings", (t) => {
+  const runtimeHome = fs.mkdtempSync(path.join(os.tmpdir(), "taiji-security-runtime-"));
+  t.after(() => fs.rmSync(runtimeHome, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(runtimeHome, "security-settings.json"),
+    JSON.stringify({
+      schema: "taiji-security-settings/v1",
+      profile: "local_controlled",
+      capabilities: {
+        unapproved_skill_scripts: true,
+        delegate_task: false,
+      },
+    }),
+  );
+  const env = {
+    TAIJI_SECURITY_PROFILE: "strict",
+    TAIJI_SECURITY_MODE: "restricted",
+    TAIJI_ALLOW_TERMINAL: "0",
+    TAIJI_ALLOW_EXECUTE_CODE: "0",
+    TAIJI_ALLOW_DELEGATE_TASK: "1",
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS: "0",
+  };
+
+  const result = applyPersistedWindowsSecuritySettings(env, { runtimeHome });
+
+  assert.deepEqual(result, {
+    profile: "local_controlled",
+    capabilities: {
+      unapproved_skill_scripts: true,
+      delegate_task: false,
+    },
+  });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "local_controlled");
+  assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "1");
+});
+
+test("Windows runtime builder applies the persisted security settings", () => {
+  const layout = resolveWindowsRuntimeLayout({
+    installRoot: "C:\\Program Files\\Taiji Agent",
+    localAppData: "C:\\Users\\Customer\\AppData\\Local",
+  });
+  const payload = JSON.stringify({
+    schema: "taiji-security-settings/v1",
+    profile: "local_controlled",
+    capabilities: {
+      unapproved_skill_scripts: false,
+      delegate_task: true,
+    },
+  });
+  const fsModule = {
+    lstatSync() {
+      return {
+        isFile: () => true,
+        isSymbolicLink: () => false,
+        nlink: 1,
+        size: Buffer.byteLength(payload),
+      };
+    },
+    readFileSync() {
+      return payload;
+    },
+  };
+
+  const env = buildWindowsRuntimeEnvironment({
+    baseEnv: {
+      SystemRoot: "C:\\Windows",
+      TAIJI_ACCOUNT_HOME: "C:\\Users\\Customer",
+    },
+    layout,
+    agentPort: 18642,
+    webuiPort: 18787,
+    desktopAccessToken: "desktop-token",
+    apiServerKey: "api-key",
+    fsModule,
+  });
+
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "local_controlled");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "1");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+});
+
+test("Windows runtime fails closed for malformed persisted security settings", (t) => {
+  const runtimeHome = fs.mkdtempSync(path.join(os.tmpdir(), "taiji-security-runtime-"));
+  t.after(() => fs.rmSync(runtimeHome, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(runtimeHome, "security-settings.json"),
+    JSON.stringify({
+      schema: "taiji-security-settings/v1",
+      profile: "full",
+      capabilities: {
+        unapproved_skill_scripts: true,
+        delegate_task: true,
+      },
+    }),
+  );
+  const env = {
+    TAIJI_SECURITY_PROFILE: "full",
+    TAIJI_SECURITY_MODE: "full",
+    TAIJI_ALLOW_TERMINAL: "1",
+    TAIJI_ALLOW_EXECUTE_CODE: "1",
+    TAIJI_ALLOW_DELEGATE_TASK: "1",
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS: "1",
+  };
+
+  const result = applyPersistedWindowsSecuritySettings(env, { runtimeHome });
+
+  assert.deepEqual(result, {
+    profile: "strict",
+    capabilities: {
+      unapproved_skill_scripts: false,
+      delegate_task: false,
+    },
+  });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
+  assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+});
+
+test("Windows runtime fails closed when the settings file disappears during read", () => {
+  const env = {
+    TAIJI_SECURITY_PROFILE: "local_controlled",
+    TAIJI_SECURITY_MODE: "restricted",
+    TAIJI_ALLOW_TERMINAL: "1",
+    TAIJI_ALLOW_EXECUTE_CODE: "1",
+    TAIJI_ALLOW_DELEGATE_TASK: "1",
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS: "1",
+  };
+  const fsModule = {
+    lstatSync() {
+      return {
+        isFile: () => true,
+        isSymbolicLink: () => false,
+        nlink: 1,
+        size: 128,
+      };
+    },
+    readFileSync() {
+      const error = new Error("settings disappeared during read");
+      error.code = "ENOENT";
+      throw error;
+    },
+  };
+
+  const result = applyPersistedWindowsSecuritySettings(env, {
+    runtimeHome: "C:\\Users\\Customer\\AppData\\Local\\Taiji Agent\\runtime-home",
+    fsModule,
+  });
+
+  assert.deepEqual(result, {
+    profile: "strict",
+    capabilities: {
+      unapproved_skill_scripts: false,
+      delegate_task: false,
+    },
+  });
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "0");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "0");
+  assert.equal(env.TAIJI_ALLOW_DELEGATE_TASK, "0");
+  assert.equal(env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS, "0");
+});
+
+test("Windows source development keeps its validated profile when no saved file exists", (t) => {
+  const runtimeHome = fs.mkdtempSync(path.join(os.tmpdir(), "taiji-security-runtime-"));
+  t.after(() => fs.rmSync(runtimeHome, { recursive: true, force: true }));
+  const env = {
+    TAIJI_SECURITY_PROFILE: "local_controlled",
+    TAIJI_SECURITY_MODE: "restricted",
+    TAIJI_ALLOW_TERMINAL: "1",
+    TAIJI_ALLOW_EXECUTE_CODE: "1",
+    TAIJI_ALLOW_DELEGATE_TASK: "0",
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS: "0",
+  };
+
+  const result = applyPersistedWindowsSecuritySettings(env, { runtimeHome });
+
+  assert.equal(result.profile, "local_controlled");
+  assert.equal(env.TAIJI_ALLOW_TERMINAL, "1");
+  assert.equal(env.TAIJI_ALLOW_EXECUTE_CODE, "1");
+});
 
 test("Windows layout stays under install root and LOCALAPPDATA", () => {
   const layout = resolveWindowsRuntimeLayout({
@@ -96,6 +288,8 @@ test("Windows environment is private and omits license path overrides", () => {
     apiServerKey: "api-key",
   });
   assert.equal(env.TAIJI_WINDOWS_CANDIDATE, "1");
+  assert.equal(env.TAIJI_SECURITY_PROFILE, "strict");
+  assert.equal(env.TAIJI_SECURITY_MODE, "restricted");
   assert.equal(env.TAIJI_RUNTIME_HOME, "D:\\Poisoned\\AppData\\Local\\Taiji Agent\\runtime-home");
   assert.equal(env.TAIJI_STATE_DIR, layout.stateDir);
   assert.equal(env.TAIJI_AGENT_USE_USER_DIRS, "1");

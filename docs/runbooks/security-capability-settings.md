@@ -19,8 +19,10 @@
 
 省略能力或其中的字段时，原子写入只更新请求指定字段，保留磁盘上已有选择，不能用当前进程旧值覆盖待生效设置。缺省关闭由启动链保证。保存不修改当前进程环境。
 
+Windows 桌面候选不使用仅支持 POSIX 原子语义的凭据事务写入器保存安全设置。它将基础策略和两项扩展能力写入 `%LOCALAPPDATA%\Taiji Agent\runtime-home\security-settings.json`；该文件只接受固定 schema、`strict` / `local_controlled` 和两个严格布尔能力字段，不包含 API Key 或其它凭据。写入使用同目录临时文件和原子替换，失败时保留旧文件并清理临时文件。Windows 启动器在创建 Agent/WebUI 子进程环境前读取该文件；首次没有文件时沿用已经规范化的启动策略，正式候选仍默认为企业安全；超限、符号链接、硬链接、格式错误、未知字段或 `full` 均按企业安全且扩展关闭处理。macOS/Linux 继续通过 canonical `.env` 事务保存。
+
 `GET /api/security/status` 保留原生效状态字段，新增 `configured: {profile, capabilities}` 表示已保存选择；`restart_required` 比较基础策略和两项能力，兼容保留 `pending_profile`。保存响应中的 `status` 同样区分生效与保存状态。
 
 ## 验收边界
 
-以配置保存、启动规范化、Agent 权限门禁、浏览器交互分层验证。源码测试不能证明麒麟新安装包已经更新；制包与目标机验收单独授权。
+以配置保存、启动规范化、Agent 权限门禁、浏览器交互分层验证。Windows 还需在真实候选安装态覆盖“保存 → 完全退出 → 双击重开 → 状态生效”；源码测试不能证明 Windows 或麒麟新安装包已经更新，制包与目标机验收单独授权。

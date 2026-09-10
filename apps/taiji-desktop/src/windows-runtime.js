@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("node:fs");
 const path = require("node:path");
 
 const PRIVATE_LAB_SEGMENT = "her" + "mes-local-lab";
@@ -10,6 +11,80 @@ const LICENSE_PATH_OVERRIDE_NAMES = new Set([
   "TAIJI_LICENSE_FILE",
   "TAIJI_LICENSE_STATE_FILE",
 ]);
+const SECURITY_SETTINGS_NAME = "security-settings.json";
+const SECURITY_SETTINGS_SCHEMA = "taiji-security-settings/v1";
+const SECURITY_SETTINGS_MAX_BYTES = 4096;
+
+function strictSecuritySettings() {
+  return {
+    profile: "strict",
+    capabilities: {
+      unapproved_skill_scripts: false,
+      delegate_task: false,
+    },
+  };
+}
+
+function currentWindowsSecuritySettings(env) {
+  const requested = String(env.TAIJI_SECURITY_PROFILE || "").trim();
+  const profile = ["strict", "local_controlled", "full"].includes(requested) ? requested : "strict";
+  const enabled = (name) => /^(1|true|yes|on|y)$/i.test(String(env[name] || "").trim());
+  return {
+    profile,
+    capabilities: {
+      unapproved_skill_scripts: enabled("TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS"),
+      delegate_task: enabled("TAIJI_ALLOW_DELEGATE_TASK"),
+    },
+  };
+}
+
+function readPersistedWindowsSecuritySettings({ runtimeHome, fsModule = fs }) {
+  const settingsPath = path.join(runtimeHome, SECURITY_SETTINGS_NAME);
+  let metadata;
+  try {
+    metadata = fsModule.lstatSync(settingsPath);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return undefined;
+    return null;
+  }
+  try {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) return null;
+    if (metadata.size < 1 || metadata.size > SECURITY_SETTINGS_MAX_BYTES) return null;
+    const parsed = JSON.parse(fsModule.readFileSync(settingsPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (Object.keys(parsed).sort().join(",") !== "capabilities,profile,schema") return null;
+    if (parsed.schema !== SECURITY_SETTINGS_SCHEMA) return null;
+    if (parsed.profile !== "strict" && parsed.profile !== "local_controlled") return null;
+    const capabilities = parsed.capabilities;
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return null;
+    if (Object.keys(capabilities).sort().join(",") !== "delegate_task,unapproved_skill_scripts") return null;
+    if (typeof capabilities.delegate_task !== "boolean" || typeof capabilities.unapproved_skill_scripts !== "boolean") return null;
+    return {
+      profile: parsed.profile,
+      capabilities: {
+        unapproved_skill_scripts: capabilities.unapproved_skill_scripts,
+        delegate_task: capabilities.delegate_task,
+      },
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function applyPersistedWindowsSecuritySettings(env, options) {
+  const persisted = readPersistedWindowsSecuritySettings(options);
+  const settings = persisted === undefined
+    ? currentWindowsSecuritySettings(env)
+    : (persisted || strictSecuritySettings());
+  const localControlled = settings.profile === "local_controlled";
+  env.TAIJI_SECURITY_PROFILE = settings.profile;
+  env.TAIJI_SECURITY_MODE = settings.profile === "full" ? "full" : "restricted";
+  env.TAIJI_ALLOW_TERMINAL = (localControlled || settings.profile === "full") ? "1" : "0";
+  env.TAIJI_ALLOW_EXECUTE_CODE = (localControlled || settings.profile === "full") ? "1" : "0";
+  env.TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS = settings.capabilities.unapproved_skill_scripts ? "1" : "0";
+  env.TAIJI_ALLOW_DELEGATE_TASK = settings.capabilities.delegate_task ? "1" : "0";
+  return settings;
+}
 
 function deleteLicensePathOverrides(env) {
   for (const key of Object.keys(env)) {
@@ -89,6 +164,7 @@ function buildWindowsRuntimeEnvironment({
   webuiPort,
   desktopAccessToken,
   apiServerKey,
+  fsModule = fs,
 }) {
   const env = { ...baseEnv };
   deleteLicensePathOverrides(env);
@@ -156,10 +232,16 @@ function buildWindowsRuntimeEnvironment({
     TMPDIR: layout.tmpDir,
   });
 
+  applyPersistedWindowsSecuritySettings(env, {
+    runtimeHome: layout.runtimeHome,
+    fsModule,
+  });
+
   return env;
 }
 
 module.exports = {
+  applyPersistedWindowsSecuritySettings,
   buildWindowsRuntimeEnvironment,
   requiredWindowsRuntimeFiles,
   resolveWindowsRuntimeLayout,

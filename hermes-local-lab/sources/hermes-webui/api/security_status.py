@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import stat
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +14,11 @@ from typing import Any
 _TRUTHY = {"1", "true", "yes", "on", "y"}
 _PROFILE_CHOICES = {"strict", "local_controlled"}
 _EXTENSION_KEYS = {"unapproved_skill_scripts", "delegate_task"}
+_WINDOWS_SETTINGS_NAME = "security-settings.json"
+_WINDOWS_SETTINGS_SCHEMA = "taiji-security-settings/v1"
+_WINDOWS_SETTINGS_MAX_BYTES = 4096
+_WINDOWS_SETTINGS_LOCK = threading.RLock()
+_WINDOWS_SETTINGS_INVALID = object()
 _CONTROLLED_ALLOW_VARS = {
     "terminal": "TAIJI_ALLOW_TERMINAL",
     "execute_code": "TAIJI_ALLOW_EXECUTE_CODE",
@@ -123,9 +132,131 @@ def _env_file() -> Path:
     return _runtime_home() / ".env"
 
 
+def _windows_security_store_enabled() -> bool:
+    return os.name == "nt" or os.environ.get("TAIJI_WINDOWS_CANDIDATE") == "1"
+
+
+def _windows_settings_file() -> Path:
+    return _runtime_home() / _WINDOWS_SETTINGS_NAME
+
+
+def _read_windows_security_settings() -> dict[str, Any] | None | object:
+    path = _windows_settings_file()
+    try:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size > _WINDOWS_SETTINGS_MAX_BYTES
+        ):
+            return _WINDOWS_SETTINGS_INVALID
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return _WINDOWS_SETTINGS_INVALID
+    if len(payload) > _WINDOWS_SETTINGS_MAX_BYTES:
+        return _WINDOWS_SETTINGS_INVALID
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return _WINDOWS_SETTINGS_INVALID
+    if not isinstance(parsed, dict) or set(parsed) != {"schema", "profile", "capabilities"}:
+        return _WINDOWS_SETTINGS_INVALID
+    capabilities = parsed.get("capabilities")
+    if (
+        parsed.get("schema") != _WINDOWS_SETTINGS_SCHEMA
+        or parsed.get("profile") not in _PROFILE_CHOICES
+        or not isinstance(capabilities, dict)
+        or set(capabilities) != _EXTENSION_KEYS
+        or any(type(capabilities[key]) is not bool for key in _EXTENSION_KEYS)
+    ):
+        return _WINDOWS_SETTINGS_INVALID
+    return {
+        "profile": parsed["profile"],
+        "capabilities": {key: capabilities[key] for key in sorted(_EXTENSION_KEYS)},
+    }
+
+
+def _write_windows_security_settings(values: dict[str, str]) -> Path:
+    path = _windows_settings_file()
+    with _WINDOWS_SETTINGS_LOCK:
+        existing = _read_windows_security_settings()
+        if isinstance(existing, dict):
+            capabilities = dict(existing["capabilities"])
+        elif existing is _WINDOWS_SETTINGS_INVALID:
+            capabilities = {key: False for key in _EXTENSION_KEYS}
+        else:
+            capabilities = {
+                key: _env_flag(_CONTROLLED_ALLOW_VARS[key])
+                for key in _EXTENSION_KEYS
+            }
+        for key in _EXTENSION_KEYS:
+            allow_var = _CONTROLLED_ALLOW_VARS[key]
+            if allow_var in values:
+                capabilities[key] = values[allow_var] == "1"
+        payload = (
+            json.dumps(
+                {
+                    "schema": _WINDOWS_SETTINGS_SCHEMA,
+                    "profile": values["TAIJI_SECURITY_PROFILE"],
+                    "capabilities": {
+                        key: capabilities[key]
+                        for key in sorted(_EXTENSION_KEYS)
+                    },
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or path.is_symlink():
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("Windows security settings target is unsafe")
+        stage = path.parent / f".{_WINDOWS_SETTINGS_NAME}.{uuid.uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0)
+        file_descriptor = os.open(stage, flags, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(file_descriptor, view)
+                if written <= 0:  # pragma: no cover - OS write contract.
+                    raise OSError("Windows security settings write made no progress")
+                view = view[written:]
+            os.fsync(file_descriptor)
+        except BaseException:
+            os.close(file_descriptor)
+            stage.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(file_descriptor)
+        try:
+            os.replace(stage, path)
+        except BaseException:
+            stage.unlink(missing_ok=True)
+            raise
+    return path
+
+
 def _persisted_security_settings() -> dict[str, Any] | None:
     """Return a canonical restart-pending profile without exposing env contents."""
     if os.environ.get("TAIJI_DESKTOP_ONLY") != "1":
+        return None
+    if _windows_security_store_enabled():
+        settings = _read_windows_security_settings()
+        if isinstance(settings, dict):
+            return settings
+        if settings is _WINDOWS_SETTINGS_INVALID:
+            return {
+                "profile": "strict",
+                "capabilities": {
+                    key: False for key in sorted(_EXTENSION_KEYS)
+                },
+            }
         return None
     try:
         from agent.provider_credentials import load_credential_snapshot
@@ -157,6 +288,8 @@ def _persisted_security_settings() -> dict[str, Any] | None:
 
 
 def _write_env(values: dict[str, str]) -> Path:
+    if _windows_security_store_enabled():
+        return _write_windows_security_settings(values)
     from agent.provider_credentials import mutate_env_unique
 
     runtime_home = _runtime_home()

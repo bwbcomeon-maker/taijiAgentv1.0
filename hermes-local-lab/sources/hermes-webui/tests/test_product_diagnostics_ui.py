@@ -67,7 +67,7 @@ def test_security_profile_failure_uses_allowlisted_product_copy():
     assert "productError.title" in function
     assert "productError.message" in function
     assert "e&&e.message" not in function
-    assert "安全模式保存失败，请重试。" in function
+    assert "安全设置保存失败，请重试。" in function
 
 
 def test_security_profile_uses_plain_labels_and_preserves_pending_restart_state():
@@ -75,15 +75,14 @@ def test_security_profile_uses_plain_labels_and_preserves_pending_restart_state(
     ui = read("static/ui.js")
     function = ui[ui.index("async function saveSecurityProfile()") : ui.index("function startSecurityStatusMonitor()")]
 
-    assert "企业安全（推荐）" in html
+    assert '<option value="strict">企业安全</option>' in html
     assert "本机调试（仅开发人员）" in html
-    assert "_securityPendingProfile" in ui
-    assert "result.pending_profile" in function
+    assert "_securityDraft" in ui
+    assert "_securityConfigured(data)" in ui
     assert "data.pending_profile" in ui
-    assert "const savedProfile=" in function
     assert "const restartRequired=" in function
-    assert "restartRequired?savedProfile:null" in function
-    assert "_securityProfileLabel(savedProfile)" in function
+    assert "result&&result.status" in function
+    assert "renderSecurityStatus(result.status)" in function
     assert "关闭并重新打开" in function
     assert "无需重新打开应用" in function
     assert "restartRequired?'warning':'success'" in function
