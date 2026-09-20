@@ -29,8 +29,8 @@
         </label>
 
         <label class="field">
-          <span>功能包</span>
-          <input id="features" name="features" value="chat,writing" required>
+          <span>授权产品</span>
+          <input id="productStatus" name="productStatus" value="待识别" readonly aria-readonly="true" title="选择机器码文件后自动识别，无需手动填写">
         </label>
 
         <label class="field">
@@ -79,8 +79,13 @@
           <div><dt>客户</dt><dd>-</dd></div>
           <div><dt>起始</dt><dd>-</dd></div>
           <div><dt>到期</dt><dd>-</dd></div>
-          <div><dt>功能</dt><dd>-</dd></div>
+          <div><dt>产品</dt><dd>-</dd></div>
         </dl>
+      </section>
+
+      <section class="panel-section" id="machineListSection" hidden>
+        <h2>已选机器</h2>
+        <ul id="machineList" class="machine-list"></ul>
       </section>
 
       <section class="panel-section">

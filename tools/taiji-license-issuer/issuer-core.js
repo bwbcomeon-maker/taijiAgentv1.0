@@ -14,6 +14,30 @@ const MACHINE_REQUEST_TYPE = "taiji_machine_license_request";
 const MACHINE_CODE_RE = /^sha256:[0-9a-f]{64}$/;
 const ACTIVATION_MODE_OFFLINE_MACHINE_FILE = "offline_machine_file";
 const BLOCKING_RISK_FLAGS = new Set(["no_device_secret", "device_secret_unavailable", "no_stable_hardware"]);
+const REQUIRED_FEATURES_FIELD = "required_features";
+const REQUIRED_FEATURES_INTERNAL_FIELD = "requiredFeatures";
+
+// 产品识别表：机器请求声明 -> 授权标签只允许这里的已知映射，不照抄请求标签。
+// 两个产品共用 product/aud = taiji-agent 线协议，产品只能由 required_features 判定。
+const PRODUCT_LICENSES = [
+  {
+    productId: "kongtian_agent",
+    productName: "国网空天智能体",
+    knownFeatures: new Set(["kongtian_agent"]),
+    features: ["kongtian_agent"],
+  },
+  {
+    productId: "taiji_agent",
+    productName: "太极智能体",
+    knownFeatures: new Set(["chat", "writing"]),
+    features: ["chat", "writing"],
+  },
+];
+const LEGACY_TAIJI_LICENSE = {
+  productId: "taiji_agent",
+  productName: "太极智能体",
+  features: ["chat", "writing"],
+};
 
 function isoUtc(date) {
   return date.toISOString().replace(".000Z", "Z");
@@ -57,17 +81,73 @@ function parseDays(value) {
   return days;
 }
 
-function parseFeatures(value) {
-  const features = Array.isArray(value)
-    ? value.map((item) => String(item).trim()).filter(Boolean)
-    : String(value || "")
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
-  if (!features.length) {
-    throw new Error("功能包不能为空");
+// 读取机器请求中的产品声明。字段缺失返回 undefined（旧太极格式，允许兼容回退）；
+// 字段存在但结构无效（null、非数组、空数组、非字符串或纯空白成员）直接拒绝。
+function extractRequiredFeatures(value) {
+  const hasExternal = value[REQUIRED_FEATURES_FIELD] !== undefined;
+  const hasInternal = value[REQUIRED_FEATURES_INTERNAL_FIELD] !== undefined;
+  if (!hasExternal && !hasInternal) {
+    return undefined;
   }
-  return features;
+  const declarations = [];
+  if (hasExternal) {
+    declarations.push(normalizeFeatureDeclaration(value[REQUIRED_FEATURES_FIELD]));
+  }
+  if (hasInternal) {
+    declarations.push(normalizeFeatureDeclaration(value[REQUIRED_FEATURES_INTERNAL_FIELD]));
+  }
+  if (declarations.length === 2 && declarations[0].join(",") !== declarations[1].join(",")) {
+    throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 与 ${REQUIRED_FEATURES_INTERNAL_FIELD} 声明不一致`);
+  }
+  return declarations[0];
+}
+
+function normalizeFeatureDeclaration(declaration) {
+  if (declaration === null || typeof declaration !== "object" || !Array.isArray(declaration)) {
+    throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 声明无效：需为字符串数组`);
+  }
+  const labels = [];
+  for (const item of declaration) {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 声明无效：需为字符串数组`);
+    }
+    labels.push(item.trim());
+  }
+  const unique = [...new Set(labels)];
+  if (!unique.length) {
+    throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 声明无效：不能为空数组`);
+  }
+  return unique;
+}
+
+// 统一产品识别：输入原始或已规范化的机器请求均可，结果只来自已知映射。
+function resolveProductLicense(machineRequest) {
+  const normalized = normalizeMachineRequest(machineRequest);
+  const declared = normalized.requiredFeatures;
+  if (declared === undefined) {
+    return {
+      ...LEGACY_TAIJI_LICENSE,
+      basis: "缺少 required_features（旧版机器码，按太极兼容处理）",
+    };
+  }
+  const matches = PRODUCT_LICENSES.filter(
+    (license) => declared.every((label) => license.knownFeatures.has(label)),
+  );
+  if (matches.length === 1) {
+    const license = matches[0];
+    return {
+      productId: license.productId,
+      productName: license.productName,
+      features: [...license.features],
+      basis: `required_features=[${declared.join(",")}]`,
+    };
+  }
+  const knownLabels = new Set(PRODUCT_LICENSES.flatMap((license) => [...license.knownFeatures]));
+  const unknown = declared.filter((label) => !knownLabels.has(label));
+  if (unknown.length) {
+    throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 含不支持的产品标签：${unknown.join(",")}`);
+  }
+  throw new Error(`机器码文件 ${REQUIRED_FEATURES_FIELD} 声明冲突：混合了多个产品的标签`);
 }
 
 function resolvePrivateKeyPath(options = {}) {
@@ -182,7 +262,8 @@ function normalizeMachineRequest(value) {
     throw new Error(`机器码质量不足，不能签发离线授权：${blockingRisk}`);
   }
   const machineLabel = String(value.machine_label || value.machineLabel || value.terminal_note || value.hostname || "").trim();
-  return {
+  const requiredFeatures = extractRequiredFeatures(value);
+  const normalized = {
     schemaVersion: Number(value.schema_version || value.schemaVersion || 0),
     requestId: String(value.request_id || value.requestId || "").trim(),
     requestType: String(value.request_type || value.requestType || MACHINE_REQUEST_TYPE).trim(),
@@ -200,6 +281,11 @@ function normalizeMachineRequest(value) {
     generatedAt: String(value.generated_at || value.generatedAt || "").trim(),
     sourcePath: value.sourcePath || "",
   };
+  // 旧格式没有产品声明时保持字段缺失，识别层才能区分“缺失”与“无效”。
+  if (requiredFeatures !== undefined) {
+    normalized.requiredFeatures = requiredFeatures;
+  }
+  return normalized;
 }
 
 function machineRequestFromOptions(options) {
@@ -218,10 +304,14 @@ function machineRequestFromOptions(options) {
   });
 }
 
+function stripUtf8Bom(content) {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
 function parseMachineRequest(content, sourcePath = "") {
   let data;
   try {
-    data = JSON.parse(String(content || ""));
+    data = JSON.parse(stripUtf8Bom(String(content || "")));
   } catch (_) {
     throw new Error("机器码文件不是合法 JSON");
   }
@@ -272,12 +362,15 @@ function issueLicense(options) {
     throw new Error("客户名称不能为空");
   }
   const days = parseDays(options.days);
-  const features = parseFeatures(options.features);
   const privateKeyPem = String(options.privateKeyPem || "").trim();
   if (!privateKeyPem) {
     throw new Error("发证私钥未安装");
   }
   const machineRequest = machineRequestFromOptions(options);
+  // 授权标签只来自机器请求的产品声明；options.features 不再参与本链路，
+  // 即使旧调用方仍传入默认值也不能覆盖识别结果。
+  const productLicense = resolveProductLicense(machineRequest);
+  const features = productLicense.features;
 
   const now = options.now ? new Date(options.now) : new Date();
   if (Number.isNaN(now.getTime())) {
@@ -320,6 +413,7 @@ function issueLicense(options) {
   return {
     token,
     payload,
+    productLicense,
     tokenHash: `sha256:${sha256Hex(token)}`,
   };
 }
@@ -381,10 +475,14 @@ function appendIssueRecord(recordPath, record) {
 }
 
 function recordForIssue({ result, outputPath, now, machineRequest }) {
+  const productLicense = result.productLicense;
   return {
     generated_at: isoUtc(now),
     license_id: result.payload.license_id,
     customer: result.payload.customer,
+    product_id: productLicense ? productLicense.productId : "",
+    product_name: productLicense ? productLicense.productName : "",
+    recognition_basis: productLicense ? productLicense.basis : "",
     not_before: result.payload.not_before,
     expires_at: result.payload.expires_at,
     features: result.payload.features,
@@ -518,6 +616,16 @@ function issueBatchZip(options) {
     }
     seenCodes.set(request.machineCode, request);
   }
+  // 签发前对整批逐份完成产品识别预检查：任何一份异常都整批拒绝并指出出错文件，
+  // 不写出 ZIP、不追加任何成功记录。
+  machineRequests.forEach((request) => {
+    try {
+      resolveProductLicense(request);
+    } catch (err) {
+      const filePart = request.sourcePath ? path.basename(request.sourcePath) : request.machineCodeShort;
+      throw new Error(`${filePart}：${err.message}`);
+    }
+  });
   const privateKeyPath = options.privateKeyPath || resolvePrivateKeyPath();
   const privateKeyPem = readPrivateKey(privateKeyPath);
   const now = options.now ? new Date(options.now) : new Date();
@@ -549,7 +657,7 @@ function issueBatchZip(options) {
       days: options.days,
       now,
     });
-    files.push({ name: fileName, content: `${result.token}\n`, payload: result.payload, tokenHash: result.tokenHash });
+    files.push({ name: fileName, content: `${result.token}\n`, payload: result.payload, productLicense: result.productLicense, tokenHash: result.tokenHash });
     records.push(
       recordForIssue({
         result,
@@ -576,6 +684,9 @@ function issueBatchZip(options) {
       name: file.name,
       license_id: file.payload.license_id,
       machine_code_short: machineCodeShort(file.payload.machine_code),
+      product_id: file.productLicense.productId,
+      product_name: file.productLicense.productName,
+      features: file.payload.features,
       tokenHash: file.tokenHash,
     })),
   };
@@ -591,11 +702,11 @@ module.exports = {
   issueLicense,
   licenseFileName,
   normalizeMachineRequest,
-  parseFeatures,
   parseMachineRequest,
   parseUtcDate,
   readMachineRequestDirectory,
   readMachineRequestFile,
   resolvePrivateKeyPath,
+  resolveProductLicense,
   resolvePublicKeyPath,
 };

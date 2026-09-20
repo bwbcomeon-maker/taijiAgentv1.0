@@ -223,6 +223,31 @@ button:disabled {
   gap: 10px;
 }
 
+input[readonly] {
+  background: #f2f6f8;
+  color: var(--muted);
+  cursor: default;
+}
+
+.machine-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 13px;
+  color: #2d3b46;
+}
+
+.machine-list li {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  background: #fbfdfe;
+  word-break: break-word;
+}
+
 dt {
   color: var(--muted);
   font-size: 13px;

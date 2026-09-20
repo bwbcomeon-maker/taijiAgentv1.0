@@ -12,6 +12,18 @@ function safeError(err) {
   return err && err.message ? err.message : String(err);
 }
 
+// 为每份机器请求附加只读产品识别结果供界面展示。
+// 必须用独立字段名：请求对象的 product 是线协议字段（taiji-agent），
+// 不能被展示数据覆盖，否则签发时规范化会按产品不匹配拒绝。
+// 签发时核心会重新规范化并重新识别，不信任界面传回的这份展示数据。
+function withProductRecognition(request) {
+  return { ...request, productRecognition: core.resolveProductLicense(request) };
+}
+
+function requestLabel(request) {
+  return path.basename(String(request.sourcePath || "")) || request.machineCodeShort || "-";
+}
+
 function defaultOutputPath() {
   return path.join(app.getPath("desktop") || os.homedir(), "license.jwt");
 }
@@ -106,7 +118,7 @@ ipcMain.handle("issuer:choose-machine-request", async () => {
   }
   try {
     const request = core.readMachineRequestFile(result.filePaths[0]);
-    return { canceled: false, filePath: result.filePaths[0], requests: [request] };
+    return { canceled: false, filePath: result.filePaths[0], requests: [withProductRecognition(request)] };
   } catch (err) {
     return { canceled: false, ok: false, error: safeError(err), filePath: result.filePaths[0], requests: [] };
   }
@@ -122,7 +134,21 @@ ipcMain.handle("issuer:choose-machine-request-dir", async () => {
   }
   try {
     const requests = core.readMachineRequestDirectory(result.filePaths[0]);
-    return { canceled: false, dirPath: result.filePaths[0], requests };
+    // 目录内逐份识别并做重复机器码预检查：任何一份异常都整批拒绝并指出出错文件。
+    const decorated = [];
+    const seenCodes = new Map();
+    for (const request of requests) {
+      if (seenCodes.has(request.machineCode)) {
+        throw new Error(`${requestLabel(request)}：检测到重复机器码 ${seenCodes.get(request.machineCode)}`);
+      }
+      seenCodes.set(request.machineCode, request.machineCodeShort || "-");
+      try {
+        decorated.push(withProductRecognition(request));
+      } catch (err) {
+        throw new Error(`${requestLabel(request)}：${safeError(err)}`);
+      }
+    }
+    return { canceled: false, dirPath: result.filePaths[0], requests: decorated };
   } catch (err) {
     return { canceled: false, ok: false, error: safeError(err), dirPath: result.filePaths[0], requests: [] };
   }
@@ -138,7 +164,6 @@ ipcMain.handle("issuer:generate", async (_event, form) => {
     const common = {
       customer: form.customer,
       days: Number(form.days),
-      features: form.features,
       licenseId: form.licenseId,
       notBefore: form.notBefore,
       maxVersion: form.maxVersion,
@@ -155,6 +180,7 @@ ipcMain.handle("issuer:generate", async (_event, form) => {
       publicKeyPath: core.resolvePublicKeyPath({ privateKeyPath }),
       recordPath: result.recordPath,
       payload: result.payload || null,
+      product: result.productLicense || null,
       tokenHash: result.tokenHash || null,
       files: result.files || [],
     };
